@@ -91,9 +91,8 @@ export function PriceChart({ refreshSignal = 0, serverSlug = 'all' }) {
       })
       .then((data) => {
         const normalized = normalizePoints(data)
-        if (normalized.length < 20) {
-          const base = normalized[normalized.length - 1]?.price ?? 1
-          setPoints(buildFallback7d(base))
+        if (normalized.length === 0) {
+          setPoints(buildFallback7d(1))
           return
         }
         setPoints(normalized)
