@@ -1,4 +1,5 @@
 import styles from './OffersTable.module.css'
+import { normalizeServer } from '../utils/server'
 
 // Цвета фракций
 const FACTION_COLOR = {
@@ -9,6 +10,7 @@ const FACTION_COLOR = {
 // Метки платформ — source как читаемое имя + акцентный цвет
 const SOURCE_META = {
   fanpay:   { label: 'FanPay',   color: '#f59e0b' },
+  funpay:   { label: 'FunPay',   color: '#22c55e' },
   g2g:      { label: 'G2G',      color: '#a78bfa' },
   eldorado: { label: 'Eldorado', color: '#34d399' },
 }
@@ -124,7 +126,7 @@ export function OffersTable({ offers, loading, error }) {
 
                 {/* Сервер + Фракция в одной ячейке */}
                 <td className={styles.serverCell}>
-                  <span className={styles.server}>{offer.server}</span>
+                  <span className={styles.server}>{normalizeServer(offer.server).label}</span>
                   <span
                     className={styles.faction}
                     style={{ color: FACTION_COLOR[offer.faction] ?? 'var(--text-secondary)' }}

@@ -2,6 +2,7 @@ import { useRef, useState, useEffect } from 'react'
 import { Routes, Route, useNavigate, useParams, Navigate } from 'react-router-dom'
 import { useOffers } from './hooks/useOffers'
 import { fetchOffers } from './api/offers'
+import { normalizeServer } from './utils/server'
 import { FiltersBar } from './components/FiltersBar'
 import { OffersTable } from './components/OffersTable'
 import { RefreshButton } from './components/RefreshButton'
@@ -24,8 +25,8 @@ function useDefaultServer() {
     fetchOffers({ limit: 50, sort_by: 'price' })
       .then((offers) => {
         if (cancelled) return
-        const first = offers[0]?.server
-        setServer(first || FALLBACK_SERVER)
+        const rawServer = offers[0]?.server
+        setServer(rawServer ? normalizeServer(rawServer).slug : FALLBACK_SERVER)
       })
       .catch(() => {
         if (!cancelled) setServer(FALLBACK_SERVER)
