@@ -1,4 +1,4 @@
-const BASE = '/api'
+const API_BASE = 'https://scintillating-flexibility-production-809a.up.railway.app'
 
 /**
  * @typedef {Object} Offer
@@ -37,7 +37,7 @@ export async function fetchOffers(filters = {}) {
   }
 
   const qs = params.toString()
-  const url = `${BASE}/offers${qs ? `?${qs}` : ''}`
+  const url = `${API_BASE}/offers${qs ? `?${qs}` : ''}`
 
   const res = await fetch(url)
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
@@ -59,7 +59,7 @@ export async function fetchOffers(filters = {}) {
  * @returns {Promise<PriceHistoryPoint[]>}
  */
 export async function fetchPriceHistory({ last = 100 } = {}) {
-  const url = `${BASE}/price-history?last=${last}`
+  const url = `${API_BASE}/price-history?last=${last}`
   const res = await fetch(url)
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
   const data = await res.json()
