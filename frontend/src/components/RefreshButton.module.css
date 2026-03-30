@@ -1,0 +1,46 @@
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--transition), box-shadow var(--transition);
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--accent-dim);
+  box-shadow: 0 0 8px var(--accent-glow);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.icon {
+  font-size: 16px;
+  display: inline-block;
+  line-height: 1;
+}
+
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+
+.countdown {
+  font-size: 11px;
+  color: var(--text-secondary);
+  min-width: 28px;
+  text-align: right;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

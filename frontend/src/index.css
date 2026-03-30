@@ -1,0 +1,47 @@
+/* ── Reset ─────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Design tokens ─────────────────────────────────────────── */
+:root {
+  --bg:           #0a0c0f;
+  --bg-surface:   #111318;
+  --bg-hover:     #1a1d24;
+  --border:       #1f2430;
+  --border-light: #2a3040;
+
+  --text-primary:   #e2e8f0;
+  --text-secondary: #64748b;
+  --text-muted:     #374151;
+
+  --accent:       #00ff9d;
+  --accent-dim:   rgba(0, 255, 157, 0.12);
+  --accent-glow:  rgba(0, 255, 157, 0.35);
+
+  --red:    #ff4d6a;
+  --yellow: #fbbf24;
+
+  --font-mono: 'IBM Plex Mono', monospace;
+  --font-sans: 'IBM Plex Sans', sans-serif;
+
+  --radius: 4px;
+  --transition: 120ms ease;
+}
+
+/* ── Base ───────────────────────────────────────────────────── */
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────── */
+::-webkit-scrollbar       { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
+
+/* ── Utility ────────────────────────────────────────────────── */
+.mono { font-family: var(--font-mono); }

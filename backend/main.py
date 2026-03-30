@@ -1,0 +1,48 @@
+import asyncio
+import contextlib
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from api.router import router
+from config import settings
+from service import offers_service
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+_MAX_BACKOFF_SECONDS = 60
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await offers_service.refresh()
+
+    async def refresh_loop() -> None:
+        consecutive_errors = 0
+        while True:
+            await asyncio.sleep(settings.refresh_interval_seconds)
+            try:
+                await offers_service.refresh()
+                consecutive_errors = 0
+            except Exception:
+                consecutive_errors += 1
+                backoff = min(2 ** consecutive_errors, _MAX_BACKOFF_SECONDS)
+                logger.exception(
+                    "Фоновое обновление кэша не удалось (попытка %d), retry через %d сек.",
+                    consecutive_errors, backoff,
+                )
+                await asyncio.sleep(backoff)
+
+    task = asyncio.create_task(refresh_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title="WoW Gold Market Analytics", lifespan=lifespan)
+app.include_router(router)
