@@ -1,0 +1,213 @@
+from __future__ import annotations
+
+"""
+FunPay HTML-парсер офферов WoW Classic gold.
+URL: https://funpay.com/en/chips/114/
+
+Фильтр: только data-online="1"  (продавец онлайн).
+Зависимости: httpx (уже в проекте), beautifulsoup4.
+"""
+
+import logging
+import re
+import uuid
+from datetime import datetime, timezone
+
+import httpx
+from bs4 import BeautifulSoup, Tag
+
+from api.schemas import Offer
+
+logger = logging.getLogger(__name__)
+
+SOURCE = "funpay"
+_URL = "https://funpay.com/en/chips/114/"
+
+# Минимальный браузерный User-Agent — без него FunPay отдаёт 403
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+
+# ── Утилиты парсинга текста ───────────────────────────────────────────────────
+
+def _text(node: Tag | None, selector: str) -> str:
+    """Возвращает stripped text первого совпадения или ''."""
+    if node is None:
+        return ""
+    el = node.select_one(selector)
+    return el.get_text(strip=True) if el else ""
+
+
+def _parse_float(raw: str | None) -> float | None:
+    """
+    Извлекает float из строк вида '0.48 $', '1 234.56', '0,48', '1.234,56'.
+    Стратегия: ПОСЛЕДНИЙ разделитель (точка или запятая) — дробный.
+    Возвращает None при любой ошибке.
+    """
+    if not raw:
+        return None
+    # Убираем всё кроме цифр, точки и запятой
+    cleaned = re.sub(r"[^\d.,]", "", raw)
+    if not cleaned:
+        return None
+
+    last_dot   = cleaned.rfind(".")
+    last_comma = cleaned.rfind(",")
+
+    if last_dot == -1 and last_comma == -1:
+        # Только цифры
+        pass
+    elif last_dot == -1:
+        # Только запятые: последняя — дробный разделитель
+        # Убираем тысячные запятые, последнюю → точка
+        parts = cleaned.rsplit(",", 1)
+        cleaned = parts[0].replace(",", "") + "." + parts[1]
+    elif last_comma == -1:
+        # Только точки: если их больше одной — все кроме последней тысячные
+        parts = cleaned.split(".")
+        if len(parts) > 2:
+            cleaned = "".join(parts[:-1]) + "." + parts[-1]
+    elif last_comma > last_dot:
+        # Запятая стоит позже → она дробный разделитель, точки — тысячные
+        cleaned = cleaned.replace(".", "").replace(",", ".")
+    else:
+        # Точка стоит позже → она дробный разделитель, запятые — тысячные
+        cleaned = cleaned.replace(",", "")
+
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _parse_int(raw: str | None) -> int | None:
+    """
+    Извлекает int из строк вида '10 000', '10000', '1,000'.
+    Возвращает None при любой ошибке.
+    """
+    if not raw:
+        return None
+    digits = re.sub(r"[^\d]", "", raw)
+    return int(digits) if digits else None
+
+
+# ── Парсинг HTML ──────────────────────────────────────────────────────────────
+
+def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
+    """
+    Разбирает один .tc-item и возвращает Offer.
+    Бросает ValueError / TypeError если данных недостаточно.
+    """
+    server  = _text(item, ".tc-server")
+    faction = _text(item, ".tc-side") or "Horde"
+    seller  = _text(item, ".media-user-name span")
+    raw_amount = _text(item, ".tc-amount")
+    raw_price  = _text(item, ".tc-price")
+
+    if not server:
+        raise ValueError("отсутствует .tc-server")
+    if not seller:
+        raise ValueError("отсутствует .media-user-name span")
+
+    amount_gold = _parse_int(raw_amount)
+    if amount_gold is None or amount_gold <= 0:
+        raise ValueError(f"некорректный .tc-amount: {raw_amount!r}")
+
+    price = _parse_float(raw_price)
+    if price is None or price <= 0:
+        raise ValueError(f"некорректная .tc-price: {raw_price!r}")
+
+    # Цена дана за 1 gold → приводим к стандарту проекта: price per 1 000 gold
+    price_per_1k = round(price * 1000, 4)
+
+    # offer_url: .tc-item сам является <a href="...">
+    href = item.get("href", "")
+    if isinstance(href, list):          # BS4 может вернуть list для мульти-атрибутов
+        href = href[0] if href else ""
+    offer_url: str | None = None
+    if href:
+        offer_url = (
+            f"https://funpay.com{href}" if href.startswith("/") else href
+        )
+
+    # ID: data-id или data-offer на элементе, иначе — UUID-фрагмент
+    raw_id = item.get("data-id") or item.get("data-offer") or ""
+    offer_id = f"fp_{raw_id}" if raw_id else f"fp_{uuid.uuid4().hex[:12]}"
+
+    return Offer(
+        id=offer_id,
+        source=SOURCE,
+        server=server,
+        faction=faction,
+        price_per_1k=price_per_1k,
+        amount_gold=amount_gold,
+        seller=seller,
+        offer_url=offer_url,
+        updated_at=fetched_at,
+        fetched_at=fetched_at,
+    )
+
+
+def _parse_html(html: str, fetched_at: datetime) -> list[Offer]:
+    """Парсит страницу и возвращает офферы только онлайн-продавцов."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    # CSS-селектор: контейнер с атрибутом data-online="1"
+    online_items = soup.select(".tc-item[data-online='1']")
+    logger.debug("FunPay: найдено %d онлайн-офферов в HTML", len(online_items))
+
+    offers: list[Offer] = []
+    skipped = 0
+
+    for item in online_items:
+        try:
+            offers.append(_parse_item(item, fetched_at))
+        except (ValueError, TypeError) as exc:
+            skipped += 1
+            logger.debug("FunPay: пропуск оффера (%s)", exc)
+
+    if skipped:
+        logger.warning(
+            "FunPay: пропущено %d из %d онлайн-офферов",
+            skipped, len(online_items),
+        )
+
+    return offers
+
+
+# ── Публичный API ─────────────────────────────────────────────────────────────
+
+async def fetch_funpay_offers() -> list[Offer]:
+    """
+    Загружает страницу FunPay и возвращает офферы онлайн-продавцов.
+    При любой ошибке (сеть, HTTP, парсинг) логирует её и возвращает [].
+    """
+    fetched_at = datetime.now(timezone.utc)
+    try:
+        async with httpx.AsyncClient(
+            headers=_HEADERS,
+            timeout=10.0,
+            follow_redirects=True,
+        ) as client:
+            resp = await client.get(_URL)
+            resp.raise_for_status()
+
+        offers = _parse_html(resp.text, fetched_at)
+        logger.info("FunPay: загружено %d офферов", len(offers))
+        return offers
+
+    except Exception as exc:
+        logger.error("FunPay: ошибка загрузки — %s", exc)
+        return []
+
+
+# Алиас для совместимости с offers_service.SOURCES
+async def fetch_offers() -> list[Offer]:
+    return await fetch_funpay_offers()

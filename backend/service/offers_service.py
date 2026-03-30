@@ -15,12 +15,14 @@ from datetime import datetime, timezone
 
 from api.schemas import Offer, PriceHistoryPoint
 from parser.fanpay_parser import fetch_offers as _fanpay_fetch
+from parser.funpay_parser import fetch_offers as _funpay_fetch
 from parser.g2g_parser import fetch_offers as _g2g_fetch
 
 logger = logging.getLogger(__name__)
 
 SOURCES: dict[str, Callable[[], Awaitable[list[Offer]]]] = {
     "fanpay": _fanpay_fetch,
+    "funpay": _funpay_fetch,
     "g2g": _g2g_fetch,
 }
 
