@@ -27,6 +27,8 @@ SOURCES: dict[str, Callable[[], Awaitable[list[Offer]]]] = {
 
 _cache: list[Offer] = []
 _history_by_server: dict[str, deque] = {}
+_LIQUIDITY_THRESHOLD = 1_000_000
+_MIN_OFFERS = 5
 
 # ── Фильтрация выбросов ───────────────────────────────────────────────────────
 OUTLIER_TRIM_PCT = 0.05
@@ -80,29 +82,33 @@ def _filter_outliers(offers: list[Offer]) -> list[Offer]:
 
 def compute_index_price(
     offers: list[Offer],
-) -> tuple[float | None, float | None, float | None]:
+) -> tuple[float, float, float] | None:
     if not offers:
-        return None, None, None
+        return None
 
-    prices = sorted([o.price_per_1k for o in offers if o.price_per_1k])
-    if not prices:
-        return None, None, None
+    sorted_offers = sorted(offers, key=lambda o: o.price_per_1k)
 
-    min_price = prices[0]
-    max_price = prices[-1]
-    n = len(prices)
+    if len(sorted_offers) < _MIN_OFFERS:
+        selected = sorted_offers
+    else:
+        selected = sorted_offers[:_MIN_OFFERS]
+        accumulated = sum(o.amount_gold for o in selected)
 
-    if n < 5:
-        mid = n // 2
-        if n % 2 == 0:
-            index_price = (prices[mid - 1] + prices[mid]) / 2
+        for offer in sorted_offers[_MIN_OFFERS:]:
+            if accumulated >= _LIQUIDITY_THRESHOLD:
+                break
+            selected.append(offer)
+            accumulated += offer.amount_gold
         else:
-            index_price = prices[mid]
-        return index_price, min_price, max_price
+            if accumulated < _LIQUIDITY_THRESHOLD:
+                selected = sorted_offers
 
-    k = max(3, int(n * 0.2))
-    cheapest = prices[:k]
-    index_price = sum(cheapest) / len(cheapest)
+    prices = [o.price_per_1k for o in selected]
+
+    index_price = round(sum(prices) / len(prices), 4)
+    min_price = round(min(prices), 4)
+    max_price = round(max(prices), 4)
+
     return index_price, min_price, max_price
 
 
@@ -116,9 +122,10 @@ def _record_snapshot(offers: list[Offer]) -> None:
     now = datetime.now(timezone.utc)
 
     for server, items in grouped.items():
-        index_price, min_price, max_price = compute_index_price(items)
-        if index_price is None:
+        result = compute_index_price(items)
+        if result is None:
             continue
+        index_price, min_price, max_price = result
         _history_by_server.setdefault(server, deque(maxlen=200)).append(
             PriceHistoryPoint(
                 timestamp=now,
