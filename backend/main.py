@@ -46,13 +46,9 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="WoW Gold Market Analytics", lifespan=lifespan)
-origins = [
-    "https://gold-spot-m1e65fmb6-n-essessarys-projects.vercel.app",
-    "http://localhost:5173",
-]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],  # временно
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
