@@ -98,6 +98,45 @@ def _parse_int(raw: str | None) -> int | None:
     return int(digits) if digits else None
 
 
+# ── Нормализация полей ────────────────────────────────────────────────────────
+
+def _normalize_server(raw: str) -> str:
+    """
+    Извлекает чистое имя сервера из формата FunPay.
+
+    "(EU) Flamegor"                    → "Flamegor"
+    "(EU) #Anniversary - Spineshatter" → "Spineshatter"
+    "Flamegor"                         → "Flamegor"
+    """
+    if not raw:
+        return "unknown"
+    # Убираем префикс вида "(EU) " или "(EU-PVP) "
+    name = re.sub(r"^\([^)]+\)\s*", "", raw).strip()
+    # Если осталась конструкция "... - Имя" — берём часть после последнего тире
+    if " - " in name:
+        name = name.rsplit(" - ", 1)[-1].strip()
+    # Убираем теги вида "#Anniversary"
+    name = re.sub(r"#\S+\s*", "", name).strip()
+    return name or raw.strip()
+
+
+def _seller(item: Tag) -> str:
+    """
+    Пробует несколько CSS-селекторов для имени продавца.
+    FunPay периодически меняет вёрстку — проверяем каждый вариант по очереди.
+    """
+    for selector in (
+        ".media-user-name span",   # основной вариант
+        ".media-user-name",        # если span пропал
+        ".tc-seller span",         # альтернативный класс
+        ".tc-seller",
+    ):
+        val = _text(item, selector)
+        if val:
+            return val
+    return "unknown"
+
+
 # ── Парсинг HTML ──────────────────────────────────────────────────────────────
 
 def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
@@ -106,9 +145,9 @@ def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
     Бросает ValueError только если цена отсутствует или нулевая —
     всё остальное заполняется fallback-значениями.
     """
-    server  = _text(item, ".tc-server")  or "unknown"
-    faction = _text(item, ".tc-side")    or "Horde"
-    seller  = _text(item, ".media-user-name span") or "unknown"
+    server  = _normalize_server(_text(item, ".tc-server"))
+    faction = _text(item, ".tc-side") or "Horde"
+    seller  = _seller(item)
     raw_amount = _text(item, ".tc-amount")
     raw_price  = _text(item, ".tc-price")
 
