@@ -10,7 +10,6 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    fanpay_offers_url: str = ""
     g2g_offers_url: str = ""
     refresh_interval_seconds: int = Field(default=300, ge=10)
     use_mock_on_fetch_failure: bool = True

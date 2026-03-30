@@ -31,7 +31,7 @@ def _unwrap_payload(raw: Any) -> list[dict]:
     raise ValueError("G2G JSON: ожидался list или dict со списком офферов")
 
 
-# ── Вспомогательные функции (идентичны fanpay_parser) ────────────────────────
+# ── Вспомогательные функции для JSON-полей ────────────────────────────────────
 
 def _pick_number(item: dict, *keys: str) -> float | None:
     for k in keys:
