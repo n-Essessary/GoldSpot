@@ -29,6 +29,7 @@ _cache: list[Offer] = []
 _history_by_server: dict[str, deque] = {}
 _LIQUIDITY_THRESHOLD = 1_000_000
 _MIN_OFFERS = 5
+_SANE_PRICE_MAX = 5.0  # защита от мусора
 
 # ── Фильтрация выбросов ───────────────────────────────────────────────────────
 OUTLIER_TRIM_PCT = 0.05
@@ -115,36 +116,27 @@ def compute_index_price(
 def _record_snapshot(offers: list[Offer]) -> None:
     if not offers:
         return
-    grouped: dict[str, list[Offer]] = {}
-    for o in offers:
-        grouped.setdefault(o.server, []).append(o)
+    prices = [o.price_per_1k for o in offers]
 
-    now = datetime.now(timezone.utc)
+    avg = round(sum(prices) / len(prices), 4)
 
-    for server, items in grouped.items():
-        result = compute_index_price(items)
-        if result is None:
-            continue
-        index_price, min_price, max_price = result
-        _history_by_server.setdefault(server, deque(maxlen=200)).append(
-            PriceHistoryPoint(
-                timestamp=now,
-                price=index_price,
-                min_price=min_price,
-                max_price=max_price,
-                offer_count=len(items),
-            )
+    # защита от неправильного масштаба (например 11 вместо 0.3)
+    if avg > _SANE_PRICE_MAX:
+        print(f"SKIP SNAPSHOT: avg={avg} > {_SANE_PRICE_MAX}")
+        return
+
+    _history_by_server.setdefault("all", deque(maxlen=200)).append(
+        PriceHistoryPoint(
+            timestamp=datetime.now(timezone.utc),
+            price=avg,
+            min=round(min(prices), 4),
+            max=round(max(prices), 4),
+            count=len(offers),
         )
+    )
 
 
 def get_price_history(server: str = "all", last: int = 50) -> list[PriceHistoryPoint]:
-    if server == "all":
-        combined: list[PriceHistoryPoint] = []
-        for dq in _history_by_server.values():
-            combined.extend(dq)
-        combined.sort(key=lambda x: x.timestamp)
-        return combined[-last:]
-
     dq = _history_by_server.get(server)
     if not dq:
         return []

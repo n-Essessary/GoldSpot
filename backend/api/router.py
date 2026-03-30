@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
 from api.schemas import OffersResponse, PriceHistoryResponse
 from service.offers_service import clear_history, get_offers, get_price_history
@@ -17,20 +17,19 @@ async def get_offers_handler(
     return OffersResponse(count=len(offers), offers=offers)
 
 
-@router.get("/price-history", response_model=PriceHistoryResponse)
+@router.get("/price-history")
 async def get_price_history_handler(
     server: str = Query("all"),
     last: int = Query(50, ge=1, le=200),
 ):
-    try:
-        points = get_price_history(server, last)
-        return PriceHistoryResponse(count=len(points), points=points)
-    except Exception as e:
-        print("price-history error:", e)
-        raise HTTPException(status_code=500, detail="Internal error")
+    points = get_price_history(server, last)
+    return {
+        "count": len(points),
+        "points": points,
+    }
 
 
-@router.post("/admin/reset-history")
+@router.get("/admin/reset-history")
 async def reset_history_handler():
     clear_history()
     return {"status": "cleared"}

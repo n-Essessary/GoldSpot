@@ -59,9 +59,9 @@ class OffersResponse(BaseModel):
 class PriceHistoryPoint(BaseModel):
     timestamp: datetime
     price: float | None = None
-    min_price: float | None = None
-    max_price: float | None = None
-    offer_count: int = 0
+    min: float | None = None
+    max: float | None = None
+    count: int = 0
 
     @field_serializer("timestamp")
     def serialize_ts(self, value: datetime) -> str:
