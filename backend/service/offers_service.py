@@ -89,17 +89,13 @@ def compute_index_price(
     if len(sorted_offers) < _MIN_OFFERS:
         selected = sorted_offers
     else:
-        selected = sorted_offers[:_MIN_OFFERS]
-        accumulated = sum(o.amount_gold for o in selected)
-
-        for offer in sorted_offers[_MIN_OFFERS:]:
-            if accumulated >= _LIQUIDITY_THRESHOLD:
-                break
+        selected = []
+        accumulated = 0
+        for offer in sorted_offers:
             selected.append(offer)
             accumulated += offer.amount_gold
-        else:
-            if accumulated < _LIQUIDITY_THRESHOLD:
-                selected = sorted_offers
+            if accumulated >= _LIQUIDITY_THRESHOLD:
+                break
 
     prices = [o.price_per_1k for o in selected]
 
