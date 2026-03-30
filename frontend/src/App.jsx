@@ -104,7 +104,7 @@ function Dashboard({ initialServer, onSelectServer }) {
       </div>
 
       <StatsBar offers={filteredOffers} loading={loading} />
-      <PriceChart refreshSignal={refreshSignalRef.current} />
+      <PriceChart refreshSignal={refreshSignalRef.current} serverSlug={filters.server || 'all'} />
 
       <main className={styles.main}>
         <OffersTable offers={filteredOffers} loading={loading} error={error} />
