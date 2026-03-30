@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect } from 'react'
 import { Routes, Route, useNavigate, useParams, Navigate } from 'react-router-dom'
 import { useOffers } from './hooks/useOffers'
+import { fetchOffers } from './api/offers'
 import { FiltersBar } from './components/FiltersBar'
 import { OffersTable } from './components/OffersTable'
 import { RefreshButton } from './components/RefreshButton'
@@ -20,11 +21,10 @@ function useDefaultServer() {
 
   useEffect(() => {
     let cancelled = false
-    fetch('/api/offers?limit=50&sort_by=price')
-      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-      .then((data) => {
+    fetchOffers({ limit: 50, sort_by: 'price' })
+      .then((offers) => {
         if (cancelled) return
-        const first = data.offers?.[0]?.server
+        const first = offers[0]?.server
         setServer(first || FALLBACK_SERVER)
       })
       .catch(() => {
