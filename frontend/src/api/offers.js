@@ -1,4 +1,4 @@
-const API_BASE = 'https://scintillating-flexibility-production-809a.up.railway.app'
+export const API_BASE = 'https://scintillating-flexibility-production-809a.up.railway.app'
 
 /**
  * @typedef {Object} Offer

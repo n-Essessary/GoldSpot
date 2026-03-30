@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { API_BASE } from '../api/offers'
 import styles from './PriceChart.module.css'
 
 const W = 800
@@ -86,7 +87,7 @@ export function PriceChart({ refreshSignal = 0, serverSlug = 'all' }) {
   useEffect(() => {
     setLoading(true)
     setError(null)
-    fetch(`/price-history?server=${encodeURIComponent(serverSlug || 'all')}&last=100`)
+    fetch(`${API_BASE}/price-history?server=${encodeURIComponent(serverSlug || 'all')}&last=100`)
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
         return res.json()
