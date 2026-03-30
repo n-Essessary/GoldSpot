@@ -103,26 +103,25 @@ def _parse_int(raw: str | None) -> int | None:
 def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
     """
     Разбирает один .tc-item и возвращает Offer.
-    Бросает ValueError / TypeError если данных недостаточно.
+    Бросает ValueError только если цена отсутствует или нулевая —
+    всё остальное заполняется fallback-значениями.
     """
-    server  = _text(item, ".tc-server")
-    faction = _text(item, ".tc-side") or "Horde"
-    seller  = _text(item, ".media-user-name span")
+    server  = _text(item, ".tc-server")  or "unknown"
+    faction = _text(item, ".tc-side")    or "Horde"
+    seller  = _text(item, ".media-user-name span") or "unknown"
     raw_amount = _text(item, ".tc-amount")
     raw_price  = _text(item, ".tc-price")
 
-    if not server:
-        raise ValueError("отсутствует .tc-server")
-    if not seller:
-        raise ValueError("отсутствует .media-user-name span")
-
-    amount_gold = _parse_int(raw_amount)
-    if amount_gold is None or amount_gold <= 0:
-        raise ValueError(f"некорректный .tc-amount: {raw_amount!r}")
-
+    # Цена — единственное hard-required поле: без неё оффер бессмысленен
     price = _parse_float(raw_price)
     if price is None or price <= 0:
-        raise ValueError(f"некорректная .tc-price: {raw_price!r}")
+        raise ValueError(f".tc-price не распознана: {raw_price!r}")
+
+    # Количество — fallback 1, чтобы не ломать Offer.amount_gold > 0
+    amount_gold = _parse_int(raw_amount)
+    if amount_gold is None or amount_gold <= 0:
+        logger.debug("FunPay: .tc-amount некорректен (%r), используем 1", raw_amount)
+        amount_gold = 1
 
     # Цена дана за 1 gold → приводим к стандарту проекта: price per 1 000 gold
     price_per_1k = round(price * 1000, 4)
@@ -156,27 +155,50 @@ def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
 
 
 def _parse_html(html: str, fetched_at: datetime) -> list[Offer]:
-    """Парсит страницу и возвращает офферы только онлайн-продавцов."""
+    """Парсит страницу и возвращает все офферы (.tc-item).
+    Фильтр data-online временно снят для диагностики.
+    """
     soup = BeautifulSoup(html, "html.parser")
 
-    # CSS-селектор: контейнер с атрибутом data-online="1"
-    online_items = soup.select(".tc-item[data-online='1']")
-    logger.debug("FunPay: найдено %d онлайн-офферов в HTML", len(online_items))
+    # Все офферы без фильтра по онлайн-статусу (временно для диагностики)
+    all_items = soup.select(".tc-item")
+    logger.info("FunPay: найдено .tc-item на странице: %d", len(all_items))
+
+    # Диагностика: логируем поля первого элемента, чтобы понять реальную структуру
+    if all_items:
+        first = all_items[0]
+        logger.warning(
+            "FunPay [diag] первый .tc-item → "
+            "server=%r  side=%r  seller=%r  amount=%r  price=%r  attrs=%s",
+            _text(first, ".tc-server"),
+            _text(first, ".tc-side"),
+            _text(first, ".media-user-name span"),
+            _text(first, ".tc-amount"),
+            _text(first, ".tc-price"),
+            dict(list(first.attrs.items())[:6]),  # первые 6 атрибутов элемента
+        )
 
     offers: list[Offer] = []
     skipped = 0
+    skip_reasons: dict[str, int] = {}
 
-    for item in online_items:
+    for item in all_items:
         try:
             offers.append(_parse_item(item, fetched_at))
         except (ValueError, TypeError) as exc:
             skipped += 1
+            reason = str(exc).split(":")[0]          # группируем по типу ошибки
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
             logger.debug("FunPay: пропуск оффера (%s)", exc)
 
+    logger.info(
+        "FunPay: распарсено %d из %d элементов", len(offers), len(all_items)
+    )
     if skipped:
         logger.warning(
-            "FunPay: пропущено %d из %d онлайн-офферов",
-            skipped, len(online_items),
+            "FunPay: пропущено %d — причины: %s",
+            skipped,
+            ", ".join(f"{r}×{n}" for r, n in skip_reasons.items()),
         )
 
     return offers
