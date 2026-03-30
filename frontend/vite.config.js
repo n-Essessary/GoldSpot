@@ -8,7 +8,7 @@ export default defineConfig({
       // Проксируем /api/* → FastAPI на :8000
       // Так frontend работает на :5173 без CORS-проблем в dev
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'scintillating-flexibility-production-809a.up.railway.app',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
