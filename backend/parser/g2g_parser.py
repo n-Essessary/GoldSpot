@@ -9,6 +9,7 @@ import httpx
 
 from api.schemas import Offer
 from config import settings
+from utils.server import normalize_server
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,8 @@ def _normalize(item: dict, fetched_at: datetime) -> Offer:
         raw_price_per_1k = (raw_price / raw_amount) * 1000.0
 
     seller   = _pick_str(item, "seller", "username", "user", "name", default="unknown")
-    server   = _pick_str(item, "server", "realm", "region",           default="unknown")
+    server_raw = _pick_str(item, "server", "realm", "region",         default="unknown")
+    srv_info = normalize_server(server_raw)
     faction  = _pick_str(item, "faction", "side", "team",             default="Horde")
     offer_url = _pick_str(item, "url", "offer_url", "link", "permalink") or None
 
@@ -104,7 +106,8 @@ def _normalize(item: dict, fetched_at: datetime) -> Offer:
     return Offer(
         id=offer_id,
         source=SOURCE,
-        server=server,
+        server=srv_info.slug,
+        display_server=srv_info.display,
         faction=faction,
         price_per_1k=round(raw_price_per_1k, 4),
         amount_gold=raw_amount,
@@ -123,7 +126,8 @@ def _mock_offers() -> list[Offer]:
         Offer(
             id="g2g_demo_1",
             source=SOURCE,
-            server="Стрижант-EU",
+            server="strizhant-eu",
+            display_server="Стрижант-EU",
             faction="Horde",
             price_per_1k=0.44,
             amount_gold=80_000,
@@ -135,7 +139,8 @@ def _mock_offers() -> list[Offer]:
         Offer(
             id="g2g_demo_2",
             source=SOURCE,
-            server="Стрижант-EU",
+            server="strizhant-eu",
+            display_server="Стрижант-EU",
             faction="Alliance",
             price_per_1k=0.38,
             amount_gold=200_000,
@@ -147,7 +152,8 @@ def _mock_offers() -> list[Offer]:
         Offer(
             id="g2g_demo_3",
             source=SOURCE,
-            server="Гордунни-EU",
+            server="gordunni-eu",
+            display_server="Гордунни-EU",
             faction="Alliance",
             price_per_1k=0.47,
             amount_gold=15_000,

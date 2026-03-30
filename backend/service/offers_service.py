@@ -74,7 +74,8 @@ def get_offers(
     result = list(_cache)
 
     if server:
-        result = [o for o in result if o.server.lower() == server.lower()]
+        # o.server гарантированно lowercase (slug) — model_validator в Offer
+        result = [o for o in result if o.server == server.lower()]
     if faction:
         result = [o for o in result if o.faction.lower() == faction.lower()]
 

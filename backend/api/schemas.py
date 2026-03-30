@@ -1,12 +1,13 @@
 from datetime import datetime, timezone
 
-from pydantic import BaseModel, field_serializer, field_validator
+from pydantic import BaseModel, field_serializer, field_validator, model_validator
 
 
 class Offer(BaseModel):
     id: str
     source: str
-    server: str
+    server: str          # slug, всегда lowercase: "flamegor"
+    display_server: str = ""  # читаемое имя: "Flamegor (EU)"; заполняется парсером
     faction: str
     price_per_1k: float
     amount_gold: int
@@ -14,6 +15,15 @@ class Offer(BaseModel):
     offer_url: str | None = None
     updated_at: datetime
     fetched_at: datetime
+
+    @model_validator(mode="after")
+    def _normalise_server(self) -> "Offer":
+        # server — всегда slug (lowercase)
+        self.server = self.server.lower()
+        # display_server — fallback на server если парсер не задал
+        if not self.display_server:
+            self.display_server = self.server
+        return self
 
     @field_validator("updated_at", "fetched_at", mode="before")
     @classmethod

@@ -17,6 +17,7 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from api.schemas import Offer
+from utils.server import normalize_server
 
 logger = logging.getLogger(__name__)
 
@@ -100,25 +101,6 @@ def _parse_int(raw: str | None) -> int | None:
 
 # ── Нормализация полей ────────────────────────────────────────────────────────
 
-def _normalize_server(raw: str) -> str:
-    """
-    Извлекает чистое имя сервера из формата FunPay.
-
-    "(EU) Flamegor"                    → "Flamegor"
-    "(EU) #Anniversary - Spineshatter" → "Spineshatter"
-    "Flamegor"                         → "Flamegor"
-    """
-    if not raw:
-        return "unknown"
-    # Убираем префикс вида "(EU) " или "(EU-PVP) "
-    name = re.sub(r"^\([^)]+\)\s*", "", raw).strip()
-    # Если осталась конструкция "... - Имя" — берём часть после последнего тире
-    if " - " in name:
-        name = name.rsplit(" - ", 1)[-1].strip()
-    # Убираем теги вида "#Anniversary"
-    name = re.sub(r"#\S+\s*", "", name).strip()
-    return name or raw.strip()
-
 
 def _seller(item: Tag) -> str:
     """
@@ -145,9 +127,11 @@ def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
     Бросает ValueError только если цена отсутствует или нулевая —
     всё остальное заполняется fallback-значениями.
     """
-    server  = _normalize_server(_text(item, ".tc-server"))
-    faction = _text(item, ".tc-side") or "Horde"
-    seller  = _seller(item)
+    srv_info = normalize_server(_text(item, ".tc-server"))
+    server   = srv_info.slug     # "flamegor"
+    display_server = srv_info.display  # "Flamegor (EU)"
+    faction  = _text(item, ".tc-side") or "Horde"
+    seller   = _seller(item)
     raw_amount = _text(item, ".tc-amount")
     raw_price  = _text(item, ".tc-price")
 
@@ -183,6 +167,7 @@ def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
         id=offer_id,
         source=SOURCE,
         server=server,
+        display_server=display_server,
         faction=faction,
         price_per_1k=price_per_1k,
         amount_gold=amount_gold,
