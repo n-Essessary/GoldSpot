@@ -9,6 +9,7 @@ Lock убран намеренно: asyncio — однопоточный event l
 from __future__ import annotations
 
 import logging
+import math
 from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -26,6 +27,55 @@ SOURCES: dict[str, Callable[[], Awaitable[list[Offer]]]] = {
 
 _cache: list[Offer] = []
 _history: deque[PriceHistoryPoint] = deque(maxlen=200)
+
+# ── Фильтрация выбросов ───────────────────────────────────────────────────────
+OUTLIER_TRIM_PCT = 0.05
+MIN_PRICE_PER_1K = 0.10
+_TRIM_MIN_SAMPLE = 10
+
+
+def _filter_outliers(offers: list[Offer]) -> list[Offer]:
+    """
+    Возвращает очищенный от выбросов список офферов.
+    """
+    result = [o for o in offers if o.price_per_1k > MIN_PRICE_PER_1K]
+    removed_abs = len(offers) - len(result)
+    if removed_abs:
+        logger.info(
+            "Фильтр выбросов: удалено %d офферов с ценой ≤ %.2f$/1k",
+            removed_abs,
+            MIN_PRICE_PER_1K,
+        )
+
+    if len(result) < _TRIM_MIN_SAMPLE:
+        if result:
+            logger.debug(
+                "Фильтр выбросов: выборка мала (%d), percentile-отсечение пропущено",
+                len(result),
+            )
+        return result
+
+    prices = sorted(o.price_per_1k for o in result)
+    n = len(prices)
+    lo_idx = max(0, math.floor(n * OUTLIER_TRIM_PCT))
+    hi_idx = min(n - 1, math.ceil(n * (1 - OUTLIER_TRIM_PCT)) - 1)
+    lo_price = prices[lo_idx]
+    hi_price = prices[hi_idx]
+
+    trimmed = [o for o in result if lo_price <= o.price_per_1k <= hi_price]
+    removed_pct = len(result) - len(trimmed)
+    if removed_pct:
+        logger.info(
+            "Фильтр выбросов: percentile [%.0f%%–%.0f%%] → "
+            "порог [%.4f, %.4f] $/1k, удалено %d офферов",
+            OUTLIER_TRIM_PCT * 100,
+            (1 - OUTLIER_TRIM_PCT) * 100,
+            lo_price,
+            hi_price,
+            removed_pct,
+        )
+
+    return trimmed
 
 
 def _record_snapshot(offers: list[Offer]) -> None:
@@ -60,7 +110,7 @@ async def refresh() -> None:
 
     _cache = all_offers
     logger.info("Кэш обновлён: %d офферов", len(_cache))
-    _record_snapshot(_cache)
+    _record_snapshot(_filter_outliers(_cache))
 
 
 def get_offers(
