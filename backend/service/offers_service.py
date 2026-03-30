@@ -116,27 +116,46 @@ def compute_index_price(
 def _record_snapshot(offers: list[Offer]) -> None:
     if not offers:
         return
-    prices = [o.price_per_1k for o in offers]
 
-    avg = round(sum(prices) / len(prices), 4)
+    grouped: dict[str, list[Offer]] = {}
+    for o in offers:
+        grouped.setdefault(o.server, []).append(o)
 
-    # защита от неправильного масштаба (например 11 вместо 0.3)
-    if avg > _SANE_PRICE_MAX:
-        print(f"SKIP SNAPSHOT: avg={avg} > {_SANE_PRICE_MAX}")
-        return
+    now = datetime.now(timezone.utc)
 
-    _history_by_server.setdefault("all", deque(maxlen=200)).append(
-        PriceHistoryPoint(
-            timestamp=datetime.now(timezone.utc),
-            price=avg,
-            min=round(min(prices), 4),
-            max=round(max(prices), 4),
-            count=len(offers),
+    for server, items in grouped.items():
+        result = compute_index_price(items)
+        if result is None:
+            continue
+        index_price, min_price, max_price = result
+        if index_price > _SANE_PRICE_MAX:
+            logger.warning(
+                "SKIP SNAPSHOT server=%s: index_price=%s > %s",
+                server,
+                index_price,
+                _SANE_PRICE_MAX,
+            )
+            continue
+
+        _history_by_server.setdefault(server, deque(maxlen=200)).append(
+            PriceHistoryPoint(
+                timestamp=now,
+                price=index_price,
+                min=min_price,
+                max=max_price,
+                count=len(items),
+            )
         )
-    )
 
 
 def get_price_history(server: str = "all", last: int = 50) -> list[PriceHistoryPoint]:
+    if server == "all":
+        combined: list[PriceHistoryPoint] = []
+        for dq in _history_by_server.values():
+            combined.extend(dq)
+        combined.sort(key=lambda x: x.timestamp)
+        return combined[-last:]
+
     dq = _history_by_server.get(server)
     if not dq:
         return []
