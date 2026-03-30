@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import logging
 import math
-import random
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from api.schemas import Offer, PriceHistoryPoint
 from parser.funpay_parser import fetch_offers as _funpay_fetch
@@ -111,14 +110,10 @@ def compute_index_price(
     return index_price, min_price, max_price
 
 
-_HISTORY_DAYS = 7
-_HISTORY_POINTS = 56  # ~8 точек в день
-
-
 def get_price_history(server: str = "all", last: int = 50) -> list[PriceHistoryPoint]:
     """
-    Генерирует историю цен на лету из текущего _cache.
-    Не использует RAM-хранилище — стабильно при любых рестартах.
+    Возвращает 1 реальную точку — текущий index_price из _cache.
+    Синтетическое заполнение истории делает фронтенд.
     """
     offers = list(_cache)
 
@@ -133,31 +128,15 @@ def get_price_history(server: str = "all", last: int = 50) -> list[PriceHistoryP
 
     index_price, min_price, max_price = result
 
-    now = datetime.now(timezone.utc)
-    # Детерминированный seed: меняется раз в час — график стабилен при повторных запросах
-    seed = int(now.timestamp() // 3600)
-    rng = random.Random(seed)
-
-    points: list[PriceHistoryPoint] = []
-    total = min(last, _HISTORY_POINTS)
-    interval = timedelta(days=_HISTORY_DAYS) / total
-
-    for i in range(total):
-        ts = now - interval * (total - 1 - i)
-        jitter = rng.uniform(-0.025, 0.025)  # ±2.5%
-        price = round(index_price * (1 + jitter), 4)
-        spread = round(index_price * 0.04, 4)  # min/max ±4% от индекса
-        points.append(
-            PriceHistoryPoint(
-                timestamp=ts,
-                price=price,
-                min=round(min_price - spread, 4),
-                max=round(max_price + spread, 4),
-                count=len(filtered),
-            )
+    return [
+        PriceHistoryPoint(
+            timestamp=datetime.now(timezone.utc),
+            price=index_price,
+            min=min_price,
+            max=max_price,
+            count=len(filtered),
         )
-
-    return points
+    ]
 
 
 async def refresh() -> None:

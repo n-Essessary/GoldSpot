@@ -56,24 +56,51 @@ const normalizePoints = (data) =>
     count: Number(p.count ?? 0),
   }))
 
-function buildFallback7d(basePrice = 1) {
-  const now = Date.now()
-  const points = []
-  const total = 28 // 7 дней * 4 точки в день
-  for (let i = 0; i < total; i += 1) {
-    const t = now - (total - 1 - i) * 6 * 60 * 60 * 1000
-    const wave = Math.sin(i / 3) * 0.03 * basePrice
-    const price = Math.max(0.0001, basePrice + wave)
-    const spread = Math.max(0.0001, price * 0.06)
-    points.push({
-      timestamp: new Date(t).toISOString(),
+const CHART_POINTS = 56   // целевое кол-во точек на графике (7 дней × 8/день)
+const CHART_DAYS  = 7
+
+// Детерминированный LCG-random по seed — одинаковый результат при рендере
+function seededRand(seed) {
+  let s = seed
+  return () => {
+    s = (s * 1664525 + 1013904223) & 0xffffffff
+    return (s >>> 0) / 0xffffffff
+  }
+}
+
+/**
+ * Достраивает синтетические точки в прошлое, не трогая реальные.
+ * real    — массив реальных точек от бэкенда (уже normalizePoints)
+ * target  — сколько точек должно быть итого
+ */
+function fillHistory(real, target = CHART_POINTS) {
+  if (real.length === 0) return []
+
+  const anchor = real[0]                         // самая ранняя реальная точка
+  const nowMs  = new Date(anchor.timestamp).getTime()
+  const spanMs = CHART_DAYS * 24 * 60 * 60 * 1000
+  const needed = target - real.length
+  if (needed <= 0) return real
+
+  const stepMs = spanMs / target
+  const rand   = seededRand(Math.floor(nowMs / 3_600_000)) // seed = час UTC
+
+  const synthetic = []
+  for (let i = needed - 1; i >= 0; i--) {
+    const ts     = nowMs - stepMs * (needed - i)
+    const jitter = (rand() - 0.5) * 0.02           // ±1%
+    const price  = Math.max(0.0001, anchor.price * (1 + jitter))
+    const spread = anchor.price * 0.03
+    synthetic.push({
+      timestamp: new Date(ts).toISOString(),
       price,
-      min: Math.max(0.0001, price - spread),
-      max: price + spread,
+      min:   Math.max(0.0001, anchor.min - spread),
+      max:   anchor.max + spread,
       count: 0,
     })
   }
-  return points
+
+  return [...synthetic, ...real]
 }
 
 export function PriceChart({ refreshSignal = 0, serverSlug = 'all' }) {
@@ -90,12 +117,12 @@ export function PriceChart({ refreshSignal = 0, serverSlug = 'all' }) {
         return res.json()
       })
       .then((data) => {
-        const normalized = normalizePoints(data)
-        if (normalized.length === 0) {
-          setPoints(buildFallback7d(1))
+        const real = normalizePoints(data)
+        if (real.length === 0) {
+          setPoints([])
           return
         }
-        setPoints(normalized)
+        setPoints(fillHistory(real, CHART_POINTS))
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
