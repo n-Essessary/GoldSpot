@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from api.schemas import OffersResponse, PriceHistoryResponse
 from service.offers_service import get_offers, get_price_history
@@ -22,5 +22,9 @@ async def get_price_history_handler(
     server: str = Query("all"),
     last: int = Query(50, ge=1, le=200),
 ):
-    points = get_price_history(server, last)
-    return PriceHistoryResponse(count=len(points), points=points)
+    try:
+        points = get_price_history(server, last)
+        return PriceHistoryResponse(count=len(points), points=points)
+    except Exception as e:
+        print("price-history error:", e)
+        raise HTTPException(status_code=500, detail="Internal error")

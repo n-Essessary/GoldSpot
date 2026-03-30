@@ -26,7 +26,7 @@ SOURCES: dict[str, Callable[[], Awaitable[list[Offer]]]] = {
 }
 
 _cache: list[Offer] = []
-_history: deque[PriceHistoryPoint] = deque(maxlen=200)
+_history_by_server: dict[str, deque] = {}
 
 # ── Фильтрация выбросов ───────────────────────────────────────────────────────
 OUTLIER_TRIM_PCT = 0.05
@@ -78,22 +78,70 @@ def _filter_outliers(offers: list[Offer]) -> list[Offer]:
     return trimmed
 
 
+def compute_index_price(
+    offers: list[Offer],
+) -> tuple[float | None, float | None, float | None]:
+    if not offers:
+        return None, None, None
+
+    prices = sorted([o.price_per_1k for o in offers if o.price_per_1k])
+    if not prices:
+        return None, None, None
+
+    min_price = prices[0]
+    max_price = prices[-1]
+    n = len(prices)
+
+    if n < 5:
+        mid = n // 2
+        if n % 2 == 0:
+            index_price = (prices[mid - 1] + prices[mid]) / 2
+        else:
+            index_price = prices[mid]
+        return index_price, min_price, max_price
+
+    k = max(3, int(n * 0.2))
+    cheapest = prices[:k]
+    index_price = sum(cheapest) / len(cheapest)
+    return index_price, min_price, max_price
+
+
 def _record_snapshot(offers: list[Offer]) -> None:
     if not offers:
         return
-    prices = [o.price_per_1k for o in offers]
-    _history.append(
-        PriceHistoryPoint(
-            timestamp=datetime.now(timezone.utc),
-            avg_price=round(sum(prices) / len(prices), 4),
-            min_price=round(min(prices), 4),
-            offer_count=len(offers),
+    grouped: dict[str, list[Offer]] = {}
+    for o in offers:
+        grouped.setdefault(o.server, []).append(o)
+
+    now = datetime.now(timezone.utc)
+
+    for server, items in grouped.items():
+        index_price, min_price, max_price = compute_index_price(items)
+        if index_price is None:
+            continue
+        _history_by_server.setdefault(server, deque(maxlen=200)).append(
+            PriceHistoryPoint(
+                timestamp=now,
+                price=index_price,
+                min_price=min_price,
+                max_price=max_price,
+                offer_count=len(items),
+            )
         )
-    )
 
 
-def get_price_history() -> list[PriceHistoryPoint]:
-    return list(_history)
+def get_price_history(server: str = "all", last: int = 50) -> list[PriceHistoryPoint]:
+    if server == "all":
+        combined: list[PriceHistoryPoint] = []
+        for dq in _history_by_server.values():
+            combined.extend(dq)
+        combined.sort(key=lambda x: x.timestamp)
+        return combined[-last:]
+
+    dq = _history_by_server.get(server)
+    if not dq:
+        return []
+    return list(dq)[-last:]
 
 
 async def refresh() -> None:

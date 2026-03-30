@@ -58,12 +58,13 @@ class OffersResponse(BaseModel):
 
 class PriceHistoryPoint(BaseModel):
     timestamp: datetime
-    avg_price: float
-    min_price: float
-    offer_count: int
+    price: float | None = None
+    min_price: float | None = None
+    max_price: float | None = None
+    offer_count: int = 0
 
     @field_serializer("timestamp")
-    def _serialize_ts(self, value: datetime) -> str:
+    def serialize_ts(self, value: datetime) -> str:
         return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
