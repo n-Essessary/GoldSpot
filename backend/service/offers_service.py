@@ -151,6 +151,11 @@ def get_price_history(server: str = "all", last: int = 50) -> list[PriceHistoryP
     return list(dq)[-last:]
 
 
+def clear_history() -> None:
+    global _history_by_server
+    _history_by_server = {}
+
+
 async def refresh() -> None:
     global _cache
     all_offers: list[Offer] = []
