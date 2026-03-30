@@ -47,17 +47,14 @@ function fmtTime(iso) {
   }
 }
 
-function normalizePoints(raw) {
-  return (raw ?? [])
-    .map((p) => ({
-      timestamp: p.timestamp,
-      price: Number(p.price ?? p.avg_price ?? 0),
-      min: Number(p.min ?? p.min_price ?? 0),
-      max: Number(p.max ?? p.price ?? p.avg_price ?? p.min_price ?? 0),
-      count: Number(p.count ?? p.offer_count ?? 0),
-    }))
-    .filter((p) => Number.isFinite(p.price) && Number.isFinite(p.min) && Number.isFinite(p.max))
-}
+const normalizePoints = (data) =>
+  (data?.points || []).map((p) => ({
+    timestamp: p.timestamp,
+    price: Number(p.price ?? 0),
+    min: Number(p.min ?? 0),
+    max: Number(p.max ?? 0),
+    count: Number(p.count ?? 0),
+  }))
 
 function buildFallback7d(basePrice = 1) {
   const now = Date.now()
@@ -93,7 +90,7 @@ export function PriceChart({ refreshSignal = 0, serverSlug = 'all' }) {
         return res.json()
       })
       .then((data) => {
-        const normalized = normalizePoints(data?.points)
+        const normalized = normalizePoints(data)
         if (normalized.length < 20) {
           const base = normalized[normalized.length - 1]?.price ?? 1
           setPoints(buildFallback7d(base))
