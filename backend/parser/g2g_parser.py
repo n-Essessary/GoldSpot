@@ -6,16 +6,24 @@ G2G парсер офферов WoW Classic Era gold.
 Стратегия (двухуровневая):
   1. Прямой запрос без region_id (page=1..N).
      Если data непустой → используем его.
-  2. Fallback: перебираем KNOWN_REGION_IDS параллельно,
-     собираем офферы из каждого, делаем dedupe.
+  2. Fallback: динамически получаем region_id со страниц категории,
+     затем параллельно (semaphore=2) опрашиваем API для каждого ID.
+
+Получение region_id:
+  - Scrape pages 1–5: https://www.g2g.com/categories/wow-classic-era-vanilla-gold?page=N
+  - Извлекаем ссылки вида /offer/group?fa=...&region_id=XXXX
+  - Regex: region_id=([a-z0-9-]+)
+  - Собираем уникальные значения
 
 Антибот:
   - retry × 3 с exponential backoff при ошибке / 429 / 5xx
+  - delay 1–2 сек между запросами к API
   - timeout 15 сек
 """
 
 import asyncio
 import logging
+import random
 import re
 import uuid
 from datetime import datetime, timezone
@@ -42,43 +50,34 @@ _TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ── Regex для извлечения region_id из HTML ────────────────────────────────────
+_REGION_ID_RE = re.compile(r"region_id=([a-z0-9-]+)")
+
 # ── Константы ─────────────────────────────────────────────────────────────────
-_SEARCH_API  = "https://sls.g2g.com/offer/search"
-_SEO_TERM    = "wow-classic-era-vanilla-gold"
-_PAGE_SIZE   = 100
-_MAX_PAGES   = 10
-_RETRY_COUNT = 3
-_TIMEOUT     = 15.0
+_SEARCH_API   = "https://sls.g2g.com/offer/search"
+_CATEGORY_URL = "https://www.g2g.com/categories/wow-classic-era-vanilla-gold"
+_SEO_TERM     = "wow-classic-era-vanilla-gold"
+_PAGE_SIZE    = 100
+_MAX_PAGES    = 10
+_SCRAPE_PAGES = 5    # страниц категории для сбора region_id
+_RETRY_COUNT  = 3
+_TIMEOUT      = 15.0
+_CONCURRENCY  = 2    # параллельных запросов к API
 
 _API_HEADERS = {
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/124.0.0.0 Safari/537.36",
     "Accept": "application/json",
 }
 
-# ── Известные region_id для WoW Classic Era gold ──────────────────────────────
-# Получены из реальных ответов API G2G (поле region_id в offer/search).
-# EU Anniversary серверы
-# US Anniversary серверы
-# Classic Era (non-anniversary)
-KNOWN_REGION_IDS: list[str] = [
-    # EU - Anniversary
-    "ac3f85c1-7562-4850-af5d-43b4c3dc18bb",  # EU Anniversary #1
-    "bc7d91f2-8673-4961-bf6e-54c5d4ec29cc",  # EU Anniversary #2
-    "cd8e02a3-9784-5072-c07f-65d6e5fd30dd",  # EU Anniversary #3
-    # US - Anniversary
-    "de9f13b4-a895-6183-d18a-76e7f6ge41ee",  # US Anniversary #1
-    "ef0a24c5-b9a6-7294-e29b-87f8a7hf52ff",  # US Anniversary #2
-    "f01b35d6-ca b7-8305-f30c-98a9b8ig63a0",  # US Anniversary #3
-    # EU - Classic Era
-    "a1b2c3d4-e5f6-7890-abcd-ef1234567890",  # EU Classic Era
-    "b2c3d4e5-f6a7-8901-bcde-f01234567891",  # EU Classic Era #2
-    # US - Classic Era
-    "c3d4e5f6-a7b8-9012-cdef-012345678902",  # US Classic Era
-    "d4e5f6a7-b8c9-0123-defa-123456789013",  # US Classic Era #2
-    # KR / TW
-    "e5f6a7b8-c9d0-1234-efab-234567890124",  # KR Classic Era
-    "f6a7b8c9-d0e1-2345-fabc-345678901235",  # TW Classic Era
-]
+_HTML_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -353,32 +352,86 @@ async def _fetch_direct(client: httpx.AsyncClient) -> list[dict]:
     return items
 
 
-# ── Стратегия 2: fallback через KNOWN_REGION_IDS ─────────────────────────────
+# ── Получение реальных region_id со страниц категории ────────────────────────
+
+async def fetch_g2g_region_ids(client: httpx.AsyncClient) -> list[str]:
+    """Scrape страниц 1–_SCRAPE_PAGES категории G2G и собирает уникальные region_id.
+
+    Ищет ссылки вида /offer/group?fa=...&region_id=XXXX
+    и извлекает region_id через regex.
+
+    Возвращает список уникальных region_id (порядок — порядок первого появления).
+    """
+    seen: dict[str, None] = {}  # OrderedDict-like через обычный dict (Python 3.7+)
+
+    for page in range(1, _SCRAPE_PAGES + 1):
+        url = f"{_CATEGORY_URL}?page={page}"
+        try:
+            resp = await _http_get_with_retry(
+                client, url, headers=_HTML_HEADERS,
+            )
+            html = resp.text
+        except Exception as exc:
+            logger.warning("G2G: не удалось загрузить страницу категории %d: %s", page, exc)
+            continue
+
+        found = _REGION_ID_RE.findall(html)
+        new_count = 0
+        for rid in found:
+            if rid not in seen:
+                seen[rid] = None
+                new_count += 1
+
+        logger.debug(
+            "G2G: страница категории %d → найдено %d новых region_id (всего %d)",
+            page, new_count, len(seen),
+        )
+
+        # Небольшая пауза между scrape-запросами
+        await asyncio.sleep(random.uniform(1.0, 2.0))
+
+    region_ids = list(seen.keys())
+    logger.info("G2G: собрано уникальных region_id: %d → %s", len(region_ids), region_ids)
+    return region_ids
+
+
+# ── Стратегия 2: fallback через динамически полученные region_id ──────────────
 
 async def _fetch_one_region(
     client: httpx.AsyncClient,
     region_id: str,
     semaphore: asyncio.Semaphore,
 ) -> list[dict]:
-    """Запрос для одного region_id под семафором (не более N параллельных)."""
+    """Запрос для одного region_id под семафором с задержкой (антибот)."""
     async with semaphore:
-        return await _fetch_all_pages(client, region_id=region_id)
+        items = await _fetch_all_pages(client, region_id=region_id)
+        # Задержка после освобождения семафора, чтобы следующий запрос
+        # не стартовал мгновенно
+        await asyncio.sleep(random.uniform(1.0, 2.0))
+        return items
 
 
 async def _fetch_fallback(client: httpx.AsyncClient) -> list[dict]:
-    """Параллельно опрашивает все KNOWN_REGION_IDS.
+    """Динамически получает region_id и параллельно опрашивает API.
 
-    Ограничение параллелизма: 3 одновременных запроса (антибот).
+    1. Scrape страниц категории → уникальные region_id.
+    2. Параллельный обход (semaphore=_CONCURRENCY=2).
     """
-    semaphore = asyncio.Semaphore(3)
+    region_ids = await fetch_g2g_region_ids(client)
+
+    if not region_ids:
+        logger.warning("G2G: не удалось получить ни одного region_id — fallback пуст")
+        return []
+
+    semaphore = asyncio.Semaphore(_CONCURRENCY)
     tasks = [
         _fetch_one_region(client, rid, semaphore)
-        for rid in KNOWN_REGION_IDS
+        for rid in region_ids
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     all_items: list[dict] = []
-    for region_id, result in zip(KNOWN_REGION_IDS, results):
+    for region_id, result in zip(region_ids, results):
         if isinstance(result, Exception):
             logger.warning("G2G: fallback region_id=%r ошибка: %s", region_id, result)
         elif result:
@@ -408,7 +461,8 @@ async def fetch_g2g_all() -> list[Offer]:
     Алгоритм:
       1. Прямой запрос без region_id.
          Если вернул данные → используем их.
-      2. Fallback: параллельный обход KNOWN_REGION_IDS.
+      2. Fallback: scrape region_id со страниц категории,
+         параллельный обход (semaphore=2).
          Результаты объединяются и дедуплицируются.
     """
     fetched_at = datetime.now(timezone.utc)
