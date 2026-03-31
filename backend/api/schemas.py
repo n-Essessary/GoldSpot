@@ -6,8 +6,9 @@ from pydantic import BaseModel, field_serializer, field_validator, model_validat
 class Offer(BaseModel):
     id: str
     source: str
-    server: str          # slug, всегда lowercase: "flamegor"
-    display_server: str = ""  # читаемое имя: "Flamegor (EU)"; заполняется парсером
+    server: str          # slug, всегда lowercase: "(eu) anniversary"
+    display_server: str = ""  # группа: "(EU) Anniversary"; заполняется парсером
+    server_name: str = ""     # сервер внутри группы: "Spineshatter" (G2G); "" для FunPay
     faction: str
     price_per_1k: float
     amount_gold: int

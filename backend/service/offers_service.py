@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
@@ -30,6 +31,41 @@ def _clean(s: str) -> str:
     "(EU)  Flamegor" → "(eu)  flamegor"  (двойной пробел тоже схлопнется через strip)
     """
     return s.strip().lower()
+
+
+def _detect_version(text: str) -> str:
+    t = _clean(text)
+    if "season of discovery" in t or re.search(r"\bsod\b", t):
+        return "Season of Discovery"
+    if "anniversary" in t:
+        return "Anniversary"
+    if "classic" in t:
+        return "Classic"
+    return "Classic"
+
+
+def _normalize_funpay_offer(offer: Offer) -> Offer:
+    raw = (offer.display_server or "").strip()
+    m = re.match(r"^\((?P<region>[A-Za-z]{2,})\)\s*(?P<body>.*)$", raw)
+    if not m:
+        return offer
+
+    region = m.group("region").upper()
+    body = (m.group("body") or "").strip()
+    version = _detect_version(body)
+    realm = ""
+
+    if " - " in body:
+        left, right = body.rsplit(" - ", 1)
+        realm = right.strip()
+        version = _detect_version(left or body)
+    else:
+        realm = body.strip()
+
+    offer.display_server = f"({region}) {version}"
+    if realm:
+        offer.server_name = realm
+    return offer
 
 
 SOURCES: dict[str, Callable[[], Awaitable[list[Offer]]]] = {
@@ -132,7 +168,7 @@ def get_price_history(
     offers = list(_cache)
 
     if server != "all":
-        offers = [o for o in offers if _clean(o.server) == _clean(server)]
+        offers = [o for o in offers if _clean(o.display_server) == _clean(server)]
 
     if faction != "all":
         offers = [o for o in offers if o.faction.lower() == faction.lower()]
@@ -162,6 +198,8 @@ async def refresh() -> None:
     for source_name, fetch_fn in SOURCES.items():
         try:
             offers = await fetch_fn()
+            if source_name == "funpay":
+                offers = [_normalize_funpay_offer(o) for o in offers]
             all_offers.extend(offers)
             logger.info("Источник %s: загружено %d офферов", source_name, len(offers))
         except Exception:
@@ -198,25 +236,38 @@ def get_offers(
     server: str | None = None,
     faction: str | None = None,
     sort_by: str = "price",
+    server_name: str | None = None,
 ) -> list[Offer]:
     result = list(_cache)
 
     if server:
-        logger.info("FILTER server=%r", server)
-        logger.info(
+        logger.debug("FILTER server=%r", server)
+        logger.debug(
             "AVAILABLE servers sample=%r",
             list({o.display_server for o in _cache})[:5],
         )
         # Сравниваем display_server (RAW) через _clean — устойчиво к
-        # лишним пробелам и регистру. Slug (o.server) не используем,
-        # потому что фронтенд передаёт RAW строку: "(EU) Flamegor".
-        result = [o for o in result if _clean(o.server) == _clean(server)]
+        # лишним пробелам и регистру.
+        result = [o for o in result if _clean(o.display_server) == _clean(server)]
+
+    if server_name:
+        # Фильтр по конкретному серверу внутри группы.
+        # Офферы без server_name (FunPay, у которых поле пустое) всегда
+        # проходят фильтр — они видны на всех серверах своей группы.
+        # G2G офферы фильтруются точно: "Spineshatter" != "Soulseeker".
+        result = [
+            o for o in result
+            if not o.server_name or _clean(o.server_name) == _clean(server_name)
+        ]
+    else:
+        logger.debug("server_name not provided, G2G filtering disabled")
+
     if faction:
         result = [o for o in result if o.faction.lower() == faction.lower()]
 
-    # Первичная сортировка: server (display_server для стабильной группировки)
+    # Первичная сортировка: display_server (группа), server_name (сервер),
     # Вторичная сортировка: зависит от sort_by (price ASC / amount ASC)
     secondary_key = "price_per_1k" if sort_by == "price" else "amount_gold"
-    result.sort(key=lambda o: (o.display_server, getattr(o, secondary_key)))
+    result.sort(key=lambda o: (o.display_server, o.server_name, getattr(o, secondary_key)))
 
     return result

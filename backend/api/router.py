@@ -27,10 +27,11 @@ async def get_servers_handler():
 @router.get("/offers", response_model=OffersResponse)
 async def get_offers_handler(
     server: str | None = Query(None),
+    server_name: str | None = Query(None),
     faction: str | None = Query(None),
     sort_by: str = Query("price", pattern="^(price|amount)$"),
 ):
-    offers = get_offers(server, faction, sort_by)
+    offers = get_offers(server, faction, sort_by, server_name)
     return OffersResponse(count=len(offers), offers=offers)
 
 
