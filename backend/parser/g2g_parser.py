@@ -46,12 +46,27 @@ GAME_CONFIG: dict[str, dict[str, str]] = {
     },
 }
 
+# Строгий regex: "Server [Region - Version] - Faction"
 _TITLE_RE = re.compile(
     r"^(?P<server>.+?)\s*"
     r"\[(?P<region>[A-Za-z]{2,})\s*-\s*(?P<version>[^\]]+?)\]\s*"
-    r"(?:-\s*(?P<faction>Alliance|Horde))?",
+    r"(?:-\s*(?P<faction>Alliance|Horde))?$",
     re.IGNORECASE,
 )
+
+# Вспомогательные regex для гибкого fallback-парсинга
+_REGION_RE         = re.compile(r"\b(EU|US|NA|OCE|KR|TW|SEA)\b", re.IGNORECASE)
+_BRACKET_REGION_RE = re.compile(r"\[([A-Za-z]{2,})\]")   # "[EU]" без версии
+_FACTION_END_RE    = re.compile(r"-\s*(Alliance|Horde)\s*$", re.IGNORECASE)
+
+# Версии в порядке приоритета (более длинные/специфичные — первыми)
+_VERSION_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("Season of Discovery", re.compile(r"season\s+of\s+discovery", re.I)),
+    ("Anniversary",         re.compile(r"anniversary",              re.I)),
+    ("Seasonal",            re.compile(r"\bseasonal\b",             re.I)),
+    ("Classic Era",         re.compile(r"classic\s+era",            re.I)),
+    ("Classic",             re.compile(r"\bclassic\b",              re.I)),
+]
 
 
 @dataclass
@@ -79,23 +94,80 @@ class G2GRegion:
 def _parse_title(title: str) -> tuple[str, str, str, str]:
     """Парсит RAW title G2G оффера → (server_name, region, version, faction).
 
-    "Spineshatter [EU - Anniversary] - Alliance"
-      → ("Spineshatter", "EU", "Anniversary", "Alliance")
+    Двухуровневый парсинг:
 
-    Fallback при неудаче (title без скобок или нераспознанный формат):
-      → (title, "", "", faction)   # пустые region+version → display_server="Unknown"
+    Уровень 1 — строгий regex (покрывает большинство тайтлов):
+        "Spineshatter [EU - Anniversary] - Alliance"
+          → ("Spineshatter", "EU", "Anniversary", "Alliance")
+        "Lava Lash [EU - Seasonal] - Horde"
+          → ("Lava Lash", "EU", "Seasonal", "Horde")
+
+    Уровень 2 — гибкий fallback (нестандартные форматы):
+        "Firemaw [EU] - Alliance"     → ("Firemaw",  "EU", "Classic",            "Alliance")
+        "Classic Era Gold EU"         → ("",          "EU", "Classic Era",         "Horde")
+        "Season of Discovery Gold"    → ("",          "",   "Season of Discovery",  "Horde")
     """
-    m = _TITLE_RE.match((title or "").strip())
-    if not m:
-        fallback_faction = "Alliance" if "alliance" in (title or "").lower() else "Horde"
-        # Возвращаем пустые region и version — _to_offer выставит display_server="Unknown"
-        return (title or "").strip(), "", "", fallback_faction
-    server_name = (m.group("server") or "").strip()
-    region      = (m.group("region") or "").upper().strip()
-    version     = (m.group("version") or "").strip()
-    faction     = (m.group("faction") or "").strip().capitalize() or (
-        "Alliance" if "alliance" in (title or "").lower() else "Horde"
-    )
+    t = (title or "").strip()
+    if not t:
+        return "", "", "", "Horde"
+
+    # ── Уровень 1: строгий regex ──────────────────────────────────────────────
+    m = _TITLE_RE.match(t)
+    if m:
+        server_name = (m.group("server") or "").strip()
+        region      = (m.group("region") or "").upper().strip()
+        version     = (m.group("version") or "").strip()
+        faction     = (m.group("faction") or "").strip().capitalize() or (
+            "Alliance" if "alliance" in t.lower() else "Horde"
+        )
+        return server_name, region, version, faction
+
+    # ── Уровень 2: гибкий fallback ────────────────────────────────────────────
+
+    # Faction: ищем " - Alliance" / " - Horde" в конце, иначе по вхождению
+    fm = _FACTION_END_RE.search(t)
+    if fm:
+        faction = fm.group(1).capitalize()
+    elif "alliance" in t.lower():
+        faction = "Alliance"
+    else:
+        faction = "Horde"
+
+    # server_name: часть до первой "[", либо до последнего " - faction"
+    server_name = ""
+    if "[" in t:
+        server_name = t[:t.index("[")].strip()
+    else:
+        parts = re.split(r"\s+-\s+", t)
+        if len(parts) >= 2 and parts[-1].strip().lower() in ("alliance", "horde"):
+            server_name = parts[0].strip()
+
+    # Region: сначала ищем в скобках "[EU]", затем в любом месте
+    region = ""
+    _KNOWN = {"EU", "US", "NA", "OCE", "KR", "TW", "SEA"}
+    bm = _BRACKET_REGION_RE.search(t)
+    if bm and bm.group(1).upper() in _KNOWN:
+        region = bm.group(1).upper()
+    else:
+        rm = _REGION_RE.search(t)
+        if rm:
+            region = rm.group(1).upper()
+
+    # Version: по ключевым словам в порядке приоритета
+    version = ""
+    for ver_name, pattern in _VERSION_PATTERNS:
+        if pattern.search(t):
+            version = ver_name
+            break
+
+    # Если регион есть, но версия не найдена — дефолт "Classic"
+    if region and not version:
+        version = "Classic"
+
+    # Если server_name так и не определился — используем полный title как fallback
+    if not server_name:
+        server_name = t
+
     return server_name, region, version, faction
 
 
