@@ -47,7 +47,10 @@ _TITLE_RE = re.compile(
 # ── Regex для извлечения dataset slug из HTML ─────────────────────────────────
 # Ищем: fa=lgc_27816_dropdown_18:<slug>
 # offer_attributes в API = полная строка: lgc_27816_dropdown_18:<slug>
-_DATASET_RE = re.compile(r"fa=lgc_27816_dropdown_18:([a-z0-9_]+)")
+_DATASET_RE = re.compile(
+    r"fa=lgc_27816_dropdown_18%3A(lgc_27816_dropdown_18_[a-z0-9_]+)",
+    re.IGNORECASE,
+)
 _ATTR_PREFIX = "lgc_27816_dropdown_18"
 
 # ── Константы ─────────────────────────────────────────────────────────────────
