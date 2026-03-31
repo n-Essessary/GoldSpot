@@ -85,6 +85,7 @@ export function OffersTable({ offers, loading, error }) {
             <th>Платформа</th>
             <th>Сервер · Фракция</th>
             <th className={styles.right}>Цена / 1K</th>
+            <th className={styles.right}>Position Value</th>
             <th className={styles.right}>Объём</th>
             <th>Продавец</th>
             <th className={styles.right}>Обновлено</th>
@@ -138,6 +139,11 @@ export function OffersTable({ offers, loading, error }) {
                 {/* Цена — главная цифра */}
                 <td className={`${styles.price} ${styles.right} mono`}>
                   {formatPrice(offer.price_per_1k)}
+                </td>
+
+                {/* Position Value = price_per_1k × (amount_gold / 1000) */}
+                <td className={`${styles.right} mono`}>
+                  ${(offer.price_per_1k * (offer.amount_gold / 1000)).toFixed(2)}
                 </td>
 
                 {/* Объём */}
