@@ -425,6 +425,7 @@ async def fetch_funpay_offers() -> list[Offer]:
         # ── Шаг 1: получаем список серверов ──────────────────────────────
         try:
             index_resp = await client.get(_INDEX_URL)
+            html = index_resp.text
             index_resp.raise_for_status()
         except httpx.TimeoutException:
             logger.error("FunPay: таймаут при загрузке index %s", _INDEX_URL)
@@ -436,7 +437,7 @@ async def fetch_funpay_offers() -> list[Offer]:
             logger.error("FunPay: ошибка загрузки index — %s", exc, exc_info=True)
             return []
 
-        server_ids = _extract_server_ids(index_resp.text)
+        server_ids = _extract_server_ids(html)
         if not server_ids:
             logger.error("FunPay: server_id не найдены — прерываем")
             return []
@@ -465,6 +466,17 @@ async def fetch_funpay_offers() -> list[Offer]:
             if offer.id not in seen:
                 seen.add(offer.id)
                 all_offers.append(offer)
+
+    if not all_offers:
+        logger.warning("FunPay: parse вернул 0 офферов — возможно изменилась верстка")
+        return []
+
+    # debug top servers by offer count
+    grouped: dict[str, list[Offer]] = {}
+    for offer in all_offers:
+        grouped.setdefault(offer.server, []).append(offer)
+    top = sorted(grouped.items(), key=lambda x: len(x[1]), reverse=True)[:5]
+    logger.debug("FunPay: top servers %s", [(s, len(o)) for s, o in top])
 
     logger.info(
         "FunPay: parsed %d offers (%d unique)",
