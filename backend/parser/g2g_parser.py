@@ -3,69 +3,50 @@ from __future__ import annotations
 """
 G2G парсер офферов WoW Classic Era gold.
 
-Этапы:
-  1. Сбор серверов: GET /categories/wow-classic-era-vanilla-gold?page=1..5
-     HTML → BeautifulSoup → [(title, region_id), ...]
-  2. Fetch офферов: GET sls.g2g.com/offer/search?region_id=...
-     JSON → list[Offer]
+Стратегия: прямая пагинация через API без предварительного сбора серверов.
+  GET sls.g2g.com/offer/search?seo_term=wow-classic-era-vanilla-gold&page=N
+  JSON → list[Offer]
 
 Антибот:
-  - asyncio.Semaphore(2) — не более 2 параллельных запросов к API
-  - random delay 1–3 сек между запросами
-  - retry × 3 с exponential backoff при ошибке
+  - retry × 3 с exponential backoff при ошибке / 429 / 5xx
+  - timeout 15 сек
 """
 
 import asyncio
 import logging
-import random
 import re
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import parse_qs, urlparse
 
 import httpx
-from bs4 import BeautifulSoup
 
 from api.schemas import Offer
 
 logger = logging.getLogger(__name__)
 
 SOURCE = "g2g"
-fallback_count = 0
 
 # ── Regex для парсинга заголовка G2G ──────────────────────────────────────────
 # "Spineshatter [EU - Anniversary] - Alliance"
 # "Nightslayer [US - Anniversary #2] - Horde"
 # "Bloodsail Buccaneers [US - Classic Era] - Alliance"
 _TITLE_RE = re.compile(
-    r"^(?P<server>.+?)\s*"          # server_name (жадный до первой '[')
-    r"\[(?P<region>[A-Za-z]{2,})"  # [EU / US / KR / TW ...
+    r"^(?P<server>.+?)\s*"           # server_name (нежадный до первой '[')
+    r"\[(?P<region>[A-Za-z]{2,})"   # [EU / US / KR / TW ...
     r"\s*-\s*"
-    r"(?P<version>[^\]]+?)\s*\]"   # версия до ']', обрезаем пробелы
+    r"(?P<version>[^\]]+?)\s*\]"    # версия до ']', обрезаем пробелы
     r"\s*-\s*"
     r"(?P<faction>Alliance|Horde)",  # фракция (case-insensitive ниже)
     re.IGNORECASE,
 )
 
 # ── Константы ─────────────────────────────────────────────────────────────────
-_CATEGORY_URL = "https://www.g2g.com/categories/wow-classic-era-vanilla-gold"
-_SEARCH_API   = "https://sls.g2g.com/offer/search"
-_SEO_TERM     = "wow-classic-era-vanilla-gold"
-_PAGES        = range(1, 6)     # страницы 1..5
-_CONCURRENCY  = 2
-_PAGE_SIZE    = 50
-_RETRY_COUNT  = 3
-_TIMEOUT      = 15.0
-
-_HTML_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
+_SEARCH_API = "https://sls.g2g.com/offer/search"
+_SEO_TERM   = "wow-classic-era-vanilla-gold"
+_PAGE_SIZE  = 100
+_MAX_PAGES  = 10
+_RETRY_COUNT = 3
+_TIMEOUT    = 15.0
 
 _API_HEADERS = {
     "User-Agent": (
@@ -94,18 +75,6 @@ def _extract_faction(title: str) -> str:
     return "Horde"  # default
 
 
-def _extract_region_id(href: str) -> str | None:
-    """Извлекает region_id из URL типа:
-    /categories/wow-classic-era-vanilla-gold?region_id=us_wow_classic_era_nightslayer_horde
-    """
-    try:
-        qs = parse_qs(urlparse(href).query)
-        ids = qs.get("region_id", [])
-        return ids[0] if ids else None
-    except Exception:
-        return None
-
-
 def parse_g2g_title(title: str) -> tuple[str, str, str, str]:
     """Парсит RAW заголовок G2G в компоненты сервера.
 
@@ -126,8 +95,6 @@ def parse_g2g_title(title: str) -> tuple[str, str, str, str]:
     """
     m = _TITLE_RE.match(title.strip())
     if not m:
-        global fallback_count
-        fallback_count += 1
         logger.debug("G2G parse_g2g_title: не совпал шаблон для %r", title)
         return title.strip(), "", "", _extract_faction(title)
 
@@ -180,147 +147,22 @@ async def _http_get_with_retry(
     raise last_exc
 
 
-# ── Этап 1: сбор серверов ─────────────────────────────────────────────────────
+# ── Парсинг JSON → Offer ──────────────────────────────────────────────────────
 
-async def _fetch_servers_page(
-    client: httpx.AsyncClient,
-    page: int,
-) -> list[dict]:
-    """Парсит одну страницу категории, возвращает список {title, region_id}."""
-    try:
-        resp = await _http_get_with_retry(
-            client,
-            _CATEGORY_URL,
-            params={"page": page},
-            headers=_HTML_HEADERS,
-        )
-    except Exception as exc:
-        logger.warning("G2G: не удалось загрузить страницу %d: %s", page, exc)
-        return []
+def parse_g2g(data: dict, fetched_at: datetime) -> list[Offer]:
+    """Преобразует JSON-ответ /offer/search (все страницы) в list[Offer].
 
-    try:
-        soup = BeautifulSoup(resp.text, "html.parser")
-    except Exception as exc:
-        logger.warning("G2G: BS4 упал на странице %d: %s", page, exc)
-        return []
-
-    servers: list[dict] = []
-
-    # Ищем все <a href="...?region_id=..."> — ссылки на подкатегории серверов
-    for tag in soup.find_all("a", href=True):
-        href: str = tag["href"]
-        if "region_id=" not in href:
-            continue
-
-        region_id = _extract_region_id(href)
-        if not region_id:
-            continue
-
-        # Название сервера берём из текста тега; fallback — из самого region_id
-        title = tag.get_text(separator=" ", strip=True)
-        if not title:
-            title = region_id.replace("_", " ").title()
-
-        servers.append({"title": title, "region_id": region_id})
-
-    logger.debug("G2G: страница %d → %d серверов", page, len(servers))
-    return servers
-
-
-async def fetch_g2g_servers() -> list[dict]:
-    """Собирает все серверы со страниц 1..5 категории G2G.
-
-    Возвращает дедуплицированный список [{title, region_id}, ...].
-    """
-    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-        tasks = [_fetch_servers_page(client, p) for p in _PAGES]
-        pages = await asyncio.gather(*tasks, return_exceptions=True)
-
-    seen: set[str] = set()
-    result: list[dict] = []
-
-    for page_result in pages:
-        if isinstance(page_result, Exception):
-            logger.warning("G2G: ошибка при сборе серверов: %s", page_result)
-            continue
-        for srv in page_result:
-            rid = srv["region_id"]
-            if rid not in seen:
-                seen.add(rid)
-                result.append(srv)
-
-    logger.info("G2G: собрано %d уникальных серверов", len(result))
-    return result
-
-
-# ── Этап 2: fetch офферов ─────────────────────────────────────────────────────
-
-async def fetch_g2g_offers(
-    client: httpx.AsyncClient,
-    region_id: str,
-) -> dict:
-    """GET sls.g2g.com/offer/search для одного region_id (с пагинацией)."""
-    try:
-        all_items: list[dict] = []
-        page = 1
-        while True:
-            params = {
-                "seo_term":  _SEO_TERM,
-                "region_id": region_id,
-                "currency":  "USD",
-                "page_size": _PAGE_SIZE,
-                "page":      page,
-                "v":         "v2",
-            }
-            resp = await _http_get_with_retry(
-                client,
-                _SEARCH_API,
-                params=params,
-                headers=_API_HEADERS,
-            )
-            payload = resp.json()
-            page_items = payload.get("data") or []
-            if not isinstance(page_items, list) or not page_items:
-                break
-            all_items.extend(page_items)
-            if len(page_items) < _PAGE_SIZE:
-                break
-            page += 1
-        return {"data": all_items}
-    except Exception as exc:
-        logger.warning("G2G: не удалось получить офферы для %r: %s", region_id, exc)
-        return {}
-
-
-# ── Этап 3: парсинг JSON → Offer ──────────────────────────────────────────────
-
-def parse_g2g(data: dict, title: str, fetched_at: datetime) -> list[Offer]:
-    """Преобразует JSON-ответ /offer/search в list[Offer].
-
-    title — RAW строка из G2G (например "Spineshatter [EU - Anniversary] - Alliance").
-    Нормализуется через parse_g2g_title():
+    Каждый item содержит поле title — RAW строка вида:
+      "Spineshatter [EU - Anniversary] - Alliance"
+    parse_g2g_title() нормализует её в:
       display_server = "(EU) Anniversary"  — совпадает с форматом FunPay
       server_name    = "Spineshatter"      — сервер внутри группы
       faction        = "Alliance"
     """
     items = data.get("data") or data.get("results") or []
     if not isinstance(items, list):
-        logger.debug("G2G: parse_g2g для %r — пустые данные", title)
+        logger.debug("G2G: parse_g2g — пустые данные")
         return []
-
-    # ── Парсим заголовок один раз для всей пачки офферов этого сервера ─────
-    server_name, region, version, faction = parse_g2g_title(title)
-
-    if region and version:
-        display_server = f"({region}) {version}"  # "(EU) Anniversary"
-    else:
-        # Fallback: нет структурированного формата — используем title как есть
-        display_server = server_name
-        logger.warning(
-            "G2G: не удалось нормализовать заголовок %r, "
-            "display_server=%r (фильтрация по серверу может не работать)",
-            title, display_server,
-        )
 
     offers: list[Offer] = []
     skipped = 0
@@ -329,8 +171,33 @@ def parse_g2g(data: dict, title: str, fetched_at: datetime) -> list[Offer]:
         if not isinstance(item, dict):
             continue
         try:
+            # ── Заголовок оффера определяет сервер / фракцию ─────────────────
+            raw_title = (
+                item.get("title")
+                or item.get("name")
+                or item.get("offer_title")
+                or ""
+            )
+            server_name, region, version, faction = parse_g2g_title(raw_title)
+
+            if region and version:
+                display_server = f"({region}) {version}"  # "(EU) Anniversary"
+            else:
+                display_server = server_name
+                if raw_title:
+                    logger.warning(
+                        "G2G: не удалось нормализовать заголовок %r, "
+                        "display_server=%r",
+                        raw_title, display_server,
+                    )
+
+            # ── Цена и объём ──────────────────────────────────────────────────
             unit_price = item.get("unit_price") or item.get("unitPrice")
-            amount     = item.get("available_qty") or item.get("quantity") or item.get("amount")
+            amount     = (
+                item.get("available_qty")
+                or item.get("quantity")
+                or item.get("amount")
+            )
 
             if unit_price is None or amount is None:
                 skipped += 1
@@ -345,17 +212,18 @@ def parse_g2g(data: dict, title: str, fetched_at: datetime) -> list[Offer]:
 
             price_per_1k = round(unit_price * 1000.0, 4)
 
-            offer_id = item.get("offer_id") or item.get("id")
-            offer_id = f"g2g_{offer_id}" if offer_id else f"g2g_{uuid.uuid4().hex[:12]}"
-
-            seller = str(item.get("username") or item.get("seller") or "unknown").strip()
-
-            # offer_url: строим из offer_id если доступен
-            raw_id = item.get("offer_id") or item.get("id") or ""
+            # ── ID / URL / продавец ───────────────────────────────────────────
+            raw_id   = item.get("offer_id") or item.get("id") or ""
+            offer_id = f"g2g_{raw_id}" if raw_id else f"g2g_{uuid.uuid4().hex[:12]}"
             offer_url = f"https://www.g2g.com/offer/{raw_id}" if raw_id else None
+            seller    = str(item.get("username") or item.get("seller") or "unknown").strip()
 
-            # updated_at: берём из поля или fallback на fetched_at
-            raw_ts = item.get("updated_at") or item.get("updatedAt") or item.get("updated")
+            # ── Дата обновления ───────────────────────────────────────────────
+            raw_ts = (
+                item.get("updated_at")
+                or item.get("updatedAt")
+                or item.get("updated")
+            )
             try:
                 updated_at = (
                     datetime.fromisoformat(str(raw_ts)).astimezone(timezone.utc)
@@ -368,9 +236,9 @@ def parse_g2g(data: dict, title: str, fetched_at: datetime) -> list[Offer]:
             offers.append(Offer(
                 id=offer_id,
                 source=SOURCE,
-                server=display_server,      # model_validator → lowercase slug
-                display_server=display_server,  # "(EU) Anniversary"
-                server_name=server_name,    # "Spineshatter"
+                server=display_server,        # model_validator → lowercase slug
+                display_server=display_server, # "(EU) Anniversary"
+                server_name=server_name,       # "Spineshatter"
                 faction=faction,
                 price_per_1k=price_per_1k,
                 amount_gold=amount,
@@ -385,82 +253,80 @@ def parse_g2g(data: dict, title: str, fetched_at: datetime) -> list[Offer]:
             logger.debug("G2G: пропуск оффера %r — %s", item.get("offer_id"), exc)
 
     if skipped:
-        logger.debug("G2G: %r — пропущено %d/%d офферов", title, skipped, len(items))
+        logger.debug("G2G: пропущено %d/%d офферов", skipped, len(items))
 
     return offers
 
 
-# ── Этап 4+5: основная функция со Semaphore и jitter ─────────────────────────
+# ── Основная функция: прямая пагинация без region_id ─────────────────────────
 
 async def fetch_g2g_all() -> list[Offer]:
-    """Собирает все офферы G2G по всем серверам.
+    """Собирает все офферы G2G через прямую пагинацию /offer/search.
 
-    - Concurrency = 2 (Semaphore)
-    - Jitter delay 1–3 сек между запросами
-    - Retry по 3 раза на каждый сервер
-    - Ошибки не прерывают общий сбор
+    Не требует предварительного сбора серверов.
+    Защита от бесконечного цикла: не более _MAX_PAGES страниц.
     """
-    global fallback_count
-    fallback_count = 0
-    servers = await fetch_g2g_servers()
-    if not servers:
-        logger.warning("G2G: список серверов пуст — офферы не будут собраны")
-        return []
-    if len(servers) > 100:
-        logger.warning("G2G: too many servers, limiting to 100")
-        servers = servers[:100]
-
-    sem      = asyncio.Semaphore(_CONCURRENCY)
     fetched_at = datetime.now(timezone.utc)
-    all_offers: list[Offer] = []
-    total_servers = len(servers)
-    success = 0
-    failed = 0
+    all_items: list[dict] = []
 
     async with httpx.AsyncClient(
         timeout=_TIMEOUT,
         follow_redirects=True,
         headers=_API_HEADERS,
     ) as client:
+        for page in range(1, _MAX_PAGES + 1):
+            params = {
+                "seo_term":  _SEO_TERM,
+                "currency":  "USD",
+                "page_size": _PAGE_SIZE,
+                "page":      page,
+                "v":         "v2",
+            }
+            try:
+                resp = await _http_get_with_retry(
+                    client,
+                    _SEARCH_API,
+                    params=params,
+                    headers=_API_HEADERS,
+                )
+            except Exception as exc:
+                logger.warning("G2G: страница %d недоступна: %s", page, exc)
+                break
 
-        async def _fetch_one(srv: dict) -> list[Offer]:
-            nonlocal success, failed
-            async with sem:
-                # Jitter: случайная пауза перед каждым запросом
-                await asyncio.sleep(random.uniform(1.0, 3.0))
-                try:
-                    data = await fetch_g2g_offers(client, srv["region_id"])
-                    if not data:
-                        failed += 1
-                        return []
-                    offers = parse_g2g(data, srv["title"], fetched_at)
-                    success += 1
-                    return offers
-                except Exception:
-                    failed += 1
-                    raise
+            try:
+                payload = resp.json()
+            except Exception as exc:
+                logger.warning("G2G: невалидный JSON на странице %d: %s", page, exc)
+                break
 
-        tasks = [_fetch_one(srv) for srv in servers]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+            page_items = payload.get("data") or []
+            if not isinstance(page_items, list) or not page_items:
+                logger.debug("G2G: страница %d пуста — стоп", page)
+                break
 
+            all_items.extend(page_items)
+            logger.debug("G2G: страница %d → %d офферов (всего %d)", page, len(page_items), len(all_items))
+
+            if len(page_items) < _PAGE_SIZE:
+                # Последняя страница — данных меньше чем page_size
+                break
+
+    if not all_items:
+        logger.warning("G2G: API вернул 0 офферов")
+        return []
+
+    offers = parse_g2g({"data": all_items}, fetched_at)
+
+    # Дедупликация по offer.id
     seen: set[str] = set()
-    for res in results:
-        if isinstance(res, Exception):
-            logger.warning("G2G: ошибка при сборе офферов: %s", res)
-            continue
-        for offer in res:
-            if offer.id not in seen:
-                seen.add(offer.id)
-                all_offers.append(offer)
+    result: list[Offer] = []
+    for o in offers:
+        if o.id not in seen:
+            seen.add(o.id)
+            result.append(o)
 
-    logger.info(
-        "G2G: собрано %d офферов с %d серверов",
-        len(all_offers), len(servers),
-    )
-    if fallback_count:
-        logger.warning("G2G fallback parse count: %d", fallback_count)
-    logger.info("G2G: servers processed %d/%d, failed=%d", success, total_servers, failed)
-    return all_offers
+    logger.info("G2G: всего офферов: %d (raw=%d, дубли=%d)", len(result), len(offers), len(offers) - len(result))
+    return result
 
 
 # ── Entry point (вызывается из offers_service.SOURCES) ───────────────────────
