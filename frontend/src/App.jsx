@@ -1,10 +1,9 @@
-import { useRef, useState, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { Routes, Route, useNavigate, useParams, Navigate } from 'react-router-dom'
 import { useOffers } from './hooks/useOffers'
 import { fetchServers } from './api/offers'
 import { FiltersBar } from './components/FiltersBar'
 import { OffersTable } from './components/OffersTable'
-import { RefreshButton } from './components/RefreshButton'
 import { StatusBar } from './components/StatusBar'
 import { StatsBar } from './components/StatsBar'
 import { PriceChart } from './components/PriceChart'
@@ -55,7 +54,6 @@ function RootRedirect() {
 
 // ── Основной layout ───────────────────────────────────────────
 function Dashboard({ initialServer, servers, onSelectServer }) {
-  const refreshSignalRef = useRef(0)
   const {
     offers,
     filteredOffers,
@@ -66,14 +64,7 @@ function Dashboard({ initialServer, servers, onSelectServer }) {
     loading,
     error,
     lastFetched,
-    refresh,
-    nextRefreshIn,
   } = useOffers(initialServer)
-
-  function handleRefresh() {
-    refreshSignalRef.current += 1
-    refresh()
-  }
 
   return (
     <div className={styles.layout}>
@@ -91,11 +82,6 @@ function Dashboard({ initialServer, servers, onSelectServer }) {
           disabled={loading}
           servers={servers}
           onSelectServer={onSelectServer}
-        />
-        <RefreshButton
-          onRefresh={handleRefresh}
-          loading={loading}
-          nextRefreshIn={nextRefreshIn}
         />
       </div>
 

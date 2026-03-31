@@ -1,12 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { fetchOffers } from '../api/offers'
+import { fetchOffers, fetchMeta } from '../api/offers'
 
-/** Авто-загрузка с бэкенда (требование: каждые 15 сек) */
-const AUTO_REFRESH_MS = 15_000
+/** Интервал опроса /meta — лёгкий запрос, не тянет офферы */
+const META_POLL_MS = 10_000
 
 /**
- * Центральный хук: офферы, фильтры, загрузка, ошибка, авто- и ручной refresh.
- * Компоненты получают данные только пропсами.
+ * Центральный хук: офферы, фильтры, загрузка, ошибка.
+ *
+ * Логика обновления:
+ * 1. Первый рендер — сразу грузим офферы.
+ * 2. Каждые 10 сек — опрашиваем GET /meta (< 1 КБ).
+ *    Если last_update изменился → тихо перезапрашиваем /offers.
+ *    State НЕ очищается перед обновлением — UI не мигает.
+ * 3. Смена фильтра (сервер / фракция) — немедленный запрос.
  */
 export function useOffers(initialServer = '') {
   const [offers, setOffers] = useState([])
@@ -20,74 +26,72 @@ export function useOffers(initialServer = '') {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [lastFetched, setLastFetched] = useState(null)
-  const [nextRefreshIn, setNextRefreshIn] = useState(
-    Math.ceil(AUTO_REFRESH_MS / 1000),
-  )
 
   const filtersRef = useRef(filters)
-  const nextRefreshAtRef = useRef(Date.now() + AUTO_REFRESH_MS)
-  const autoRefreshTimerRef = useRef(null)
-  const countdownTimerRef = useRef(null)
+  // Последняя известная версия данных с бэкенда
+  const lastUpdateRef = useRef(null)
 
   useEffect(() => {
     filtersRef.current = filters
   }, [filters])
 
-  const load = useCallback(async (currentFilters) => {
-    setLoading(true)
+  // ── Загрузка офферов ────────────────────────────────────────
+  // silent=true — не трогает loading/error (фоновое обновление без мигания)
+  const load = useCallback(async (currentFilters, silent = false) => {
+    if (!silent) setLoading(true)
     setError(null)
     try {
-      // Передаём server в GET /offers?server=... напрямую.
-      // Бэкенд фильтрует по серверу на своей стороне.
       const data = await fetchOffers(currentFilters)
+      // Обновляем state без предварительного сброса — данные "плавно" меняются
       setOffers(data)
       const sources = Array.from(
         new Set(data.map((o) => o.source).filter(Boolean)),
       )
-      // Инициализируем фильтр один раз: при первом успешном ответе.
       setEnabledSources((prev) => (prev !== null ? prev : new Set(sources)))
       setLastFetched(new Date())
     } catch (err) {
-      setError(err?.message ?? String(err))
+      if (!silent) setError(err?.message ?? String(err))
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }, [])
 
-  const restartAutoRefresh = useCallback(() => {
-    clearInterval(autoRefreshTimerRef.current)
-    clearInterval(countdownTimerRef.current)
+  // ── Meta-polling: опрашиваем только версию ──────────────────
+  // Реальный fetch офферов — только если версия изменилась
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const meta = await fetchMeta()
+        const incoming = meta.last_update
+        if (incoming && incoming !== lastUpdateRef.current) {
+          lastUpdateRef.current = incoming
+          load(filtersRef.current, /* silent */ true)
+        }
+      } catch {
+        // Сеть недоступна — молчим, не ломаем UI
+      }
+    }
 
-    nextRefreshAtRef.current = Date.now() + AUTO_REFRESH_MS
-    setNextRefreshIn(
-      Math.max(0, Math.ceil((nextRefreshAtRef.current - Date.now()) / 1000)),
-    )
+    // Первичная загрузка сразу при монтировании
+    load(filtersRef.current)
 
-    autoRefreshTimerRef.current = setInterval(() => {
-      load(filtersRef.current)
-      nextRefreshAtRef.current = Date.now() + AUTO_REFRESH_MS
-      setNextRefreshIn(Math.ceil(AUTO_REFRESH_MS / 1000))
-    }, AUTO_REFRESH_MS)
-
-    countdownTimerRef.current = setInterval(() => {
-      const sec = Math.max(
-        0,
-        Math.ceil((nextRefreshAtRef.current - Date.now()) / 1000),
-      )
-      setNextRefreshIn(sec)
-    }, 1000)
-  }, [load])
-
-  const toggleSource = useCallback((source) => {
-    setEnabledSources((prev) => {
-      if (prev === null) return new Set([source])
-      const next = new Set(prev)
-      if (next.has(source)) next.delete(source)
-      else next.add(source)
-      return next
-    })
+    const timer = setInterval(poll, META_POLL_MS)
+    return () => clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- только mount
   }, [])
 
+  // ── Реакция на смену маршрута (initialServer) ───────────────
+  useEffect(() => {
+    setFiltersRaw((prev) => {
+      if (prev.server === initialServer) return prev
+      const next = { ...prev, server: initialServer }
+      filtersRef.current = next
+      load(next)
+      return next
+    })
+  }, [initialServer, load])
+
+  // ── Смена фильтра пользователем ─────────────────────────────
   const setFilters = useCallback(
     (updater) => {
       setFiltersRaw((prev) => {
@@ -100,32 +104,17 @@ export function useOffers(initialServer = '') {
     [load],
   )
 
-  const refresh = useCallback(() => {
-    load(filtersRef.current)
-    restartAutoRefresh()
-  }, [load, restartAutoRefresh])
-
-  useEffect(() => {
-    load(filtersRef.current)
-    restartAutoRefresh()
-    return () => {
-      clearInterval(autoRefreshTimerRef.current)
-      clearInterval(countdownTimerRef.current)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- только mount / unmount
-  }, [])
-
-  useEffect(() => {
-    setFiltersRaw((prev) => {
-      if (prev.server === initialServer) return prev
-      const next = { ...prev, server: initialServer }
-      filtersRef.current = next
-      load(next)
+  const toggleSource = useCallback((source) => {
+    setEnabledSources((prev) => {
+      if (prev === null) return new Set([source])
+      const next = new Set(prev)
+      if (next.has(source)) next.delete(source)
+      else next.add(source)
       return next
     })
-  }, [initialServer])
+  }, [])
 
-  // Клиентская фильтрация: только по source (сервер фильтрует бэкенд).
+  // Клиентская фильтрация: только по source (сервер фильтрует бэкенд)
   const filteredOffers =
     enabledSources === null
       ? offers
@@ -141,7 +130,5 @@ export function useOffers(initialServer = '') {
     loading,
     error,
     lastFetched,
-    refresh,
-    nextRefreshIn,
   }
 }

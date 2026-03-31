@@ -38,6 +38,7 @@ SOURCES: dict[str, Callable[[], Awaitable[list[Offer]]]] = {
 }
 
 _cache: list[Offer] = []
+_last_update: datetime | None = None  # UTC-время последнего успешного refresh()
 _LIQUIDITY_THRESHOLD = 1_000_000
 _MIN_OFFERS = 5
 
@@ -155,7 +156,7 @@ def get_price_history(
 
 
 async def refresh() -> None:
-    global _cache
+    global _cache, _last_update
     all_offers: list[Offer] = []
 
     for source_name, fetch_fn in SOURCES.items():
@@ -167,7 +168,13 @@ async def refresh() -> None:
             logger.exception("Источник %s: ошибка загрузки", source_name)
 
     _cache = all_offers
+    _last_update = datetime.now(timezone.utc)
     logger.info("Кэш обновлён: %d офферов", len(_cache))
+
+
+def get_meta() -> datetime | None:
+    """Возвращает UTC-время последнего успешного обновления кэша."""
+    return _last_update
 
 
 def get_servers() -> list[str]:

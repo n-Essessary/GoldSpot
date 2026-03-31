@@ -1,9 +1,17 @@
 from fastapi import APIRouter, Query
 
-from api.schemas import OffersResponse, PriceHistoryResponse, ServersResponse
-from service.offers_service import get_offers, get_price_history, get_servers
+from api.schemas import MetaResponse, OffersResponse, PriceHistoryResponse, ServersResponse
+from service.offers_service import get_meta, get_offers, get_price_history, get_servers
 
 router = APIRouter()
+
+
+@router.get("/meta", response_model=MetaResponse)
+async def get_meta_handler():
+    """Версия данных. Frontend опрашивает раз в ~10 сек.
+    Если last_update изменился — клиент перезапрашивает /offers и /price-history.
+    """
+    return MetaResponse(last_update=get_meta())
 
 
 @router.get("/servers", response_model=ServersResponse)

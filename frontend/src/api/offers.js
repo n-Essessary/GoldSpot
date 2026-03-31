@@ -22,6 +22,15 @@ export const API_BASE = 'https://scintillating-flexibility-production-809a.up.ra
  */
 
 /**
+ * @returns {Promise<{ last_update: string | null }>} Версия данных (UTC ISO 8601)
+ */
+export async function fetchMeta() {
+  const res = await fetch(`${API_BASE}/meta`)
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+  return res.json()
+}
+
+/**
  * @returns {Promise<string[]>} Список всех серверов с бэкенда
  */
 export async function fetchServers() {

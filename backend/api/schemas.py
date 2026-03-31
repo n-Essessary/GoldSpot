@@ -76,3 +76,19 @@ class PriceHistoryPoint(BaseModel):
 class PriceHistoryResponse(BaseModel):
     count: int
     points: list[PriceHistoryPoint]
+
+
+class MetaResponse(BaseModel):
+    """Версия данных: ISO 8601 UTC-время последнего обновления кэша.
+
+    Frontend опрашивает этот endpoint каждые ~10 сек и перезапрашивает
+    /offers + /price-history только если last_update изменился.
+    Null — кэш ещё не заполнен (сервер только запустился).
+    """
+    last_update: datetime | None = None
+
+    @field_serializer("last_update")
+    def _serialize_dt(self, value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
