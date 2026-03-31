@@ -14,11 +14,6 @@ const FACTIONS = ['Horde', 'Alliance']
  */
 export function FiltersBar({ filters, setFilters, disabled, servers, onSelectServer }) {
   const onFaction = (e) => setFilters({ faction: e.target.value })
-  const onLimit = (e) => {
-    const raw = e.target.value
-    const n = parseInt(raw, 10)
-    setFilters({ limit: Number.isFinite(n) ? Math.min(100, Math.max(1, n)) : 20 })
-  }
 
   return (
     <div className={styles.bar}>
@@ -44,19 +39,6 @@ export function FiltersBar({ filters, setFilters, disabled, servers, onSelectSer
             </option>
           ))}
         </select>
-      </label>
-
-      <label className={styles.field}>
-        <span className={styles.label}>Limit</span>
-        <input
-          className={styles.input}
-          type="number"
-          min={1}
-          max={100}
-          value={filters.limit}
-          onChange={onLimit}
-          disabled={disabled}
-        />
       </label>
     </div>
   )

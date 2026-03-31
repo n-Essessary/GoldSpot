@@ -16,7 +16,6 @@ export function useOffers(initialServer = '') {
     server: initialServer || '',
     faction: '',
     sort_by: 'price',
-    limit: 20,
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)

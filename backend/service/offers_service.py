@@ -191,7 +191,6 @@ def get_offers(
     server: str | None = None,
     faction: str | None = None,
     sort_by: str = "price",
-    limit: int = 20,
 ) -> list[Offer]:
     result = list(_cache)
 
@@ -213,4 +212,4 @@ def get_offers(
     secondary_key = "price_per_1k" if sort_by == "price" else "amount_gold"
     result.sort(key=lambda o: (o.display_server, getattr(o, secondary_key)))
 
-    return result[:limit]
+    return result

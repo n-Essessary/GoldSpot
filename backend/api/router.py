@@ -21,9 +21,8 @@ async def get_offers_handler(
     server: str | None = Query(None),
     faction: str | None = Query(None),
     sort_by: str = Query("price", pattern="^(price|amount)$"),
-    limit: int = Query(20, ge=1, le=100),
 ):
-    offers = get_offers(server, faction, sort_by, limit)
+    offers = get_offers(server, faction, sort_by)
     return OffersResponse(count=len(offers), offers=offers)
 
 

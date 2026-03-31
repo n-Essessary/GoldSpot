@@ -19,7 +19,6 @@ export const API_BASE = 'https://scintillating-flexibility-production-809a.up.ra
  * @property {string} [server]
  * @property {string} [faction]
  * @property {'price'|'amount'} [sort_by]
- * @property {number} [limit]
  */
 
 /**
@@ -42,9 +41,6 @@ export async function fetchOffers(filters = {}) {
   if (filters.server)  params.set('server',  filters.server)
   if (filters.faction) params.set('faction', filters.faction)
   if (filters.sort_by) params.set('sort_by', filters.sort_by)
-  if (filters.limit != null && filters.limit !== '') {
-    params.set('limit', String(filters.limit))
-  }
 
   const qs = params.toString()
   const url = `${API_BASE}/offers${qs ? `?${qs}` : ''}`
