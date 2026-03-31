@@ -3,21 +3,18 @@ from __future__ import annotations
 """
 G2G парсер офферов WoW Classic Era gold.
 
-Стратегия (двухуровневая):
-  1. Прямой запрос без region_id (page=1..N).
-     Если data непустой → используем его.
-  2. Fallback: динамически получаем region_id со страниц категории,
-     затем параллельно (semaphore=2) опрашиваем API для каждого ID.
-
-Получение region_id:
-  - Scrape pages 1–5: https://www.g2g.com/categories/wow-classic-era-vanilla-gold?page=N
-  - Извлекаем ссылки вида /offer/group?fa=...&region_id=XXXX
-  - Regex: region_id=([a-z0-9-]+)
-  - Собираем уникальные значения
+Стратегия (dataset_id):
+  1. GET /offer/keyword_relation/collection
+       → получаем список серверов: [{dataset_id, value}, ...]
+  2. Для каждого dataset_id — GET /offer/search
+       params: offer_attributes=dataset_id (+ seo_term, currency, etc.)
+       Пагинация до _MAX_PAGES или до пустой страницы.
+  3. Все офферы объединяются и дедуплицируются.
 
 Антибот:
   - retry × 3 с exponential backoff при ошибке / 429 / 5xx
-  - delay 1–2 сек между запросами к API
+  - semaphore=2 параллельных запроса к /offer/search
+  - delay 1–2 сек между запросами одного воркера
   - timeout 15 сек
 """
 
@@ -50,34 +47,29 @@ _TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# ── Regex для извлечения region_id из HTML ────────────────────────────────────
-_REGION_ID_RE = re.compile(r"region_id=([a-z0-9-]+)")
-
 # ── Константы ─────────────────────────────────────────────────────────────────
-_SEARCH_API   = "https://sls.g2g.com/offer/search"
-_CATEGORY_URL = "https://www.g2g.com/categories/wow-classic-era-vanilla-gold"
-_SEO_TERM     = "wow-classic-era-vanilla-gold"
-_PAGE_SIZE    = 100
-_MAX_PAGES    = 10
-_SCRAPE_PAGES = 5    # страниц категории для сбора region_id
-_RETRY_COUNT  = 3
-_TIMEOUT      = 15.0
-_CONCURRENCY  = 2    # параллельных запросов к API
+_SEARCH_API     = "https://sls.g2g.com/offer/search"
+_COLLECTION_API = "https://sls.g2g.com/offer/keyword_relation/collection"
 
-_API_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/124.0.0.0 Safari/537.36",
+_SEO_TERM    = "wow-classic-era-vanilla-gold"
+_BRAND_ID    = "lgc_game_27816"
+_SERVICE_ID  = "lgc_service_1"
+
+_PAGE_SIZE   = 100
+_MAX_PAGES   = 10
+_RETRY_COUNT = 3
+_TIMEOUT     = 15.0
+_CONCURRENCY = 2    # параллельных воркеров при обходе dataset_id
+
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
     "Accept": "application/json",
 }
 
-_HTML_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -118,9 +110,9 @@ def parse_g2g_title(title: str) -> tuple[str, str, str, str]:
         return title.strip(), "", "", _extract_faction(title)
 
     server_name = m.group("server").strip()
-    region      = m.group("region").strip().upper()   # нормализуем регистр
+    region      = m.group("region").strip().upper()
     version     = m.group("version").strip()
-    faction     = m.group("faction").strip().capitalize()  # "alliance" → "Alliance"
+    faction     = m.group("faction").strip().capitalize()
 
     return server_name, region, version, faction
 
@@ -130,19 +122,17 @@ async def _http_get_with_retry(
     url: str,
     *,
     params: dict | None = None,
-    headers: dict | None = None,
     retries: int = _RETRY_COUNT,
 ) -> httpx.Response:
     """GET с retry × retries и exponential backoff (1s → 2s → 4s)."""
     last_exc: Exception = RuntimeError("no attempts")
     for attempt in range(retries):
         try:
-            resp = await client.get(url, params=params, headers=headers)
+            resp = await client.get(url, params=params)
             resp.raise_for_status()
             return resp
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
-            # retry only for 429 and 5xx
             if status == 429 or status >= 500:
                 wait = 2 ** attempt * (3 if status == 429 else 1)
                 logger.warning(
@@ -152,7 +142,6 @@ async def _http_get_with_retry(
                 last_exc = exc
                 await asyncio.sleep(wait)
                 continue
-            # fail-fast for other 4xx
             logger.warning("G2G: HTTP %d для %s — fail-fast", status, url)
             raise
         except (httpx.TimeoutException, httpx.RequestError) as exc:
@@ -255,9 +244,9 @@ def parse_g2g(data: dict, fetched_at: datetime) -> list[Offer]:
             offers.append(Offer(
                 id=offer_id,
                 source=SOURCE,
-                server=display_server,         # model_validator → lowercase slug
-                display_server=display_server,  # "(EU) Anniversary"
-                server_name=server_name,        # "Spineshatter"
+                server=display_server,
+                display_server=display_server,
+                server_name=server_name,
                 faction=faction,
                 price_per_1k=price_per_1k,
                 amount_gold=amount,
@@ -277,41 +266,84 @@ def parse_g2g(data: dict, fetched_at: datetime) -> list[Offer]:
     return offers
 
 
-# ── Низкоуровневые функции пагинации ──────────────────────────────────────────
+# ── Получение списка серверов (dataset_id) ────────────────────────────────────
 
-def _build_params(page: int, region_id: str | None = None) -> dict:
-    """Строит params для /offer/search."""
-    params: dict = {
-        "seo_term":  _SEO_TERM,
-        "country":   "UA",
-        "currency":  "USD",
-        "page_size": _PAGE_SIZE,
-        "page":      page,
-        "sort":      "recommended_v2",
-        "v":         "v2",
-    }
-    if region_id is not None:
-        params["region_id"] = region_id
-    return params
-
-
-async def _fetch_all_pages(
+async def fetch_g2g_datasets(
     client: httpx.AsyncClient,
-    region_id: str | None,
+) -> list[dict[str, str]]:
+    """Запрашивает /offer/keyword_relation/collection и возвращает список серверов.
+
+    Каждый элемент: {"dataset_id": "...", "value": "название сервера"}.
+
+    API требует brand_id + service_id; region_id опционален — пробуем без него.
+    Если ответ пуст — значит, категория не содержит серверов.
+    """
+    params: dict = {
+        "brand_id":              _BRAND_ID,
+        "service_id":            _SERVICE_ID,
+        "include_searchable_only": 0,
+    }
+
+    try:
+        resp = await _http_get_with_retry(client, _COLLECTION_API, params=params)
+        payload = resp.json()
+    except Exception as exc:
+        logger.error("G2G: не удалось получить список серверов (datasets): %s", exc)
+        return []
+
+    # Ответ: {"result": {"data": [{"dataset_id": "...", "value": "..."}, ...]}}
+    # или просто {"data": [...]}  — обрабатываем оба варианта.
+    raw: list = (
+        (payload.get("result") or {}).get("data")
+        or payload.get("data")
+        or []
+    )
+
+    datasets: list[dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        dataset_id = str(entry.get("dataset_id") or entry.get("id") or "").strip()
+        value      = str(entry.get("value") or entry.get("name") or "").strip()
+        if dataset_id:
+            datasets.append({"dataset_id": dataset_id, "value": value})
+
+    logger.info("G2G: получено серверов (datasets): %d", len(datasets))
+    return datasets
+
+
+# ── Пагинация для одного dataset_id ──────────────────────────────────────────
+
+def _build_search_params(page: int, dataset_id: str) -> dict:
+    """Строит params для GET /offer/search с offer_attributes=dataset_id."""
+    return {
+        "seo_term":         _SEO_TERM,
+        "country":          "UA",
+        "currency":         "USD",
+        "page_size":        _PAGE_SIZE,
+        "page":             page,
+        "sort":             "recommended_v2",
+        "v":                "v2",
+        "offer_attributes": dataset_id,
+    }
+
+
+async def _fetch_pages_for_dataset(
+    client: httpx.AsyncClient,
+    dataset_id: str,
+    server_value: str,
 ) -> list[dict]:
-    """Собирает все страницы для одного region_id (или без него).
+    """Собирает все страницы /offer/search для одного dataset_id.
 
     Возвращает сырой список item-словарей.
     """
     all_items: list[dict] = []
-    label = f"region_id={region_id!r}" if region_id else "без region_id"
+    label = f"dataset_id={dataset_id!r} ({server_value!r})"
 
     for page in range(1, _MAX_PAGES + 1):
-        params = _build_params(page, region_id)
+        params = _build_search_params(page, dataset_id)
         try:
-            resp = await _http_get_with_retry(
-                client, _SEARCH_API, params=params, headers=_API_HEADERS,
-            )
+            resp = await _http_get_with_retry(client, _SEARCH_API, params=params)
         except Exception as exc:
             logger.warning("G2G: страница %d (%s) недоступна: %s", page, label, exc)
             break
@@ -319,7 +351,9 @@ async def _fetch_all_pages(
         try:
             payload = resp.json()
         except Exception as exc:
-            logger.warning("G2G: невалидный JSON на странице %d (%s): %s", page, label, exc)
+            logger.warning(
+                "G2G: невалидный JSON на странице %d (%s): %s", page, label, exc,
+            )
             break
 
         page_items = payload.get("data") or []
@@ -334,108 +368,58 @@ async def _fetch_all_pages(
         )
 
         if len(page_items) < _PAGE_SIZE:
-            # Последняя страница — данных меньше чем page_size
             break
 
     return all_items
 
 
-# ── Стратегия 1: прямой запрос без region_id ─────────────────────────────────
-
-async def _fetch_direct(client: httpx.AsyncClient) -> list[dict]:
-    """Запрос без region_id. Возвращает items или []."""
-    items = await _fetch_all_pages(client, region_id=None)
-    if items:
-        logger.info("G2G: прямой запрос вернул %d офферов", len(items))
-    else:
-        logger.info("G2G: прямой запрос вернул 0 офферов → переходим к fallback")
-    return items
-
-
-# ── Получение реальных region_id со страниц категории ────────────────────────
-
-async def fetch_g2g_region_ids(client: httpx.AsyncClient) -> list[str]:
-    """Scrape страниц 1–_SCRAPE_PAGES категории G2G и собирает уникальные region_id.
-
-    Ищет ссылки вида /offer/group?fa=...&region_id=XXXX
-    и извлекает region_id через regex.
-
-    Возвращает список уникальных region_id (порядок — порядок первого появления).
-    """
-    seen: dict[str, None] = {}  # OrderedDict-like через обычный dict (Python 3.7+)
-
-    for page in range(1, _SCRAPE_PAGES + 1):
-        url = f"{_CATEGORY_URL}?page={page}"
-        try:
-            resp = await _http_get_with_retry(
-                client, url, headers=_HTML_HEADERS,
-            )
-            html = resp.text
-        except Exception as exc:
-            logger.warning("G2G: не удалось загрузить страницу категории %d: %s", page, exc)
-            continue
-
-        found = _REGION_ID_RE.findall(html)
-        new_count = 0
-        for rid in found:
-            if rid not in seen:
-                seen[rid] = None
-                new_count += 1
-
-        logger.debug(
-            "G2G: страница категории %d → найдено %d новых region_id (всего %d)",
-            page, new_count, len(seen),
-        )
-
-        # Небольшая пауза между scrape-запросами
-        await asyncio.sleep(random.uniform(1.0, 2.0))
-
-    region_ids = list(seen.keys())
-    logger.info("G2G: собрано уникальных region_id: %d → %s", len(region_ids), region_ids)
-    return region_ids
-
-
-# ── Стратегия 2: fallback через динамически полученные region_id ──────────────
-
-async def _fetch_one_region(
+async def _fetch_one_dataset(
     client: httpx.AsyncClient,
-    region_id: str,
+    dataset_id: str,
+    server_value: str,
     semaphore: asyncio.Semaphore,
 ) -> list[dict]:
-    """Запрос для одного region_id под семафором с задержкой (антибот)."""
+    """Обходит страницы для одного dataset_id под семафором с задержкой."""
     async with semaphore:
-        items = await _fetch_all_pages(client, region_id=region_id)
-        # Задержка после освобождения семафора, чтобы следующий запрос
-        # не стартовал мгновенно
+        items = await _fetch_pages_for_dataset(client, dataset_id, server_value)
         await asyncio.sleep(random.uniform(1.0, 2.0))
         return items
 
 
-async def _fetch_fallback(client: httpx.AsyncClient) -> list[dict]:
-    """Динамически получает region_id и параллельно опрашивает API.
+# ── Сбор всех офферов по всем dataset_id ─────────────────────────────────────
 
-    1. Scrape страниц категории → уникальные region_id.
-    2. Параллельный обход (semaphore=_CONCURRENCY=2).
+async def _fetch_all_datasets(client: httpx.AsyncClient) -> list[dict]:
+    """Получает datasets → параллельно обходит каждый (semaphore=_CONCURRENCY).
+
+    Возвращает объединённый сырой список item-словарей.
     """
-    region_ids = await fetch_g2g_region_ids(client)
-
-    if not region_ids:
-        logger.warning("G2G: не удалось получить ни одного region_id — fallback пуст")
+    datasets = await fetch_g2g_datasets(client)
+    if not datasets:
+        logger.warning("G2G: список серверов пуст — офферы не будут получены")
         return []
 
     semaphore = asyncio.Semaphore(_CONCURRENCY)
     tasks = [
-        _fetch_one_region(client, rid, semaphore)
-        for rid in region_ids
+        _fetch_one_dataset(
+            client,
+            ds["dataset_id"],
+            ds["value"],
+            semaphore,
+        )
+        for ds in datasets
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     all_items: list[dict] = []
-    for region_id, result in zip(region_ids, results):
+    for ds, result in zip(datasets, results):
+        did = ds["dataset_id"]
         if isinstance(result, Exception):
-            logger.warning("G2G: fallback region_id=%r ошибка: %s", region_id, result)
+            logger.warning("G2G: dataset_id=%r ошибка: %s", did, result)
         elif result:
-            logger.debug("G2G: fallback region_id=%r → %d офферов", region_id, len(result))
+            logger.debug(
+                "G2G: dataset_id=%r (%r) → %d офферов",
+                did, ds["value"], len(result),
+            )
             all_items.extend(result)
 
     return all_items
@@ -456,50 +440,35 @@ def _dedupe(offers: list[Offer]) -> list[Offer]:
 # ── Основная функция ──────────────────────────────────────────────────────────
 
 async def fetch_g2g_all() -> list[Offer]:
-    """Собирает все офферы G2G.
+    """Собирает все офферы G2G через dataset_id стратегию.
 
     Алгоритм:
-      1. Прямой запрос без region_id.
-         Если вернул данные → используем их.
-      2. Fallback: scrape region_id со страниц категории,
-         параллельный обход (semaphore=2).
-         Результаты объединяются и дедуплицируются.
+      1. GET /offer/keyword_relation/collection → список серверов (dataset_id).
+      2. Для каждого dataset_id — GET /offer/search?offer_attributes=<id>
+         (параллельно, semaphore=2, delay 1–2s между запросами).
+      3. Все результаты объединяются и дедуплицируются.
     """
     fetched_at = datetime.now(timezone.utc)
-    used_fallback = False
 
     async with httpx.AsyncClient(
         timeout=_TIMEOUT,
         follow_redirects=True,
-        headers=_API_HEADERS,
+        headers=_HEADERS,
     ) as client:
-
-        # ── Шаг 1: прямой запрос ─────────────────────────────────────────────
-        all_items = await _fetch_direct(client)
-
-        # ── Шаг 2: fallback если прямой запрос пуст ──────────────────────────
-        if not all_items:
-            used_fallback = True
-            all_items = await _fetch_fallback(client)
+        all_items = await _fetch_all_datasets(client)
 
     if not all_items:
-        logger.warning("G2G: API вернул 0 офферов (direct + fallback)")
+        logger.warning("G2G: API вернул 0 офферов")
         return []
 
     offers = parse_g2g({"data": all_items}, fetched_at)
     result = _dedupe(offers)
 
     dupes = len(offers) - len(result)
-    if used_fallback:
-        logger.info(
-            "G2G: fallback region_id used, offers=%d (raw=%d, дубли=%d)",
-            len(result), len(offers), dupes,
-        )
-    else:
-        logger.info(
-            "G2G: всего офферов: %d (raw=%d, дубли=%d)",
-            len(result), len(offers), dupes,
-        )
+    logger.info(
+        "G2G: всего офферов: %d (raw=%d, дубли=%d)",
+        len(result), len(offers), dupes,
+    )
 
     return result
 
