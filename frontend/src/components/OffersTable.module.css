@@ -105,6 +105,9 @@
 /* Объём */
 .gold  { font-size: 13px; color: var(--text-secondary); }
 
+/* Position Value — огромные позиции (> $9999) */
+.posHuge { color: #d4af37; font-weight: 600; }
+
 /* Продавец */
 .seller { font-size: 12px; color: var(--text-secondary); }
 

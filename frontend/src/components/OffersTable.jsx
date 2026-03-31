@@ -142,9 +142,15 @@ export function OffersTable({ offers, loading, error }) {
                 </td>
 
                 {/* Position Value = price_per_1k × (amount_gold / 1000) */}
-                <td className={`${styles.right} mono`}>
-                  ${(offer.price_per_1k * (offer.amount_gold / 1000)).toFixed(2)}
-                </td>
+                {(() => {
+                  const positionValue = offer.price_per_1k * (offer.amount_gold / 1000)
+                  const isHuge = positionValue > 9999
+                  return (
+                    <td className={`${styles.right} mono${isHuge ? ` ${styles.posHuge}` : ''}`}>
+                      {isHuge ? '∞' : `$${positionValue.toFixed(2)}`}
+                    </td>
+                  )
+                })()}
 
                 {/* Объём */}
                 <td className={`${styles.gold} ${styles.right} mono`}>
