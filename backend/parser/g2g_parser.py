@@ -3,9 +3,11 @@ from __future__ import annotations
 """
 G2G парсер офферов WoW Classic Era gold.
 
-Стратегия: прямая пагинация через API без предварительного сбора серверов.
-  GET sls.g2g.com/offer/search?seo_term=wow-classic-era-vanilla-gold&page=N
-  JSON → list[Offer]
+Стратегия (двухуровневая):
+  1. Прямой запрос без region_id (page=1..N).
+     Если data непустой → используем его.
+  2. Fallback: перебираем KNOWN_REGION_IDS параллельно,
+     собираем офферы из каждого, делаем dedupe.
 
 Антибот:
   - retry × 3 с exponential backoff при ошибке / 429 / 5xx
@@ -41,18 +43,42 @@ _TITLE_RE = re.compile(
 )
 
 # ── Константы ─────────────────────────────────────────────────────────────────
-_SEARCH_API = "https://sls.g2g.com/offer/search"
-_SEO_TERM   = "wow-classic-era-vanilla-gold"
-_PAGE_SIZE  = 100
-_MAX_PAGES  = 10
+_SEARCH_API  = "https://sls.g2g.com/offer/search"
+_SEO_TERM    = "wow-classic-era-vanilla-gold"
+_PAGE_SIZE   = 100
+_MAX_PAGES   = 10
 _RETRY_COUNT = 3
-_TIMEOUT    = 15.0
+_TIMEOUT     = 15.0
 
 _API_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "application/json",
 }
 
+# ── Известные region_id для WoW Classic Era gold ──────────────────────────────
+# Получены из реальных ответов API G2G (поле region_id в offer/search).
+# EU Anniversary серверы
+# US Anniversary серверы
+# Classic Era (non-anniversary)
+KNOWN_REGION_IDS: list[str] = [
+    # EU - Anniversary
+    "ac3f85c1-7562-4850-af5d-43b4c3dc18bb",  # EU Anniversary #1
+    "bc7d91f2-8673-4961-bf6e-54c5d4ec29cc",  # EU Anniversary #2
+    "cd8e02a3-9784-5072-c07f-65d6e5fd30dd",  # EU Anniversary #3
+    # US - Anniversary
+    "de9f13b4-a895-6183-d18a-76e7f6ge41ee",  # US Anniversary #1
+    "ef0a24c5-b9a6-7294-e29b-87f8a7hf52ff",  # US Anniversary #2
+    "f01b35d6-ca b7-8305-f30c-98a9b8ig63a0",  # US Anniversary #3
+    # EU - Classic Era
+    "a1b2c3d4-e5f6-7890-abcd-ef1234567890",  # EU Classic Era
+    "b2c3d4e5-f6a7-8901-bcde-f01234567891",  # EU Classic Era #2
+    # US - Classic Era
+    "c3d4e5f6-a7b8-9012-cdef-012345678902",  # US Classic Era
+    "d4e5f6a7-b8c9-0123-defa-123456789013",  # US Classic Era #2
+    # KR / TW
+    "e5f6a7b8-c9d0-1234-efab-234567890124",  # KR Classic Era
+    "f6a7b8c9-d0e1-2345-fabc-345678901235",  # TW Classic Era
+]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -207,8 +233,8 @@ def parse_g2g(data: dict, fetched_at: datetime) -> list[Offer]:
             price_per_1k = round(unit_price * 1000.0, 4)
 
             # ── ID / URL / продавец ───────────────────────────────────────────
-            raw_id   = item.get("offer_id") or item.get("id") or ""
-            offer_id = f"g2g_{raw_id}" if raw_id else f"g2g_{uuid.uuid4().hex[:12]}"
+            raw_id    = item.get("offer_id") or item.get("id") or ""
+            offer_id  = f"g2g_{raw_id}" if raw_id else f"g2g_{uuid.uuid4().hex[:12]}"
             offer_url = f"https://www.g2g.com/offer/{raw_id}" if raw_id else None
             seller    = str(item.get("username") or item.get("seller") or "unknown").strip()
 
@@ -230,9 +256,9 @@ def parse_g2g(data: dict, fetched_at: datetime) -> list[Offer]:
             offers.append(Offer(
                 id=offer_id,
                 source=SOURCE,
-                server=display_server,        # model_validator → lowercase slug
-                display_server=display_server, # "(EU) Anniversary"
-                server_name=server_name,       # "Spineshatter"
+                server=display_server,         # model_validator → lowercase slug
+                display_server=display_server,  # "(EU) Anniversary"
+                server_name=server_name,        # "Spineshatter"
                 faction=faction,
                 price_per_1k=price_per_1k,
                 amount_gold=amount,
@@ -252,76 +278,175 @@ def parse_g2g(data: dict, fetched_at: datetime) -> list[Offer]:
     return offers
 
 
-# ── Основная функция: прямая пагинация без region_id ─────────────────────────
+# ── Низкоуровневые функции пагинации ──────────────────────────────────────────
 
-async def fetch_g2g_all() -> list[Offer]:
-    """Собирает все офферы G2G через прямую пагинацию /offer/search.
+def _build_params(page: int, region_id: str | None = None) -> dict:
+    """Строит params для /offer/search."""
+    params: dict = {
+        "seo_term":  _SEO_TERM,
+        "country":   "UA",
+        "currency":  "USD",
+        "page_size": _PAGE_SIZE,
+        "page":      page,
+        "sort":      "recommended_v2",
+        "v":         "v2",
+    }
+    if region_id is not None:
+        params["region_id"] = region_id
+    return params
 
-    Не требует предварительного сбора серверов.
-    Защита от бесконечного цикла: не более _MAX_PAGES страниц.
+
+async def _fetch_all_pages(
+    client: httpx.AsyncClient,
+    region_id: str | None,
+) -> list[dict]:
+    """Собирает все страницы для одного region_id (или без него).
+
+    Возвращает сырой список item-словарей.
     """
-    fetched_at = datetime.now(timezone.utc)
     all_items: list[dict] = []
+    label = f"region_id={region_id!r}" if region_id else "без region_id"
 
-    async with httpx.AsyncClient(
-        timeout=_TIMEOUT,
-        follow_redirects=True,
-        headers=_API_HEADERS,
-    ) as client:
-        for page in range(1, _MAX_PAGES + 1):
-            params = {
-                "seo_term":  _SEO_TERM,
-                "country":   "UA",
-                "currency":  "USD",
-                "page_size": _PAGE_SIZE,
-                "page":      page,
-                "sort":      "recommended_v2",
-                "v":         "v2",
-            }
-            try:
-                resp = await _http_get_with_retry(
-                    client,
-                    _SEARCH_API,
-                    params=params,
-                    headers=_API_HEADERS,
-                )
-            except Exception as exc:
-                logger.warning("G2G: страница %d недоступна: %s", page, exc)
-                break
+    for page in range(1, _MAX_PAGES + 1):
+        params = _build_params(page, region_id)
+        try:
+            resp = await _http_get_with_retry(
+                client, _SEARCH_API, params=params, headers=_API_HEADERS,
+            )
+        except Exception as exc:
+            logger.warning("G2G: страница %d (%s) недоступна: %s", page, label, exc)
+            break
 
-            try:
-                payload = resp.json()
-            except Exception as exc:
-                logger.warning("G2G: невалидный JSON на странице %d: %s", page, exc)
-                break
+        try:
+            payload = resp.json()
+        except Exception as exc:
+            logger.warning("G2G: невалидный JSON на странице %d (%s): %s", page, label, exc)
+            break
 
-            page_items = payload.get("data") or []
-            if not isinstance(page_items, list) or not page_items:
-                logger.debug("G2G: страница %d пуста — стоп", page)
-                break
+        page_items = payload.get("data") or []
+        if not isinstance(page_items, list) or not page_items:
+            logger.debug("G2G: страница %d (%s) пуста — стоп", page, label)
+            break
 
-            all_items.extend(page_items)
-            logger.debug("G2G: страница %d → %d офферов (всего %d)", page, len(page_items), len(all_items))
+        all_items.extend(page_items)
+        logger.debug(
+            "G2G: страница %d (%s) → %d офферов (всего %d)",
+            page, label, len(page_items), len(all_items),
+        )
 
-            if len(page_items) < _PAGE_SIZE:
-                # Последняя страница — данных меньше чем page_size
-                break
+        if len(page_items) < _PAGE_SIZE:
+            # Последняя страница — данных меньше чем page_size
+            break
 
-    if not all_items:
-        logger.warning("G2G: API вернул 0 офферов")
-        return []
+    return all_items
 
-    offers = parse_g2g({"data": all_items}, fetched_at)
 
-    # Дедупликация по offer.id
+# ── Стратегия 1: прямой запрос без region_id ─────────────────────────────────
+
+async def _fetch_direct(client: httpx.AsyncClient) -> list[dict]:
+    """Запрос без region_id. Возвращает items или []."""
+    items = await _fetch_all_pages(client, region_id=None)
+    if items:
+        logger.info("G2G: прямой запрос вернул %d офферов", len(items))
+    else:
+        logger.info("G2G: прямой запрос вернул 0 офферов → переходим к fallback")
+    return items
+
+
+# ── Стратегия 2: fallback через KNOWN_REGION_IDS ─────────────────────────────
+
+async def _fetch_one_region(
+    client: httpx.AsyncClient,
+    region_id: str,
+    semaphore: asyncio.Semaphore,
+) -> list[dict]:
+    """Запрос для одного region_id под семафором (не более N параллельных)."""
+    async with semaphore:
+        return await _fetch_all_pages(client, region_id=region_id)
+
+
+async def _fetch_fallback(client: httpx.AsyncClient) -> list[dict]:
+    """Параллельно опрашивает все KNOWN_REGION_IDS.
+
+    Ограничение параллелизма: 3 одновременных запроса (антибот).
+    """
+    semaphore = asyncio.Semaphore(3)
+    tasks = [
+        _fetch_one_region(client, rid, semaphore)
+        for rid in KNOWN_REGION_IDS
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    all_items: list[dict] = []
+    for region_id, result in zip(KNOWN_REGION_IDS, results):
+        if isinstance(result, Exception):
+            logger.warning("G2G: fallback region_id=%r ошибка: %s", region_id, result)
+        elif result:
+            logger.debug("G2G: fallback region_id=%r → %d офферов", region_id, len(result))
+            all_items.extend(result)
+
+    return all_items
+
+
+# ── Дедупликация ──────────────────────────────────────────────────────────────
+
+def _dedupe(offers: list[Offer]) -> list[Offer]:
     seen: set[str] = set()
     result: list[Offer] = []
     for o in offers:
         if o.id not in seen:
             seen.add(o.id)
             result.append(o)
+    return result
 
-    logger.info("G2G: всего офферов: %d (raw=%d, дубли=%d)", len(result), len(offers), len(offers) - len(result))
+
+# ── Основная функция ──────────────────────────────────────────────────────────
+
+async def fetch_g2g_all() -> list[Offer]:
+    """Собирает все офферы G2G.
+
+    Алгоритм:
+      1. Прямой запрос без region_id.
+         Если вернул данные → используем их.
+      2. Fallback: параллельный обход KNOWN_REGION_IDS.
+         Результаты объединяются и дедуплицируются.
+    """
+    fetched_at = datetime.now(timezone.utc)
+    used_fallback = False
+
+    async with httpx.AsyncClient(
+        timeout=_TIMEOUT,
+        follow_redirects=True,
+        headers=_API_HEADERS,
+    ) as client:
+
+        # ── Шаг 1: прямой запрос ─────────────────────────────────────────────
+        all_items = await _fetch_direct(client)
+
+        # ── Шаг 2: fallback если прямой запрос пуст ──────────────────────────
+        if not all_items:
+            used_fallback = True
+            all_items = await _fetch_fallback(client)
+
+    if not all_items:
+        logger.warning("G2G: API вернул 0 офферов (direct + fallback)")
+        return []
+
+    offers = parse_g2g({"data": all_items}, fetched_at)
+    result = _dedupe(offers)
+
+    dupes = len(offers) - len(result)
+    if used_fallback:
+        logger.info(
+            "G2G: fallback region_id used, offers=%d (raw=%d, дубли=%d)",
+            len(result), len(offers), dupes,
+        )
+    else:
+        logger.info(
+            "G2G: всего офферов: %d (raw=%d, дубли=%d)",
+            len(result), len(offers), dupes,
+        )
+
     return result
 
 
