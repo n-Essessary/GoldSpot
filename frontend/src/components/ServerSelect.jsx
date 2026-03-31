@@ -1,15 +1,11 @@
-import { useMemo } from 'react'
 import styles from './ServerSelect.module.css'
-import { normalizeServer } from '../utils/server'
 
 /**
- * Список серверов приходит напрямую из GET /servers — без ограничений.
+ * Список серверов приходит напрямую из GET /servers в RAW виде.
+ * Никакой нормализации — value опции = RAW строка = то, что принимает бэкенд.
  *
  * Компонент НЕ знает о роутере: при выборе вызывает onSelectServer,
  * а уже выше (в App/route wrapper) делается navigate('/server/...').
- *
- * value опций — нормализованный slug ("spineshatter"),
- * label опций — красивое имя ("Spineshatter (EU)").
  *
  * @param {{
  *  servers: string[]
@@ -24,16 +20,8 @@ export function ServerSelect({
   onSelectServer,
   disabled = false,
 }) {
-  // Нормализуем raw-строки из /servers → { slug, label }, сортируем по label.
-  // Без фильтрации и ограничения количества.
-  const options = useMemo(
-    () =>
-      servers
-        .map((raw) => normalizeServer(raw))
-        .filter(({ slug }) => slug)
-        .sort((a, b) => a.label.localeCompare(b.label)),
-    [servers],
-  )
+  // Сортируем по алфавиту, строки не трогаем.
+  const sorted = [...servers].sort((a, b) => a.localeCompare(b))
 
   return (
     <label className={styles.field}>
@@ -45,9 +33,9 @@ export function ServerSelect({
         disabled={disabled}
       >
         <option value="">Все</option>
-        {options.map(({ slug, label }) => (
-          <option key={slug} value={slug}>
-            {label}
+        {sorted.map((s) => (
+          <option key={s} value={s}>
+            {s}
           </option>
         ))}
       </select>

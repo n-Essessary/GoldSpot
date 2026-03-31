@@ -2,7 +2,6 @@ import { useRef, useState, useEffect } from 'react'
 import { Routes, Route, useNavigate, useParams, Navigate } from 'react-router-dom'
 import { useOffers } from './hooks/useOffers'
 import { fetchServers } from './api/offers'
-import { normalizeServer } from './utils/server'
 import { FiltersBar } from './components/FiltersBar'
 import { OffersTable } from './components/OffersTable'
 import { RefreshButton } from './components/RefreshButton'
@@ -46,10 +45,12 @@ function RootRedirect() {
 
   if (loading) return null
 
-  const first = servers[0]
-  const slug = first ? normalizeServer(first).slug : 'firemaw'
+  // Используем RAW строку из /servers — никакой нормализации.
+  // encodeURIComponent корректно обработает "(EU) Flamegor" → "%28EU%29%20Flamegor",
+  // React Router при useParams() автоматически декодирует обратно в "(EU) Flamegor".
+  const first = servers[0] ?? ''
 
-  return <Navigate to={`/server/${encodeURIComponent(slug)}`} replace />
+  return <Navigate to={`/server/${encodeURIComponent(first)}`} replace />
 }
 
 // ── Основной layout ───────────────────────────────────────────
