@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 SOURCE = "funpay"
 
 # ── URLs ────────────────────────────────────────────────────────────────────
-_INDEX_URL = "https://funpay.com/en/chips/114/"   # страница с dropdown
-_AJAX_URL  = "https://funpay.com/en/chips/get/"      # XHR-endpoint
+_INDEX_URL = "https://funpay.com/chips/114/"   # страница с dropdown
+_AJAX_URL  = "https://funpay.com/chips/get/"   # XHR-endpoint
 
 # game_id для WoW Classic gold (chips/114 → game=2)
 _GAME_ID = "2"
@@ -43,11 +43,12 @@ _HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
+    "Accept": "*/*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    # Обязателен для AJAX-endpoint — без него FunPay возвращает 403/пустой ответ
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     "X-Requested-With": "XMLHttpRequest",
-    "Referer": _INDEX_URL,
+    "Origin": "https://funpay.com",
+    "Referer": "https://funpay.com/chips/114/",
 }
 
 # ── Параметры параллелизма ───────────────────────────────────────────────────
@@ -330,7 +331,7 @@ async def _fetch_server(
             try:
                 resp = await client.post(
                     _AJAX_URL,
-                    data={"game": _GAME_ID, "server": server_id},
+                    data={"node": server_id},
                 )
 
                 if resp.status_code == 404:
