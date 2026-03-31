@@ -139,47 +139,66 @@ class G2GClient:
         service_id: str,
         relation_id: str,
         sort: str = "lowest_price",
-        page: int = 1,
         page_size: int = 48,
     ) -> list[G2GOffer]:
-        resp = await self._client.get(
-            f"{BASE}/offer/search",
-            params={
-                "brand_id": brand_id,
-                "service_id": service_id,
-                "relation_id": relation_id,
-                "country": self.country,
-                "currency": self.currency,
-                "sort": sort,
-                "page": page,
-                "page_size": page_size,
-            },
-        )
-        resp.raise_for_status()
+        all_offers: list[G2GOffer] = []
+        page = 1
+        max_pages = 10
 
-        results = resp.json().get("payload", {}).get("results", [])
-        offers: list[G2GOffer] = []
-        for o in results:
-            try:
-                offers.append(
-                    G2GOffer(
-                        offer_id=o.get("offer_id", ""),
-                        title=o.get("title", ""),
-                        server_name=o.get("title", ""),
-                        region_id=o.get("region_id", ""),
-                        relation_id=o.get("relation_id", ""),
-                        price_usd=float(o.get("unit_price_in_usd") or 0),
-                        min_qty=int(o.get("min_qty") or 1),
-                        available_qty=int(o.get("available_qty") or 0),
-                        seller=(o.get("username") or "").strip(),
-                        brand_id=o.get("brand_id", ""),
-                        service_id=o.get("service_id", ""),
-                        raw=o,
+        while page <= max_pages:
+            resp = await self._client.get(
+                f"{BASE}/offer/search",
+                params={
+                    "brand_id": brand_id,
+                    "service_id": service_id,
+                    "relation_id": relation_id,
+                    "country": self.country,
+                    "currency": self.currency,
+                    "sort": sort,
+                    "page": page,
+                    "page_size": page_size,
+                },
+            )
+            resp.raise_for_status()
+
+            results = resp.json().get("payload", {}).get("results", [])
+
+            if not results:
+                break
+
+            for o in results:
+                try:
+                    all_offers.append(
+                        G2GOffer(
+                            offer_id=o.get("offer_id", ""),
+                            title=o.get("title", ""),
+                            server_name=o.get("title", ""),
+                            region_id=o.get("region_id", ""),
+                            relation_id=o.get("relation_id", ""),
+                            price_usd=float(o.get("unit_price_in_usd") or 0),
+                            min_qty=int(o.get("min_qty") or 1),
+                            available_qty=int(o.get("available_qty") or 0),
+                            seller=(o.get("username") or "").strip(),
+                            brand_id=o.get("brand_id", ""),
+                            service_id=o.get("service_id", ""),
+                            raw=o,
+                        )
                     )
-                )
-            except (ValueError, TypeError):
-                continue
-        return offers
+                except (ValueError, TypeError):
+                    continue
+
+            logger.debug(
+                "G2G: relation_id=%s page=%d → %d офферов (всего %d)",
+                relation_id, page, len(results), len(all_offers),
+            )
+
+            if len(results) < page_size:
+                break  # последняя страница
+
+            page += 1
+            await asyncio.sleep(0.2)
+
+        return all_offers
 
 
 async def fetch_g2g_game(
