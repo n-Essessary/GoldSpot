@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from 'react'
 import { Routes, Route, useNavigate, useParams, Navigate } from 'react-router-dom'
 import { useOffers } from './hooks/useOffers'
-import { fetchOffers } from './api/offers'
+import { fetchServers } from './api/offers'
 import { normalizeServer } from './utils/server'
 import { FiltersBar } from './components/FiltersBar'
 import { OffersTable } from './components/OffersTable'
@@ -12,45 +12,48 @@ import { PriceChart } from './components/PriceChart'
 import { SourceSummary } from './components/SourceSummary'
 import styles from './App.module.css'
 
-const FALLBACK_SERVER = 'firemaw'
-
-// ── Хук: получить первый доступный сервер ────────────────────
-// Делает один запрос к /offers, возвращает первый сервер из данных.
-// Пока грузится — null (показываем loading), при ошибке — FALLBACK_SERVER.
-function useDefaultServer() {
-  const [server, setServer] = useState(null) // null = ещё не известен
+// ── Хук: загрузить все серверы с /servers ─────────────────────
+// Возвращает { servers: string[], loading: boolean }
+// servers — массив всех серверов (80+) с бэкенда, без ограничений.
+function useServers() {
+  const [servers, setServers] = useState([])
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     let cancelled = false
-    fetchOffers({ limit: 50, sort_by: 'price' })
-      .then((offers) => {
-        if (cancelled) return
-        const rawServer = offers[0]?.server
-        setServer(rawServer ? normalizeServer(rawServer).slug : FALLBACK_SERVER)
+    fetchServers()
+      .then((list) => {
+        if (!cancelled) setServers(list)
       })
-      .catch(() => {
-        if (!cancelled) setServer(FALLBACK_SERVER)
+      .catch((err) => {
+        console.error('[useServers] failed to load servers:', err)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
       })
     return () => {
       cancelled = true
     }
   }, [])
 
-  return server
+  return { servers, loading }
 }
 
-// ── Корневой маршрут: редирект на /server/:default ───────────
+// ── Корневой маршрут: редирект на /server/:first ──────────────
+// Использует первый сервер из /servers вместо запроса к /offers.
 function RootRedirect() {
-  const defaultServer = useDefaultServer()
+  const { servers, loading } = useServers()
 
-  // Пока сервер не известен — ничего не рендерим (мгновенно, один запрос)
-  if (defaultServer === null) return null
+  if (loading) return null
 
-  return <Navigate to={`/server/${encodeURIComponent(defaultServer)}`} replace />
+  const first = servers[0]
+  const slug = first ? normalizeServer(first).slug : 'firemaw'
+
+  return <Navigate to={`/server/${encodeURIComponent(slug)}`} replace />
 }
 
 // ── Основной layout ───────────────────────────────────────────
-function Dashboard({ initialServer, onSelectServer }) {
+function Dashboard({ initialServer, servers, onSelectServer }) {
   const refreshSignalRef = useRef(0)
   const {
     offers,
@@ -85,7 +88,7 @@ function Dashboard({ initialServer, onSelectServer }) {
           filters={filters}
           setFilters={setFilters}
           disabled={loading}
-          offers={offers}
+          servers={servers}
           onSelectServer={onSelectServer}
         />
         <RefreshButton
@@ -119,13 +122,22 @@ function Dashboard({ initialServer, onSelectServer }) {
 
 function DashboardRoute({ initialServer }) {
   const navigate = useNavigate()
+  // Загружаем серверы один раз на уровне DashboardRoute,
+  // чтобы список не перегружался при смене сервера.
+  const { servers } = useServers()
 
   const onSelectServer = (server) => {
     if (!server) navigate('/')
     else navigate(`/server/${encodeURIComponent(server)}`)
   }
 
-  return <Dashboard initialServer={initialServer} onSelectServer={onSelectServer} />
+  return (
+    <Dashboard
+      initialServer={initialServer}
+      servers={servers}
+      onSelectServer={onSelectServer}
+    />
+  )
 }
 
 function ServerRoute() {

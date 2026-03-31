@@ -23,6 +23,16 @@ export const API_BASE = 'https://scintillating-flexibility-production-809a.up.ra
  */
 
 /**
+ * @returns {Promise<string[]>} Список всех серверов с бэкенда
+ */
+export async function fetchServers() {
+  const res = await fetch(`${API_BASE}/servers`)
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+  const data = await res.json()
+  return data.servers ?? []
+}
+
+/**
  * @param {OffersFilters} filters
  * @returns {Promise<Offer[]>}
  */

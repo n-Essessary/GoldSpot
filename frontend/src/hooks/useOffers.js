@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { fetchOffers } from '../api/offers'
-import { normalizeServer } from '../utils/server'
 
 /** Авто-загрузка с бэкенда (требование: каждые 15 сек) */
 const AUTO_REFRESH_MS = 15_000
@@ -39,10 +38,9 @@ export function useOffers(initialServer = '') {
     setLoading(true)
     setError(null)
     try {
-      // server-фильтрация перенесена на клиент (normalizeServer),
-      // бэкенд получает все остальные параметры без server.
-      const { server: _server, ...apiFilters } = currentFilters
-      const data = await fetchOffers(apiFilters)
+      // Передаём server в GET /offers?server=... напрямую.
+      // Бэкенд фильтрует по серверу на своей стороне.
+      const data = await fetchOffers(currentFilters)
       setOffers(data)
       const sources = Array.from(
         new Set(data.map((o) => o.source).filter(Boolean)),
@@ -128,17 +126,11 @@ export function useOffers(initialServer = '') {
     })
   }, [initialServer])
 
-  // Клиентская фильтрация: source + server (по нормализованному slug)
-  let filteredOffers =
+  // Клиентская фильтрация: только по source (сервер фильтрует бэкенд).
+  const filteredOffers =
     enabledSources === null
       ? offers
       : offers.filter((o) => enabledSources.has(o.source))
-
-  if (filters.server) {
-    filteredOffers = filteredOffers.filter(
-      (o) => normalizeServer(o.server).slug === filters.server,
-    )
-  }
 
   return {
     offers,

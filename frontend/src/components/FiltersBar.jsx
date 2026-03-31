@@ -8,11 +8,11 @@ const FACTIONS = ['Horde', 'Alliance']
  *  filters: object,
  *  setFilters: function,
  *  disabled: boolean,
- *  offers: import('../api/offers').Offer[],
+ *  servers: string[],
  *  onSelectServer: (server: string) => void
  * }} props
  */
-export function FiltersBar({ filters, setFilters, disabled, offers, onSelectServer }) {
+export function FiltersBar({ filters, setFilters, disabled, servers, onSelectServer }) {
   const onFaction = (e) => setFilters({ faction: e.target.value })
   const onLimit = (e) => {
     const raw = e.target.value
@@ -23,7 +23,7 @@ export function FiltersBar({ filters, setFilters, disabled, offers, onSelectServ
   return (
     <div className={styles.bar}>
       <ServerSelect
-        offers={offers}
+        servers={servers}
         selectedServer={filters.server}
         onSelectServer={onSelectServer}
         disabled={disabled}
