@@ -31,7 +31,7 @@ SOURCE = "funpay"
 
 # ── URLs ────────────────────────────────────────────────────────────────────
 _INDEX_URL = "https://funpay.com/en/chips/114/"   # страница с dropdown
-_AJAX_URL  = "https://funpay.com/chips/get/"      # XHR-endpoint
+_AJAX_URL  = "https://funpay.com/en/chips/get/"      # XHR-endpoint
 
 # game_id для WoW Classic gold (chips/114 → game=2)
 _GAME_ID = "2"
