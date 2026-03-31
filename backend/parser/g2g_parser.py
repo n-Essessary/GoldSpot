@@ -77,14 +77,23 @@ class G2GRegion:
 
 
 def _parse_title(title: str) -> tuple[str, str, str, str]:
+    """Парсит RAW title G2G оффера → (server_name, region, version, faction).
+
+    "Spineshatter [EU - Anniversary] - Alliance"
+      → ("Spineshatter", "EU", "Anniversary", "Alliance")
+
+    Fallback при неудаче (title без скобок или нераспознанный формат):
+      → (title, "", "", faction)   # пустые region+version → display_server="Unknown"
+    """
     m = _TITLE_RE.match((title or "").strip())
     if not m:
         fallback_faction = "Alliance" if "alliance" in (title or "").lower() else "Horde"
-        return (title or "").strip(), "", "Classic", fallback_faction
+        # Возвращаем пустые region и version — _to_offer выставит display_server="Unknown"
+        return (title or "").strip(), "", "", fallback_faction
     server_name = (m.group("server") or "").strip()
-    region = (m.group("region") or "").upper().strip()
-    version = (m.group("version") or "Classic").strip()
-    faction = (m.group("faction") or "").strip().capitalize() or (
+    region      = (m.group("region") or "").upper().strip()
+    version     = (m.group("version") or "").strip()
+    faction     = (m.group("faction") or "").strip().capitalize() or (
         "Alliance" if "alliance" in (title or "").lower() else "Horde"
     )
     return server_name, region, version, faction
@@ -255,7 +264,9 @@ def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
         return None
 
     server_name, region, version, faction = _parse_title(raw.title)
-    display_server = f"({region}) {version}" if region and version else (version or "Classic")
+    # Строим display_server в формате FunPay: "(EU) Anniversary"
+    # Если парсинг не удался (region или version пусты) → "Unknown"
+    display_server = f"({region}) {version}" if region and version else "Unknown"
     offer_url = f"https://www.g2g.com/offer/{raw.offer_id}" if raw.offer_id else None
     seller = raw.seller or "unknown"
 
