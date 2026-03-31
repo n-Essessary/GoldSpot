@@ -49,14 +49,8 @@ _RETRY_COUNT = 3
 _TIMEOUT    = 15.0
 
 _API_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Referer": "https://www.g2g.com/",
-    "Origin":  "https://www.g2g.com",
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json",
 }
 
 
@@ -277,9 +271,11 @@ async def fetch_g2g_all() -> list[Offer]:
         for page in range(1, _MAX_PAGES + 1):
             params = {
                 "seo_term":  _SEO_TERM,
+                "country":   "UA",
                 "currency":  "USD",
                 "page_size": _PAGE_SIZE,
                 "page":      page,
+                "sort":      "recommended_v2",
                 "v":         "v2",
             }
             try:
