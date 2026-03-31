@@ -49,17 +49,19 @@ export async function fetchOffers(filters = {}) {
 /**
  * @typedef {Object} PriceHistoryPoint
  * @property {string} timestamp
- * @property {number} avg_price
- * @property {number} min_price
- * @property {number} offer_count
+ * @property {number} price
+ * @property {number} min
+ * @property {number} max
+ * @property {number} count
  */
 
 /**
- * @param {{ last?: number }} [opts]
+ * @param {{ last?: number, server?: string, faction?: string }} [opts]
  * @returns {Promise<PriceHistoryPoint[]>}
  */
-export async function fetchPriceHistory({ last = 100 } = {}) {
-  const url = `${API_BASE}/price-history?last=${last}`
+export async function fetchPriceHistory({ last = 100, server = 'all', faction = 'all' } = {}) {
+  const params = new URLSearchParams({ last: String(last), server, faction })
+  const url = `${API_BASE}/price-history?${params}`
   const res = await fetch(url)
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
   const data = await res.json()

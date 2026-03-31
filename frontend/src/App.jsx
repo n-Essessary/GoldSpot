@@ -104,7 +104,11 @@ function Dashboard({ initialServer, onSelectServer }) {
       </div>
 
       <StatsBar offers={filteredOffers} loading={loading} />
-      <PriceChart refreshSignal={lastFetched} serverSlug={filters.server || 'all'} />
+      <PriceChart
+        refreshSignal={lastFetched}
+        serverSlug={filters.server || 'all'}
+        factionSlug={filters.faction || 'all'}
+      />
 
       <main className={styles.main}>
         <OffersTable offers={filteredOffers} loading={loading} error={error} />

@@ -103,7 +103,7 @@ function fillHistory(real, target = CHART_POINTS) {
   return [...synthetic, ...real]
 }
 
-export function PriceChart({ refreshSignal = 0, serverSlug = 'all' }) {
+export function PriceChart({ refreshSignal = 0, serverSlug = 'all', factionSlug = 'all' }) {
   const [points, setPoints] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -111,7 +111,11 @@ export function PriceChart({ refreshSignal = 0, serverSlug = 'all' }) {
   useEffect(() => {
     setLoading(true)
     setError(null)
-    fetch(`${API_BASE}/price-history?server=${encodeURIComponent(serverSlug || 'all')}&last=100`)
+    const faction = factionSlug || 'all'
+
+    fetch(
+      `${API_BASE}/price-history?server=${encodeURIComponent(serverSlug || 'all')}&faction=${encodeURIComponent(faction)}&last=100`,
+    )
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
         return res.json()
@@ -126,7 +130,7 @@ export function PriceChart({ refreshSignal = 0, serverSlug = 'all' }) {
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
-  }, [refreshSignal, serverSlug])
+  }, [refreshSignal, serverSlug, factionSlug])
 
   if (error) {
     return (

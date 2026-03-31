@@ -20,9 +20,10 @@ async def get_offers_handler(
 @router.get("/price-history")
 async def get_price_history_handler(
     server: str = Query("all"),
+    faction: str = Query("all"),
     last: int = Query(50, ge=1, le=200),
 ):
-    points = get_price_history(server, last)
+    points = get_price_history(server, faction, last)
     return {
         "count": len(points),
         "points": points,

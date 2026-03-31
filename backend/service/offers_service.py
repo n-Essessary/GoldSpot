@@ -106,7 +106,11 @@ def compute_index_price(
     return index_price, min_price, max_price
 
 
-def get_price_history(server: str = "all", last: int = 50) -> list[PriceHistoryPoint]:
+def get_price_history(
+    server: str = "all",
+    faction: str = "all",
+    last: int = 50,
+) -> list[PriceHistoryPoint]:
     """
     Возвращает 1 реальную точку — текущий index_price из _cache.
     Синтетическое заполнение истории делает фронтенд.
@@ -116,8 +120,10 @@ def get_price_history(server: str = "all", last: int = 50) -> list[PriceHistoryP
     if server != "all":
         offers = [o for o in offers if o.server == server.lower()]
 
-    filtered = _filter_outliers(offers)
-    result = compute_index_price(filtered)
+    if faction != "all":
+        offers = [o for o in offers if o.faction.lower() == faction.lower()]
+
+    result = compute_index_price(offers)
 
     if result is None:
         return []
@@ -130,7 +136,7 @@ def get_price_history(server: str = "all", last: int = 50) -> list[PriceHistoryP
             price=index_price,
             min=min_price,
             max=max_price,
-            count=len(filtered),
+            count=len(offers),
         )
     ]
 
