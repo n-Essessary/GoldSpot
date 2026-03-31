@@ -132,7 +132,7 @@ def get_price_history(
     offers = list(_cache)
 
     if server != "all":
-        offers = [o for o in offers if _clean(o.display_server) == _clean(server)]
+        offers = [o for o in offers if _clean(o.server) == _clean(server)]
 
     if faction != "all":
         offers = [o for o in offers if o.faction.lower() == faction.lower()]
@@ -210,7 +210,7 @@ def get_offers(
         # Сравниваем display_server (RAW) через _clean — устойчиво к
         # лишним пробелам и регистру. Slug (o.server) не используем,
         # потому что фронтенд передаёт RAW строку: "(EU) Flamegor".
-        result = [o for o in result if _clean(o.display_server) == _clean(server)]
+        result = [o for o in result if _clean(o.server) == _clean(server)]
     if faction:
         result = [o for o in result if o.faction.lower() == faction.lower()]
 
