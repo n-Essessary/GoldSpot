@@ -20,7 +20,6 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from api.schemas import Offer
-from utils.server import normalize_server
 
 logger = logging.getLogger(__name__)
 
@@ -191,13 +190,10 @@ def _extract_server(item: Tag) -> tuple[str, str]:
     raw = raw.strip()
     if not raw:
         return "unknown", "Unknown"
-    try:
-        srv = normalize_server(raw)
-    except Exception as exc:
-        logger.warning("FunPay: normalize_server упал для %r — %s", raw, exc)
-        slug = re.sub(r"[^a-z0-9-]", "-", raw.lower()).strip("-") or "unknown"
-        return slug, raw or "Unknown"
-    return srv.slug, srv.display
+    # Возвращаем RAW строку без каких-либо преобразований.
+    # server = raw (model_validator в Offer приведёт к lowercase для slug).
+    # display_server = raw — точно как на FunPay.
+    return raw, raw
 
 
 def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
