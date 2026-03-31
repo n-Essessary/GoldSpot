@@ -1,9 +1,19 @@
 from fastapi import APIRouter, Query
 
-from api.schemas import OffersResponse, PriceHistoryResponse
-from service.offers_service import get_offers, get_price_history
+from api.schemas import OffersResponse, PriceHistoryResponse, ServersResponse
+from service.offers_service import get_offers, get_price_history, get_servers
 
 router = APIRouter()
+
+
+@router.get("/servers", response_model=ServersResponse)
+async def get_servers_handler():
+    """
+    Возвращает список уникальных серверов, отсортированных по
+    количеству доступных онлайн-офферов (самые популярные — первыми).
+    """
+    servers = get_servers()
+    return ServersResponse(count=len(servers), servers=servers)
 
 
 @router.get("/offers", response_model=OffersResponse)

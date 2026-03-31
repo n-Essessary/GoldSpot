@@ -157,6 +157,23 @@ async def refresh() -> None:
     logger.info("Кэш обновлён: %d офферов", len(_cache))
 
 
+def get_servers() -> list[str]:
+    """
+    Возвращает уникальные имена серверов из кэша,
+    отсортированные по количеству офферов (DESC).
+
+    Использует display_server (читаемое имя) как ключ —
+    именно это значение показывается пользователю в UI.
+
+    Пример: ["(EU) Flamegor", "(EU) Firemaw", "(EU) Gehennas"]
+    """
+    counts: dict[str, int] = {}
+    for offer in _cache:
+        counts[offer.display_server] = counts.get(offer.display_server, 0) + 1
+
+    return sorted(counts, key=lambda s: counts[s], reverse=True)
+
+
 def get_offers(
     server: str | None = None,
     faction: str | None = None,
@@ -171,7 +188,9 @@ def get_offers(
     if faction:
         result = [o for o in result if o.faction.lower() == faction.lower()]
 
-    key = "price_per_1k" if sort_by == "price" else "amount_gold"
-    result.sort(key=lambda o: getattr(o, key))
+    # Первичная сортировка: server (display_server для стабильной группировки)
+    # Вторичная сортировка: зависит от sort_by (price ASC / amount ASC)
+    secondary_key = "price_per_1k" if sort_by == "price" else "amount_gold"
+    result.sort(key=lambda o: (o.display_server, getattr(o, secondary_key)))
 
     return result[:limit]

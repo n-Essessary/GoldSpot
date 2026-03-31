@@ -28,6 +28,10 @@ SOURCE = "funpay"
 
 # ── URL ─────────────────────────────────────────────────────────────────────
 _URL = "https://funpay.com/en/chips/114/"
+
+# ── Online-фильтр ────────────────────────────────────────────────────────────
+# Значения data-online, которые считаются «онлайн»
+_ONLINE_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes"})
 _TIMEOUT = 15.0
 
 # ── HTTP заголовки ───────────────────────────────────────────────────────────
@@ -52,6 +56,63 @@ _SELLER_SELECTORS: tuple[str, ...] = (
 
 
 # ── Вспомогательные функции ──────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ONLINE-ФИЛЬТР — 3 варианта реализации
+#
+# ВАРИАНТ 1 (активный): data-online attribute — строгий, минимальный.
+#   Читает только атрибут data-online="1".
+#   Плюсы: детерминировано, не зависит от CSS.
+#   Минусы: если FunPay уберёт атрибут — фильтр сломается.
+#
+# ВАРИАНТ 2: data-online + CSS-индикатор — мягкий фallback.
+#   Если атрибута нет — ищет DOM-элемент онлайн-иконки.
+#   Плюсы: устойчив к частичным изменениям вёрстки.
+#   Минусы: CSS-классы могут меняться.
+#
+# ВАРИАНТ 3: мульти-сигнальный — максимально устойчивый.
+#   Проверяет атрибут, CSS-классы блока продавца и DOM-иконки.
+#   Плюсы: наименее хрупкий при рефакторинге вёрстки.
+#   Минусы: чуть сложнее, выше риск false-positive.
+#
+# Для переключения замените тело функции _is_online на нужный вариант.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _is_online(item: Tag) -> bool:
+    """
+    ВАРИАНТ 1 (активный): читаем только data-online="1".
+    Самый простой и надёжный способ — FunPay всегда проставляет атрибут.
+    """
+    return _attr(item, "data-online").lower() in _ONLINE_TRUTHY
+
+
+# def _is_online(item: Tag) -> bool:
+#     """
+#     ВАРИАНТ 2: data-online + fallback на DOM-иконку.
+#     Используй, если data-online иногда отсутствует.
+#     """
+#     if _attr(item, "data-online").lower() in _ONLINE_TRUTHY:
+#         return True
+#     return bool(item.select_one(".online-dot, .user-online-icon"))
+
+
+# def _is_online(item: Tag) -> bool:
+#     """
+#     ВАРИАНТ 3: мульти-сигнальный — атрибут + CSS-классы + DOM-элементы.
+#     Используй, если структура HTML нестабильна.
+#     """
+#     # Сигнал 1: data-online атрибут
+#     if _attr(item, "data-online").lower() in _ONLINE_TRUTHY:
+#         return True
+#     # Сигнал 2: CSS-класс "online" в блоке имени продавца
+#     name_block = item.select_one(".media-user-name")
+#     if name_block:
+#         classes = " ".join(name_block.get("class") or [])
+#         if "online" in classes.lower():
+#             return True
+#     # Сигнал 3: DOM-элементы онлайн-индикатора
+#     return bool(item.select_one(".online-dot, .user-online-icon, [class*='online']"))
+
 
 def _text(node: Tag | None, selector: str) -> str:
     if node is None:
@@ -239,6 +300,17 @@ async def fetch_funpay_offers() -> list[Offer]:
     if not items:
         logger.warning("FunPay: .tc-item не найдены в HTML — возможно изменилась вёрстка")
         return []
+
+    # ── Online-фильтр ────────────────────────────────────────────────────────
+    online_items = [it for it in items if _is_online(it)]
+    if not online_items:
+        logger.warning(
+            "FunPay: онлайн-офферов не найдено из %d total — возможно изменился data-online",
+            len(items),
+        )
+        return []
+    logger.debug("FunPay: online=%d / total=%d", len(online_items), len(items))
+    items = online_items
 
     # ── Парсим офферы ────────────────────────────────────────────────────────
     raw_offers: list[Offer] = []

@@ -56,6 +56,11 @@ class OffersResponse(BaseModel):
     offers: list[Offer]
 
 
+class ServersResponse(BaseModel):
+    count: int
+    servers: list[str]
+
+
 class PriceHistoryPoint(BaseModel):
     timestamp: datetime
     price: float | None = None
