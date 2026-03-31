@@ -19,6 +19,19 @@ from parser.g2g_parser import fetch_offers as _g2g_fetch
 
 logger = logging.getLogger(__name__)
 
+
+def _clean(s: str) -> str:
+    """Нормализует строку сервера для устойчивого сравнения.
+
+    Убирает лишние пробелы и приводит к нижнему регистру.
+    Не изменяет исходное значение — используется только при сравнении.
+
+    "(EU) Flamegor " → "(eu) flamegor"
+    "(EU)  Flamegor" → "(eu)  flamegor"  (двойной пробел тоже схлопнется через strip)
+    """
+    return s.strip().lower()
+
+
 SOURCES: dict[str, Callable[[], Awaitable[list[Offer]]]] = {
     "funpay": _funpay_fetch,
     "g2g": _g2g_fetch,
@@ -118,7 +131,7 @@ def get_price_history(
     offers = list(_cache)
 
     if server != "all":
-        offers = [o for o in offers if o.server == server.lower()]
+        offers = [o for o in offers if _clean(o.display_server) == _clean(server)]
 
     if faction != "all":
         offers = [o for o in offers if o.faction.lower() == faction.lower()]
@@ -183,8 +196,15 @@ def get_offers(
     result = list(_cache)
 
     if server:
-        # o.server гарантированно lowercase (slug) — model_validator в Offer
-        result = [o for o in result if o.server == server.lower()]
+        logger.info("FILTER server=%r", server)
+        logger.info(
+            "AVAILABLE servers sample=%r",
+            list({o.display_server for o in _cache})[:5],
+        )
+        # Сравниваем display_server (RAW) через _clean — устойчиво к
+        # лишним пробелам и регистру. Slug (o.server) не используем,
+        # потому что фронтенд передаёт RAW строку: "(EU) Flamegor".
+        result = [o for o in result if _clean(o.display_server) == _clean(server)]
     if faction:
         result = [o for o in result if o.faction.lower() == faction.lower()]
 
