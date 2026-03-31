@@ -52,9 +52,11 @@ _HEADERS = {
 
 # ── Параметры параллелизма ───────────────────────────────────────────────────
 # FunPay легко детектит слишком частые запросы → держим concurrency умеренным
-_CONCURRENCY = 4        # одновременных запросов к /chips/get/
-_DELAY_BETWEEN = 0.25   # секунды между запросами внутри одной «волны»
+_CONCURRENCY = 2
+_DELAY_BETWEEN = 0.75
 _REQUEST_TIMEOUT = 12.0 # секунды
+_RETRY_COUNT = 3
+_RETRY_BACKOFF = (1.0, 2.0, 4.0)
 
 # ── Прочие константы ─────────────────────────────────────────────────────────
 _ONLINE_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes"})
@@ -320,28 +322,82 @@ async def _fetch_server(
     Возвращает офферы или [] при любой ошибке.
     """
     async with semaphore:
-        await asyncio.sleep(_DELAY_BETWEEN)   # мягкий rate-limit
-        try:
-            resp = await client.post(
-                _AJAX_URL,
-                data={"game": _GAME_ID, "server": server_id},
-            )
-            resp.raise_for_status()
-            offers = _parse_fragment(resp.text, fetched_at)
-            logger.debug(
-                "FunPay server_id=%s → %d офферов (HTTP %d, %d байт)",
-                server_id, len(offers), resp.status_code, len(resp.text),
-            )
-            return offers
-        except httpx.TimeoutException:
-            logger.warning("FunPay: таймаут для server_id=%s", server_id)
-        except httpx.HTTPStatusError as exc:
-            logger.warning(
-                "FunPay: HTTP %d для server_id=%s",
-                exc.response.status_code, server_id,
-            )
-        except Exception as exc:
-            logger.warning("FunPay: ошибка для server_id=%s — %s", server_id, exc)
+        await asyncio.sleep(_DELAY_BETWEEN)
+
+        last_exc: Exception | None = None
+
+        for attempt in range(_RETRY_COUNT):
+            try:
+                resp = await client.post(
+                    _AJAX_URL,
+                    data={"game": _GAME_ID, "server": server_id},
+                )
+
+                if resp.status_code == 404:
+                    logger.debug("FunPay: server_id=%s не найден (404), пропускаем", server_id)
+                    return []
+
+                if resp.status_code == 429:
+                    backoff = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
+                    logger.warning(
+                        "FunPay: 429 rate-limit для server_id=%s, попытка %d/%d, ждём %.1fs",
+                        server_id, attempt + 1, _RETRY_COUNT, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    last_exc = httpx.HTTPStatusError(
+                        message="429 Too Many Requests",
+                        request=resp.request,
+                        response=resp,
+                    )
+                    continue
+
+                resp.raise_for_status()
+
+                offers = _parse_fragment(resp.text, fetched_at)
+                logger.debug(
+                    "FunPay server_id=%s → %d офферов (HTTP %d, %d байт)",
+                    server_id, len(offers), resp.status_code, len(resp.text),
+                )
+                return offers
+
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    logger.debug("FunPay: server_id=%s не найден (404), пропускаем", server_id)
+                    return []
+                if exc.response.status_code == 429:
+                    backoff = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
+                    logger.warning(
+                        "FunPay: 429 rate-limit для server_id=%s, попытка %d/%d, ждём %.1fs",
+                        server_id, attempt + 1, _RETRY_COUNT, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    last_exc = exc
+                    continue
+                logger.warning(
+                    "FunPay: HTTP %d для server_id=%s",
+                    exc.response.status_code, server_id,
+                )
+                return []
+
+            except httpx.TimeoutException:
+                logger.warning(
+                    "FunPay: таймаут для server_id=%s, попытка %d/%d",
+                    server_id, attempt + 1, _RETRY_COUNT,
+                )
+                last_exc = None
+                if attempt < _RETRY_COUNT - 1:
+                    backoff = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
+                    await asyncio.sleep(backoff)
+                continue
+
+            except Exception as exc:
+                logger.warning("FunPay: ошибка для server_id=%s — %s", server_id, exc)
+                return []
+
+        logger.warning(
+            "FunPay: server_id=%s — исчерпаны все %d попытки, последняя ошибка: %s",
+            server_id, _RETRY_COUNT, last_exc,
+        )
         return []
 
 
@@ -392,6 +448,12 @@ async def fetch_funpay_offers() -> list[Offer]:
             for sid in server_ids
         ]
         results: list[list[Offer]] = await asyncio.gather(*tasks)
+
+    successful = sum(1 for batch in results if batch)
+    logger.info(
+        "FunPay: успешно получены офферы с %d/%d серверов",
+        successful, len(server_ids),
+    )
 
     # ── Шаг 3: объединяем + дедупликация ──────────────────────────────────
     seen: set[str] = set()
