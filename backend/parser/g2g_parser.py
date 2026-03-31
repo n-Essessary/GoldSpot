@@ -81,7 +81,8 @@ _HTML_HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.g2g.com/",
 }
 
 
@@ -277,6 +278,7 @@ async def fetch_g2g_datasets(client: httpx.AsyncClient) -> list[str]:
             logger.warning("G2G: страница категории %d недоступна: %s", page, exc)
             continue
 
+        logger.debug("fa present: %s", "fa=" in html)
         slugs = _DATASET_RE.findall(html)
         new_on_page = 0
         for slug in slugs:
