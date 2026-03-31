@@ -1,0 +1,53 @@
+.sidebar {
+  width: 220px;
+  flex-shrink: 0;
+
+  /* Sticky: остаётся на экране при скролле основного контента */
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+
+  border-right: 1px solid var(--border);
+  padding: 20px 0;
+  margin-right: 28px;
+}
+
+/* Заголовок колонки */
+.heading {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 0 16px 10px;
+}
+
+/* Каждый сервер в списке */
+.item {
+  padding: 7px 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: color var(--transition), background var(--transition),
+    border-color var(--transition);
+
+  /* Длинные имена не ломают layout */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.item:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* Выбранный сервер */
+.item.active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: var(--accent-dim);
+}

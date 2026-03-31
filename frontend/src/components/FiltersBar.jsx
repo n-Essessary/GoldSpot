@@ -1,29 +1,21 @@
 import styles from './FiltersBar.module.css'
-import { ServerSelect } from './ServerSelect'
 
 const FACTIONS = ['Horde', 'Alliance']
 
 /**
+ * Панель фильтров. Сервер выбирается через ServerSidebar — здесь только фракция.
+ *
  * @param {{
- *  filters: object,
- *  setFilters: function,
- *  disabled: boolean,
- *  servers: string[],
- *  onSelectServer: (server: string) => void
+ *   filters: object,
+ *   setFilters: function,
+ *   disabled: boolean,
  * }} props
  */
-export function FiltersBar({ filters, setFilters, disabled, servers, onSelectServer }) {
+export function FiltersBar({ filters, setFilters, disabled }) {
   const onFaction = (e) => setFilters({ faction: e.target.value })
 
   return (
     <div className={styles.bar}>
-      <ServerSelect
-        servers={servers}
-        selectedServer={filters.server}
-        onSelectServer={onSelectServer}
-        disabled={disabled}
-      />
-
       <label className={styles.field}>
         <span className={styles.label}>Фракция</span>
         <select

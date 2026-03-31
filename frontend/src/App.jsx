@@ -4,6 +4,7 @@ import { useOffers } from './hooks/useOffers'
 import { fetchServers } from './api/offers'
 import { FiltersBar } from './components/FiltersBar'
 import { OffersTable } from './components/OffersTable'
+import { ServerSidebar } from './components/ServerSidebar'
 import { StatusBar } from './components/StatusBar'
 import { StatsBar } from './components/StatsBar'
 import { PriceChart } from './components/PriceChart'
@@ -11,8 +12,6 @@ import { SourceSummary } from './components/SourceSummary'
 import styles from './App.module.css'
 
 // ── Хук: загрузить все серверы с /servers ─────────────────────
-// Возвращает { servers: string[], loading: boolean }
-// servers — массив всех серверов (80+) с бэкенда, без ограничений.
 function useServers() {
   const [servers, setServers] = useState([])
   const [loading, setLoading] = useState(true)
@@ -38,17 +37,12 @@ function useServers() {
 }
 
 // ── Корневой маршрут: редирект на /server/:first ──────────────
-// Использует первый сервер из /servers вместо запроса к /offers.
 function RootRedirect() {
   const { servers, loading } = useServers()
 
   if (loading) return null
 
-  // Используем RAW строку из /servers — никакой нормализации.
-  // encodeURIComponent корректно обработает "(EU) Flamegor" → "%28EU%29%20Flamegor",
-  // React Router при useParams() автоматически декодирует обратно в "(EU) Flamegor".
   const first = servers[0] ?? ''
-
   return <Navigate to={`/server/${encodeURIComponent(first)}`} replace />
 }
 
@@ -68,6 +62,7 @@ function Dashboard({ initialServer, servers, onSelectServer }) {
 
   return (
     <div className={styles.layout}>
+      {/* ── Шапка ─────────────────────────────────────────── */}
       <header className={styles.header}>
         <div className={styles.title}>
           <span className={styles.titleAccent}>WoW</span> Gold Market Analytics
@@ -75,42 +70,49 @@ function Dashboard({ initialServer, servers, onSelectServer }) {
         <StatusBar count={filteredOffers.length} lastFetched={lastFetched} />
       </header>
 
-      <div className={styles.toolbar}>
-        <FiltersBar
-          filters={filters}
-          setFilters={setFilters}
-          disabled={loading}
+      {/* ── Тело: sidebar + основной контент ──────────────── */}
+      <div className={styles.body}>
+        <ServerSidebar
           servers={servers}
-          onSelectServer={onSelectServer}
+          selectedServer={filters.server}
+          onSelect={onSelectServer}
         />
+
+        <div className={styles.content}>
+          <div className={styles.toolbar}>
+            <FiltersBar
+              filters={filters}
+              setFilters={setFilters}
+              disabled={loading}
+            />
+          </div>
+
+          <div className={styles.platformBlock}>
+            <SourceSummary
+              offers={offers}
+              enabledSources={enabledSources}
+              toggleSource={toggleSource}
+            />
+          </div>
+
+          <StatsBar offers={filteredOffers} loading={loading} />
+          <PriceChart
+            refreshSignal={lastFetched}
+            serverSlug={filters.server || 'all'}
+            factionSlug={filters.faction || 'all'}
+          />
+
+          <main className={styles.main}>
+            <OffersTable offers={filteredOffers} loading={loading} error={error} />
+          </main>
+        </div>
       </div>
-
-      <div className={styles.platformBlock}>
-        <SourceSummary
-          offers={offers}
-          enabledSources={enabledSources}
-          toggleSource={toggleSource}
-        />
-      </div>
-
-      <StatsBar offers={filteredOffers} loading={loading} />
-      <PriceChart
-        refreshSignal={lastFetched}
-        serverSlug={filters.server || 'all'}
-        factionSlug={filters.faction || 'all'}
-      />
-
-      <main className={styles.main}>
-        <OffersTable offers={filteredOffers} loading={loading} error={error} />
-      </main>
     </div>
   )
 }
 
 function DashboardRoute({ initialServer }) {
   const navigate = useNavigate()
-  // Загружаем серверы один раз на уровне DashboardRoute,
-  // чтобы список не перегружался при смене сервера.
   const { servers } = useServers()
 
   const onSelectServer = (server) => {
