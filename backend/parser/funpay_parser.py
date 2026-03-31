@@ -353,8 +353,9 @@ async def _fetch_server(
                     continue
 
                 resp.raise_for_status()
+                html = resp.text
 
-                offers = _parse_fragment(resp.text, fetched_at)
+                offers = _parse_fragment(html, fetched_at)
                 logger.debug(
                     "FunPay server_id=%s → %d офферов (HTTP %d, %d байт)",
                     server_id, len(offers), resp.status_code, len(resp.text),
@@ -466,8 +467,9 @@ async def fetch_funpay_offers() -> list[Offer]:
                 all_offers.append(offer)
 
     logger.info(
-        "FunPay: итого %d уникальных офферов с %d серверов",
-        len(all_offers), len(server_ids),
+        "FunPay: parsed %d offers (%d unique)",
+        sum(len(batch) for batch in results),
+        len(all_offers),
     )
     return all_offers
 
