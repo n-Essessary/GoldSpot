@@ -13,28 +13,85 @@
   margin-right: 28px;
 }
 
-/* Заголовок колонки */
+/* ── Заголовок колонки ──────────────────────────────────────── */
 .heading {
   font-size: 11px;
   font-family: var(--font-mono);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-muted);
-  padding: 0 16px 10px;
+  padding: 0 16px 12px;
 }
 
-/* Каждый сервер в списке */
-.item {
-  padding: 7px 16px;
+/* ── Группа ─────────────────────────────────────────────────── */
+.group {
+  margin-bottom: 2px;
+}
+
+/* Заголовок группы */
+.groupTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px 7px 14px;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-primary);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: color var(--transition), background var(--transition);
+
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.groupTitle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* Заголовок группы, в которой есть выбранный сервер */
+.groupTitleActive {
+  color: var(--accent);
+  border-left-color: var(--accent);
+}
+
+/* Стрелка ▶ / ▼ */
+.arrow {
+  flex-shrink: 0;
+  font-size: 9px;
+  color: var(--text-secondary);
+  transition: color var(--transition);
+  user-select: none;
+}
+
+.groupTitle:hover .arrow {
+  color: var(--text-primary);
+}
+
+.groupTitleActive .arrow {
+  color: var(--accent);
+}
+
+/* ── Серверы внутри группы ──────────────────────────────────── */
+.groupItems {
+  /* Лёгкая анимация раскрытия через opacity не нужна — DOM show/hide */
+}
+
+/* Отдельный сервер */
+.item {
+  padding: 6px 14px 6px 30px; /* увеличенный левый отступ — вложенность */
+  font-family: var(--font-mono);
+  font-size: 11px;
   color: var(--text-secondary);
   cursor: pointer;
   border-left: 2px solid transparent;
   transition: color var(--transition), background var(--transition),
     border-color var(--transition);
 
-  /* Длинные имена не ломают layout */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
