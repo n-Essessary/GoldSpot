@@ -56,6 +56,33 @@ function groupServers(servers) {
   return sorted
 }
 
+// ── Display helpers ────────────────────────────────────────────
+
+/**
+ * Форматирует название группы для отображения в UI.
+ * Удаляет символ "#", всё остальное остаётся без изменений.
+ *
+ * "(EU) #Anniversary"          → "(EU) Anniversary"
+ * "(EU) #Season of Discovery"  → "(EU) Season of Discovery"
+ * "Classic"                    → "Classic"
+ */
+function formatGroupName(group) {
+  return group.replace(/#/g, '')
+}
+
+/**
+ * Форматирует название сервера для отображения в UI.
+ * Берёт часть после последнего " - ", если оно есть.
+ * RAW-значение при этом не меняется — используется только в title/onClick.
+ *
+ * "(EU) #Anniversary - Soulseeker"  → "Soulseeker"
+ * "(EU) Bloodfang"                  → "(EU) Bloodfang"
+ */
+function formatServerName(server) {
+  const dashIdx = server.lastIndexOf(' - ')
+  return dashIdx !== -1 ? server.slice(dashIdx + 3) : server
+}
+
 // ── Компонент ──────────────────────────────────────────────────
 /**
  * Левая панель со сгруппированным списком серверов.
@@ -103,7 +130,7 @@ export function ServerSidebar({ servers, selectedServer, onSelect }) {
               title={group}
             >
               <span className={styles.arrow}>{isOpen ? '▼' : '▶'}</span>
-              {group}
+              {formatGroupName(group)}
             </div>
 
             {/* ── Серверы внутри группы ── */}
@@ -120,7 +147,7 @@ export function ServerSidebar({ servers, selectedServer, onSelect }) {
                     onClick={() => onSelect(server)}
                     title={server}
                   >
-                    {server}
+                    {formatServerName(server)}
                   </div>
                 ))}
               </div>
