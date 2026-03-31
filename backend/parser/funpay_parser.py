@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 """
-FunPay HTML-парсер офферов WoW Classic gold.
-URL: https://funpay.com/en/chips/114/
+FunPay HTML-парсер офферов WoW Classic gold — мульти-серверная версия.
 
-Фильтр: только data-online="1" (продавец онлайн).
-Зависимости: httpx (уже в проекте), beautifulsoup4.
+Стратегия:
+  1. GET https://funpay.com/en/chips/114/
+     → парсим <select name="server"> → получаем все server_id
+  2. POST https://funpay.com/chips/get/  (game=2&server=<id>)
+     → получаем HTML-фрагмент с .tc-item для каждого сервера
+  3. Фильтруем data-online="1", парсим офферы, дедуплицируем по offer_id
+
+Зависимости: httpx, beautifulsoup4.
 """
 
+import asyncio
 import logging
 import re
 import uuid
@@ -22,9 +28,15 @@ from utils.server import normalize_server
 logger = logging.getLogger(__name__)
 
 SOURCE = "funpay"
-_URL = "https://funpay.com/en/chips/114/"
 
-# Минимальный браузерный User-Agent — без него FunPay отдаёт 403
+# ── URLs ────────────────────────────────────────────────────────────────────
+_INDEX_URL = "https://funpay.com/en/chips/114/"   # страница с dropdown
+_AJAX_URL  = "https://funpay.com/chips/get/"      # XHR-endpoint
+
+# game_id для WoW Classic gold (chips/114 → game=2)
+_GAME_ID = "2"
+
+# ── HTTP ────────────────────────────────────────────────────────────────────
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -33,12 +45,21 @@ _HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    # Обязателен для AJAX-endpoint — без него FunPay возвращает 403/пустой ответ
+    "X-Requested-With": "XMLHttpRequest",
+    "Referer": _INDEX_URL,
 }
 
-# Онлайн-фильтр: принимаем "1", "true", "yes" — на случай смены формата FunPay
-_ONLINE_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes"})
+# ── Параметры параллелизма ───────────────────────────────────────────────────
+# FunPay легко детектит слишком частые запросы → держим concurrency умеренным
+_CONCURRENCY = 4        # одновременных запросов к /chips/get/
+_DELAY_BETWEEN = 0.25   # секунды между запросами внутри одной «волны»
+_REQUEST_TIMEOUT = 12.0 # секунды
 
-# Селекторы продавца в порядке приоритета.
+# ── Прочие константы ─────────────────────────────────────────────────────────
+_ONLINE_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes"})
+_MIN_HTML_BYTES = 200   # фрагмент намного короче полной страницы
+
 _SELLER_SELECTORS: tuple[str, ...] = (
     ".media-user-name span",
     ".media-user-name",
@@ -47,15 +68,12 @@ _SELLER_SELECTORS: tuple[str, ...] = (
     "[data-seller]",
 )
 
-# Минимально допустимая длина HTML-страницы.
-_MIN_HTML_BYTES = 5_000
 
+# ────────────────────────────────────────────────────────────────────────────
+# Вспомогательные утилиты (перенесены без изменений из v1)
+# ────────────────────────────────────────────────────────────────────────────
 
 def _text(node: Tag | None, selector: str) -> str:
-    """
-    Возвращает stripped text первого совпадения или ''.
-    Никогда не бросает исключение: при любой ошибке BS4 возвращает ''.
-    """
     if node is None:
         return ""
     try:
@@ -66,10 +84,6 @@ def _text(node: Tag | None, selector: str) -> str:
 
 
 def _attr(node: Tag | None, attr: str, default: str = "") -> str:
-    """
-    Безопасно читает атрибут тега.
-    BS4 может вернуть list[str] для multi-valued attributes — берём первый.
-    """
     if node is None:
         return default
     try:
@@ -82,20 +96,13 @@ def _attr(node: Tag | None, attr: str, default: str = "") -> str:
 
 
 def _parse_float(raw: str | None) -> float | None:
-    """
-    Извлекает float из строк вида '0.48 $', '1 234.56', '0,48', '1.234,56'.
-    Стратегия: ПОСЛЕДНИЙ разделитель (точка или запятая) — дробный.
-    Возвращает None при любой ошибке.
-    """
     if not raw:
         return None
     cleaned = re.sub(r"[^\d.,]", "", raw)
     if not cleaned:
         return None
-
-    last_dot = cleaned.rfind(".")
+    last_dot   = cleaned.rfind(".")
     last_comma = cleaned.rfind(",")
-
     if last_dot == -1 and last_comma == -1:
         pass
     elif last_dot == -1:
@@ -109,7 +116,6 @@ def _parse_float(raw: str | None) -> float | None:
         cleaned = cleaned.replace(".", "").replace(",", ".")
     else:
         cleaned = cleaned.replace(",", "")
-
     try:
         return float(cleaned)
     except ValueError:
@@ -117,10 +123,6 @@ def _parse_float(raw: str | None) -> float | None:
 
 
 def _parse_int(raw: str | None) -> int | None:
-    """
-    Извлекает int из строк вида '10 000', '10000', '1,000'.
-    Возвращает None при любой ошибке.
-    """
     if not raw:
         return None
     digits = re.sub(r"[^\d]", "", raw)
@@ -128,19 +130,14 @@ def _parse_int(raw: str | None) -> int | None:
 
 
 def _is_online(item: Tag) -> bool:
-    """
-    Возвращает True если продавец онлайн.
-    """
     raw = _attr(item, "data-online")
     if raw.lower() in _ONLINE_TRUTHY:
         return True
-
     try:
         if item.select_one(".online-dot, .user-online-icon, [data-online='1']"):
             return True
     except Exception:
         pass
-
     try:
         name_block = item.select_one(".media-user-name")
         if name_block:
@@ -151,14 +148,10 @@ def _is_online(item: Tag) -> bool:
                 return True
     except Exception:
         pass
-
     return False
 
 
 def _extract_seller(item: Tag) -> str:
-    """
-    Извлекает имя продавца с fallback.
-    """
     for selector in _SELLER_SELECTORS:
         try:
             val = _text(item, selector)
@@ -167,61 +160,40 @@ def _extract_seller(item: Tag) -> str:
                 return val
         except Exception:
             continue
-
     for attr_name in ("data-seller", "data-user", "data-username"):
         val = _attr(item, attr_name)
         if val and val.lower() not in {"", "-", "n/a"}:
             return val
-
-    logger.debug("FunPay: имя продавца не найдено для item id=%s", _attr(item, "data-id"))
     return "unknown"
 
 
 def _extract_server(item: Tag) -> tuple[str, str]:
-    """
-    Возвращает (slug, display_server).
-    """
-    raw = _text(item, ".tc-server")
-    if not raw:
-        raw = _attr(item, "data-server")
-
+    raw = _text(item, ".tc-server") or "Unknown"
     raw = raw.strip()
     if not raw:
-        logger.debug(
-            "FunPay: сервер не найден для item id=%s",
-            _attr(item, "data-id"),
-        )
         return "unknown", "Unknown"
-
     try:
         srv = normalize_server(raw)
     except Exception as exc:
         logger.warning("FunPay: normalize_server упал для %r — %s", raw, exc)
         slug = re.sub(r"[^a-z0-9-]", "-", raw.lower()).strip("-") or "unknown"
         return slug, raw or "Unknown"
-
     return srv.slug, srv.display
 
 
 def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
-    """
-    Разбирает один .tc-item и возвращает Offer.
-    """
     server_slug, display_server = _extract_server(item)
     faction_raw = _text(item, ".tc-side")
     faction = faction_raw if faction_raw in {"Horde", "Alliance"} else (
         "Alliance" if "alli" in faction_raw.lower() else "Horde"
     )
     seller = _extract_seller(item)
+    if not seller or seller == "unknown":
+        seller = _attr(item, "data-seller") or "unknown"
 
     raw_amount = _text(item, ".tc-amount")
     amount_gold = _parse_int(raw_amount)
     if amount_gold is None or amount_gold <= 0:
-        logger.debug(
-            "FunPay: .tc-amount некорректен (%r) для item id=%s — используем 1",
-            raw_amount,
-            _attr(item, "data-id"),
-        )
         amount_gold = 1
 
     raw_price = _text(item, ".tc-price")
@@ -235,8 +207,8 @@ def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
     if href:
         offer_url = f"https://funpay.com{href}" if href.startswith("/") else href
 
-    raw_id = _attr(item, "data-id") or _attr(item, "data-offer")
-    offer_id = f"fp_{raw_id}" if raw_id else f"fp_{uuid.uuid4().hex[:12]}"
+    m = re.search(r"id=([\d\-]+)", href)
+    offer_id = f"fp_{m.group(1)}" if m else f"fp_{uuid.uuid4().hex[:12]}"
 
     return Offer(
         id=offer_id,
@@ -253,132 +225,188 @@ def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
     )
 
 
-def _parse_html(html: str, fetched_at: datetime) -> list[Offer]:
+# ────────────────────────────────────────────────────────────────────────────
+# ШАГ 1 — получение server_id из dropdown главной страницы
+# ────────────────────────────────────────────────────────────────────────────
+
+def _extract_server_ids(html: str) -> list[str]:
     """
-    Парсит страницу FunPay и возвращает офферы онлайн-продавцов.
+    Парсит <select name="server"> из HTML-страницы /en/chips/114/.
+    Возвращает список строковых ID (value атрибут <option>).
+    Пустые строки и «0» (плейсхолдер) пропускаются.
     """
-    if len(html) < _MIN_HTML_BYTES:
-        logger.error(
-            "FunPay: слишком короткий HTML (%d байт) — возможна капча или редирект",
-            len(html),
-        )
-        return []
+    soup = BeautifulSoup(html, "html.parser")
 
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-    except Exception as exc:
-        logger.error("FunPay: BeautifulSoup упал при парсинге — %s", exc)
-        return []
-
-    try:
-        all_items = soup.select(".tc-item")
-    except Exception as exc:
-        logger.error("FunPay: soup.select('.tc-item') упал — %s", exc)
-        return []
-
-    total_found = len(all_items)
-    logger.info("FunPay: найдено .tc-item на странице: %d", total_found)
-    if not all_items:
-        logger.warning("FunPay: .tc-item не найдены — возможно изменилась вёрстка")
-        return []
-
-    _log_first_item_debug(all_items[0])
-    online_items = [it for it in all_items if _is_online(it)]
-    offline_count = total_found - len(online_items)
-    logger.info(
-        "FunPay: онлайн %d / всего %d (офлайн пропущено: %d)",
-        len(online_items),
-        total_found,
-        offline_count,
+    # Ищем select с name="server" или id="server" или class, содержащим "server"
+    select = (
+        soup.find("select", {"name": "server"})
+        or soup.find("select", {"id": "server"})
     )
 
-    if not online_items:
-        logger.warning(
-            "FunPay: ни один продавец не онлайн из %d найденных — "
-            "возможно изменился формат data-online",
-            total_found,
+    if select is None:
+        # Fallback: ищем все select и берём тот, у которого больше всего <option> с числовым value
+        all_selects = soup.find_all("select")
+        best = max(
+            all_selects,
+            key=lambda s: sum(
+                1 for o in s.find_all("option")
+                if re.fullmatch(r"\d+", (o.get("value") or "").strip()) and o["value"] != "0"
+            ),
+            default=None,
         )
+        select = best
+
+    if select is None:
+        logger.error("FunPay: <select name='server'> не найден в HTML")
+        return []
+
+    ids: list[str] = []
+    for opt in select.find_all("option"):
+        val = (opt.get("value") or "").strip()
+        if re.fullmatch(r"\d+", val) and val != "0":
+            ids.append(val)
+
+    logger.info("FunPay: найдено server_id в dropdown: %d", len(ids))
+    return ids
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# ШАГ 2 — загрузка офферов одного сервера через AJAX endpoint
+# ────────────────────────────────────────────────────────────────────────────
+
+def _parse_fragment(html_fragment: str, fetched_at: datetime) -> list[Offer]:
+    """
+    Парсит HTML-фрагмент ответа /chips/get/ → список Offer.
+    Логика идентична _parse_html из v1, но без проверки минимального размера.
+    """
+    if not html_fragment or not html_fragment.strip():
+        return []
+
+    try:
+        soup = BeautifulSoup(html_fragment, "html.parser")
+    except Exception as exc:
+        logger.error("FunPay fragment: BS4 упал — %s", exc)
+        return []
+
+    all_items = soup.select(".tc-item")
+    if not all_items:
+        return []
+
+    online_items = [it for it in all_items if _is_online(it)]
+    if not online_items:
+        # Если вдруг data-online не выставлен — берём всё (деградация)
+        logger.debug("FunPay fragment: нет online-продавцов из %d, берём всех", len(all_items))
         online_items = all_items
 
     offers: list[Offer] = []
-    skipped = 0
-    skip_reasons: dict[str, int] = {}
-
     for item in online_items:
         try:
             offers.append(_parse_item(item, fetched_at))
         except (ValueError, TypeError) as exc:
-            skipped += 1
-            reason = str(exc).split(":")[0].strip()
-            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-            logger.debug("FunPay: пропуск оффера — %s", exc)
+            logger.debug("FunPay fragment: пропуск оффера — %s", exc)
         except Exception as exc:
-            skipped += 1
-            logger.warning("FunPay: неожиданная ошибка при парсинге оффера — %s", exc, exc_info=True)
-
-    logger.info(
-        "FunPay: распарсено %d из %d онлайн-офферов",
-        len(offers),
-        len(online_items),
-    )
-    if skipped:
-        reasons_str = ", ".join(f"{r}×{n}" for r, n in skip_reasons.items())
-        logger.warning("FunPay: пропущено %d — причины: %s", skipped, reasons_str)
-
+            logger.warning("FunPay fragment: неожиданная ошибка — %s", exc, exc_info=True)
     return offers
 
 
-def _log_first_item_debug(first: Tag) -> None:
+async def _fetch_server(
+    client: httpx.AsyncClient,
+    server_id: str,
+    fetched_at: datetime,
+    semaphore: asyncio.Semaphore,
+) -> list[Offer]:
     """
-    Логирует структуру первого .tc-item на уровне DEBUG.
+    Делает один POST /chips/get/ для конкретного server_id.
+    Возвращает офферы или [] при любой ошибке.
     """
-    logger.debug(
-        "FunPay [diag] первый .tc-item → "
-        "server=%r  side=%r  seller=%r  amount=%r  price=%r  online=%r  attrs=%s",
-        _text(first, ".tc-server"),
-        _text(first, ".tc-side"),
-        _text(first, ".media-user-name span"),
-        _text(first, ".tc-amount"),
-        _text(first, ".tc-price"),
-        _attr(first, "data-online"),
-        dict(list(first.attrs.items())[:6]),
-    )
+    async with semaphore:
+        await asyncio.sleep(_DELAY_BETWEEN)   # мягкий rate-limit
+        try:
+            resp = await client.post(
+                _AJAX_URL,
+                data={"game": _GAME_ID, "server": server_id},
+            )
+            resp.raise_for_status()
+            offers = _parse_fragment(resp.text, fetched_at)
+            logger.debug(
+                "FunPay server_id=%s → %d офферов (HTTP %d, %d байт)",
+                server_id, len(offers), resp.status_code, len(resp.text),
+            )
+            return offers
+        except httpx.TimeoutException:
+            logger.warning("FunPay: таймаут для server_id=%s", server_id)
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "FunPay: HTTP %d для server_id=%s",
+                exc.response.status_code, server_id,
+            )
+        except Exception as exc:
+            logger.warning("FunPay: ошибка для server_id=%s — %s", server_id, exc)
+        return []
 
+
+# ────────────────────────────────────────────────────────────────────────────
+# ШАГ 3 — публичная точка входа
+# ────────────────────────────────────────────────────────────────────────────
 
 async def fetch_funpay_offers() -> list[Offer]:
     """
-    Загружает страницу FunPay и возвращает офферы онлайн-продавцов.
-    При любой ошибке (сеть, HTTP, парсинг) логирует и возвращает [].
+    1. Загружает главную страницу → извлекает все server_id из dropdown.
+    2. Параллельно (с ограничением concurrency) запрашивает /chips/get/
+       для каждого сервера.
+    3. Объединяет офферы, дедуплицирует по offer.id, возвращает результат.
     """
     fetched_at = datetime.now(timezone.utc)
-    try:
-        async with httpx.AsyncClient(
-            headers=_HEADERS,
-            timeout=15.0,
-            follow_redirects=True,
-        ) as client:
-            resp = await client.get(_URL)
 
-        if resp.status_code != 200:
-            logger.warning("FunPay: HTTP %d для %s", resp.status_code, _URL)
-        resp.raise_for_status()
+    async with httpx.AsyncClient(
+        headers=_HEADERS,
+        timeout=_REQUEST_TIMEOUT,
+        follow_redirects=True,
+    ) as client:
 
-        offers = _parse_html(resp.text, fetched_at)
-        logger.info("FunPay: итого загружено %d офферов", len(offers))
-        return offers
+        # ── Шаг 1: получаем список серверов ──────────────────────────────
+        try:
+            index_resp = await client.get(_INDEX_URL)
+            index_resp.raise_for_status()
+        except httpx.TimeoutException:
+            logger.error("FunPay: таймаут при загрузке index %s", _INDEX_URL)
+            return []
+        except httpx.HTTPStatusError as exc:
+            logger.error("FunPay: HTTP %d при загрузке index", exc.response.status_code)
+            return []
+        except Exception as exc:
+            logger.error("FunPay: ошибка загрузки index — %s", exc, exc_info=True)
+            return []
 
-    except httpx.TimeoutException:
-        logger.error("FunPay: таймаут при запросе к %s", _URL)
-        return []
-    except httpx.HTTPStatusError as exc:
-        logger.error("FunPay: HTTP-ошибка %d — %s", exc.response.status_code, _URL)
-        return []
-    except httpx.RequestError as exc:
-        logger.error("FunPay: сетевая ошибка — %s", exc)
-        return []
-    except Exception as exc:
-        logger.error("FunPay: неожиданная ошибка — %s", exc, exc_info=True)
-        return []
+        server_ids = _extract_server_ids(index_resp.text)
+        if not server_ids:
+            logger.error("FunPay: server_id не найдены — прерываем")
+            return []
+
+        logger.info("FunPay: начинаем опрос %d серверов (concurrency=%d)", len(server_ids), _CONCURRENCY)
+
+        # ── Шаг 2: параллельные запросы к AJAX endpoint ───────────────────
+        semaphore = asyncio.Semaphore(_CONCURRENCY)
+        tasks = [
+            _fetch_server(client, sid, fetched_at, semaphore)
+            for sid in server_ids
+        ]
+        results: list[list[Offer]] = await asyncio.gather(*tasks)
+
+    # ── Шаг 3: объединяем + дедупликация ──────────────────────────────────
+    seen: set[str] = set()
+    all_offers: list[Offer] = []
+    for batch in results:
+        for offer in batch:
+            if offer.id not in seen:
+                seen.add(offer.id)
+                all_offers.append(offer)
+
+    logger.info(
+        "FunPay: итого %d уникальных офферов с %d серверов",
+        len(all_offers), len(server_ids),
+    )
+    return all_offers
 
 
 async def fetch_offers() -> list[Offer]:
