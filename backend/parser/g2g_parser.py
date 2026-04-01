@@ -357,7 +357,7 @@ async def discover_brand_ids(
         return r.json().get("payload", {}).get("results", [])
 
 
-_MAX_PRICE_PER_1K = 200.0  # Жёсткий потолок: выше — аномалия, пропускаем
+_MAX_PRICE_PER_1K = 300.0  # Жёсткий потолок: выше — аномалия, пропускаем
 
 
 def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
@@ -366,10 +366,6 @@ def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
 
     price_per_1k = round(raw.price_usd * 1000.0, 4)
     if price_per_1k > _MAX_PRICE_PER_1K:
-        logger.warning(
-            "G2G: аномальная цена пропущена title=%r price=%.4f $/1k (порог=%.0f)",
-            raw.title, price_per_1k, _MAX_PRICE_PER_1K,
-        )
         return None
 
     server_name, region, version, faction = _parse_title(raw.title)
