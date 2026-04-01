@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Query
 
-from api.schemas import MetaResponse, OffersResponse, PriceHistoryResponse, ServersResponse
+from api.schemas import MetaResponse, OfferRow, OffersResponse, PriceHistoryResponse, ServersResponse
 from service.offers_service import get_meta, get_offers, get_price_history, get_servers
 
 router = APIRouter()
@@ -32,7 +32,10 @@ async def get_offers_handler(
     sort_by: str = Query("price", pattern="^(price|amount)$"),
 ):
     offers = get_offers(server, faction, sort_by, server_name)
-    return OffersResponse(count=len(offers), offers=offers)
+    # Конвертируем Offer → OfferRow: убираем display_server / server_name / server
+    # из ответа — пользователь уже выбрал их в левой панели.
+    rows = [OfferRow.model_validate(o) for o in offers]
+    return OffersResponse(count=len(rows), offers=rows)
 
 
 @router.get("/price-history")

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from pydantic import BaseModel, field_serializer, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_validator
 
 
 class Offer(BaseModel):
@@ -52,9 +52,36 @@ class Offer(BaseModel):
         return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+class OfferRow(BaseModel):
+    """Строка таблицы офферов — только поля для отображения.
+
+    Намеренно НЕ содержит display_server / server_name / server:
+    пользователь уже выбрал группу и реалм в левой панели, дублировать
+    их в каждой строке таблицы нарушает архитектуру UI.
+
+    from_attributes=True позволяет создавать из экземпляра Offer:
+        OfferRow.model_validate(offer_obj)
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    source: str
+    faction: str
+    price_per_1k: float
+    amount_gold: int
+    seller: str
+    offer_url: str | None = None
+    updated_at: datetime
+    fetched_at: datetime
+
+    @field_serializer("updated_at", "fetched_at")
+    def _serialize_dt(self, value: datetime) -> str:
+        return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class OffersResponse(BaseModel):
     count: int
-    offers: list[Offer]
+    offers: list[OfferRow]
 
 
 class ServersResponse(BaseModel):

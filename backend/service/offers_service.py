@@ -24,13 +24,14 @@ logger = logging.getLogger(__name__)
 def _clean(s: str) -> str:
     """Нормализует строку сервера для устойчивого сравнения.
 
-    Убирает лишние пробелы и приводит к нижнему регистру.
-    Не изменяет исходное значение — используется только при сравнении.
+    Убирает ведущие/хвостовые пробелы, схлопывает внутренние пробелы,
+    приводит к нижнему регистру. Не изменяет исходное значение.
 
-    "(EU) Flamegor " → "(eu) flamegor"
-    "(EU)  Flamegor" → "(eu)  flamegor"  (двойной пробел тоже схлопнется через strip)
+    "(EU) Flamegor "  → "(eu) flamegor"
+    "(EU)  Anniversary" → "(eu) anniversary"
+    "(AU) Anniversary"  → "(au) anniversary"  ← НЕ равно "(eu) anniversary"
     """
-    return s.strip().lower()
+    return re.sub(r"\s+", " ", (s or "").strip()).lower()
 
 
 def _detect_version(text: str) -> str:
@@ -305,16 +306,14 @@ def get_offers(
         result = [o for o in result if _clean(o.display_server) == _clean(server)]
 
     if server_name:
-        # Фильтр по конкретному серверу внутри группы.
-        # Офферы без server_name (FunPay, у которых поле пустое) всегда
-        # проходят фильтр — они видны на всех серверах своей группы.
-        # G2G офферы фильтруются точно: "Spineshatter" != "Soulseeker".
+        # Строгий фильтр по реалму: "Spineshatter" != "Soulseeker" != "".
+        # FunPay-офферы (server_name="") не проходят — они не принадлежат
+        # конкретному реалму G2G. Пользователь видит их на уровне группы
+        # (без server_name), но не при выборе конкретного реалма.
         result = [
             o for o in result
-            if not o.server_name or _clean(o.server_name) == _clean(server_name)
+            if _clean(o.server_name) == _clean(server_name)
         ]
-    else:
-        logger.debug("server_name not provided, G2G filtering disabled")
 
     if faction:
         result = [o for o in result if o.faction.lower() == faction.lower()]
