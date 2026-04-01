@@ -55,7 +55,7 @@ _TITLE_RE = re.compile(
 )
 
 # Вспомогательные regex для гибкого fallback-парсинга
-_REGION_RE         = re.compile(r"\b(EU|US|NA|OCE|KR|TW|SEA)\b", re.IGNORECASE)
+_REGION_RE         = re.compile(r"\b(EU|US|NA|OCE|KR|TW|SEA|RU)\b", re.IGNORECASE)
 _BRACKET_REGION_RE = re.compile(r"\[([A-Za-z]{2,})\]")   # "[EU]" без версии
 _FACTION_END_RE    = re.compile(r"-\s*(Alliance|Horde)\s*$", re.IGNORECASE)
 
@@ -144,7 +144,7 @@ def _parse_title(title: str) -> tuple[str, str, str, str]:
 
     # Region: сначала ищем в скобках "[EU]", затем в любом месте
     region = ""
-    _KNOWN = {"EU", "US", "NA", "OCE", "KR", "TW", "SEA"}
+    _KNOWN = {"EU", "US", "NA", "OCE", "KR", "TW", "SEA", "RU"}
     bm = _BRACKET_REGION_RE.search(t)
     if bm and bm.group(1).upper() in _KNOWN:
         region = bm.group(1).upper()
@@ -253,7 +253,7 @@ class G2GClient:
                         G2GOffer(
                             offer_id=o.get("offer_id", ""),
                             title=o.get("title", ""),
-                            server_name=o.get("title", ""),
+                            server_name=(_parse_title(o.get("title", ""))[0] or o.get("title", "")),
                             region_id=o.get("region_id", ""),
                             relation_id=o.get("relation_id", ""),
                             price_usd=float(o.get("unit_price_in_usd") or 0),
@@ -331,8 +331,19 @@ async def discover_brand_ids(
         return r.json().get("payload", {}).get("results", [])
 
 
+_MAX_PRICE_PER_1K = 200.0  # Жёсткий потолок: выше — аномалия, пропускаем
+
+
 def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
     if raw.price_usd <= 0 or raw.available_qty <= 0:
+        return None
+
+    price_per_1k = round(raw.price_usd * 1000.0, 4)
+    if price_per_1k > _MAX_PRICE_PER_1K:
+        logger.warning(
+            "G2G: аномальная цена пропущена title=%r price=%.4f $/1k (порог=%.0f)",
+            raw.title, price_per_1k, _MAX_PRICE_PER_1K,
+        )
         return None
 
     server_name, region, version, faction = _parse_title(raw.title)
@@ -358,7 +369,7 @@ def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
             display_server=display_server,
             server_name=server_name,
             faction=faction,
-            price_per_1k=round(raw.price_usd * 1000.0, 4),
+            price_per_1k=price_per_1k,
             amount_gold=raw.available_qty,
             seller=seller,
             offer_url=offer_url,
@@ -383,10 +394,16 @@ def _dedupe(offers: list[Offer]) -> list[Offer]:
 async def fetch_offers() -> list[Offer]:
     """
     Compatibility entrypoint for offers_service.
+    Парсит WoW Classic Era + MoP Classic, дедуплицирует по offer_id.
     """
     fetched_at = datetime.now(timezone.utc)
     try:
-        raw_offers = await fetch_g2g_game("wow_classic_era")
+        raw_offers: list[G2GOffer] = []
+        for game_key in ("wow_classic_era", "wow_mop_classic"):
+            try:
+                raw_offers.extend(await fetch_g2g_game(game_key))
+            except Exception:
+                logger.exception("G2G fetch_g2g_game(%s) failed", game_key)
         offers = [o for o in (_to_offer(r, fetched_at) for r in raw_offers) if o is not None]
         return _dedupe(offers)
     except Exception:
