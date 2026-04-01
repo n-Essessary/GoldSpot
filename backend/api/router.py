@@ -17,11 +17,21 @@ async def get_meta_handler():
 @router.get("/servers", response_model=ServersResponse)
 async def get_servers_handler():
     """
-    Возвращает список уникальных серверов, отсортированных по
-    количеству доступных онлайн-офферов (самые популярные — первыми).
+    Возвращает иерархический список групп серверов.
+
+    Каждая группа содержит:
+      - display_server: читаемое название группы, напр. "(EU) Anniversary"
+      - realms: список реалмов внутри группы (только G2G), напр. ["Firemaw", "Spineshatter"]
+                Пустой список — у группы нет реалмов (FunPay-офферы)
+      - min_price: минимальная цена по всем офферам группы ($/1k)
+
+    Фронтенд строит двухуровневое дерево:
+      (EU) Anniversary
+        └── Firemaw
+        └── Spineshatter
     """
-    servers = get_servers()
-    return ServersResponse(count=len(servers), servers=servers)
+    groups = get_servers()
+    return ServersResponse(count=len(groups), servers=groups)
 
 
 @router.get("/offers", response_model=OffersResponse)
@@ -32,8 +42,6 @@ async def get_offers_handler(
     sort_by: str = Query("price", pattern="^(price|amount)$"),
 ):
     offers = get_offers(server, faction, sort_by, server_name)
-    # Конвертируем Offer → OfferRow: убираем display_server / server_name / server
-    # из ответа — пользователь уже выбрал их в левой панели.
     rows = [OfferRow.model_validate(o) for o in offers]
     return OffersResponse(count=len(rows), offers=rows)
 

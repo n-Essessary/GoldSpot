@@ -14,7 +14,7 @@ import re
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
-from api.schemas import Offer, PriceHistoryPoint
+from api.schemas import Offer, PriceHistoryPoint, ServerGroup
 from parser.funpay_parser import fetch_offers as _funpay_fetch
 from parser.g2g_parser import fetch_offers as _g2g_fetch
 
@@ -249,11 +249,7 @@ _VERSION_ORDER: dict[str, int] = {
 
 
 def _version_rank(display_server: str) -> int:
-    """Возвращает приоритет версии по display_server.
-
-    Используется для сортировки списка серверов в UI:
-    Anniversary → Seasonal → Classic Era → Classic → Season of Discovery → прочие.
-    """
+    """Возвращает приоритет версии по display_server."""
     ds = display_server.strip()
     for ver, rank in _VERSION_ORDER.items():
         if ver.lower() in ds.lower():
@@ -261,30 +257,54 @@ def _version_rank(display_server: str) -> int:
     return 99
 
 
-def get_servers() -> list[str]:
+def get_servers() -> list[ServerGroup]:
     """
-    Возвращает уникальные имена серверов из кэша.
+    Возвращает иерархический список групп серверов.
 
-    Сортировка:
-      1. Версия (Anniversary=0, Seasonal=1, Classic Era=2, Classic=3, SoD=4)
-      2. Минимальная цена по серверу (ASC)
+    Каждая группа: display_server + список реалмов + min_price.
 
-    Использует display_server (читаемое имя) как ключ —
-    именно это значение показывается пользователю в UI.
+    Реалмы — уникальные непустые server_name внутри группы (только G2G).
+    FunPay-офферы имеют server_name="" и в realms не попадают.
 
-    Пример: ["(EU) Anniversary", "(EU) Seasonal", "(EU) Classic Era", "(EU) Classic"]
+    Сортировка групп:
+      1. Версия (Anniversary=0 … SoD=4)
+      2. Минимальная цена ASC
+
+    Сортировка реалмов: алфавитная.
     """
-    min_prices: dict[str, float] = {}
+    # Собираем данные по каждой группе
+    group_min_price: dict[str, float] = {}
+    group_realms: dict[str, set[str]] = {}
+
     for offer in _cache:
         ds = offer.display_server
-        cur = min_prices.get(ds)
-        if cur is None or offer.price_per_1k < cur:
-            min_prices[ds] = offer.price_per_1k
+        if not ds:
+            continue
 
-    return sorted(
-        min_prices,
-        key=lambda s: (_version_rank(s), min_prices[s]),
+        # min_price по группе
+        cur = group_min_price.get(ds)
+        if cur is None or offer.price_per_1k < cur:
+            group_min_price[ds] = offer.price_per_1k
+
+        # realms: только непустые server_name
+        if ds not in group_realms:
+            group_realms[ds] = set()
+        if offer.server_name:
+            group_realms[ds].add(offer.server_name)
+
+    sorted_groups = sorted(
+        group_min_price,
+        key=lambda s: (_version_rank(s), group_min_price[s]),
     )
+
+    return [
+        ServerGroup(
+            display_server=ds,
+            realms=sorted(group_realms.get(ds, set())),
+            min_price=round(group_min_price[ds], 4),
+        )
+        for ds in sorted_groups
+    ]
 
 
 def get_offers(

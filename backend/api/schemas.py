@@ -84,9 +84,24 @@ class OffersResponse(BaseModel):
     offers: list[OfferRow]
 
 
+class ServerGroup(BaseModel):
+    """Группа серверов одной версии/региона.
+
+    display_server  — читаемое название группы: "(EU) Anniversary"
+    realms          — список реалмов внутри группы (только G2G).
+                      Пустой список означает, что реалмов нет (FunPay-офферы
+                      не разделены по реалмам) — фронтенд показывает группу
+                      без вложенного уровня.
+    min_price       — минимальная цена по всем офферам группы ($/1k).
+    """
+    display_server: str
+    realms: list[str]        # отсортированы по алфавиту; пусто для FunPay-only групп
+    min_price: float
+
+
 class ServersResponse(BaseModel):
     count: int
-    servers: list[str]
+    servers: list[ServerGroup]
 
 
 class PriceHistoryPoint(BaseModel):
