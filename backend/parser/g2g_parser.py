@@ -337,8 +337,16 @@ def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
 
     server_name, region, version, faction = _parse_title(raw.title)
     # Строим display_server в формате FunPay: "(EU) Anniversary"
-    # Если парсинг не удался (region или version пусты) → "Unknown"
-    display_server = f"({region}) {version}" if region and version else "Unknown"
+    # Если есть и регион, и версия — полный ключ группы.
+    # Если только версия (напр. "Season of Discovery") — используем её без региона.
+    # Если ни того ни другого — оффер невозможно сгруппировать, пропускаем.
+    if region and version:
+        display_server = f"({region}) {version}"
+    elif version:
+        display_server = version
+    else:
+        logger.debug("G2G: пропуск нераспознанного оффера title=%r", raw.title)
+        return None
     offer_url = f"https://www.g2g.com/offer/{raw.offer_id}" if raw.offer_id else None
     seller = raw.seller or "unknown"
 

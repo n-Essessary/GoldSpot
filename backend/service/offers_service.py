@@ -39,6 +39,10 @@ def _detect_version(text: str) -> str:
         return "Season of Discovery"
     if "anniversary" in t:
         return "Anniversary"
+    if re.search(r"\bseasonal\b", t):
+        return "Seasonal"
+    if "classic era" in t:
+        return "Classic Era"
     if "classic" in t:
         return "Classic"
     return "Classic"
@@ -207,7 +211,26 @@ async def refresh() -> None:
 
     _cache = all_offers
     _last_update = datetime.now(timezone.utc)
-    logger.info("Кэш обновлён: %d офферов", len(_cache))
+
+    # ── Диагностика после обновления ─────────────────────────────────────────
+    servers_count: dict[str, int] = {}
+    unknown_count = 0
+    for o in _cache:
+        ds = o.display_server or "Unknown"
+        if ds == "Unknown":
+            unknown_count += 1
+        servers_count[ds] = servers_count.get(ds, 0) + 1
+
+    logger.info(
+        "Кэш обновлён: %d офферов, %d серверов%s",
+        len(_cache),
+        len(servers_count),
+        f", Unknown={unknown_count}" if unknown_count else "",
+    )
+
+    if logger.isEnabledFor(logging.DEBUG):
+        for ds, cnt in sorted(servers_count.items(), key=lambda x: -x[1]):
+            logger.debug("  %-35s %d офферов", ds, cnt)
 
 
 def get_meta() -> datetime | None:
@@ -215,21 +238,52 @@ def get_meta() -> datetime | None:
     return _last_update
 
 
+_VERSION_ORDER: dict[str, int] = {
+    "Anniversary":         0,
+    "Seasonal":            1,
+    "Classic Era":         2,
+    "Classic":             3,
+    "Season of Discovery": 4,
+}
+
+
+def _version_rank(display_server: str) -> int:
+    """Возвращает приоритет версии по display_server.
+
+    Используется для сортировки списка серверов в UI:
+    Anniversary → Seasonal → Classic Era → Classic → Season of Discovery → прочие.
+    """
+    ds = display_server.strip()
+    for ver, rank in _VERSION_ORDER.items():
+        if ver.lower() in ds.lower():
+            return rank
+    return 99
+
+
 def get_servers() -> list[str]:
     """
-    Возвращает уникальные имена серверов из кэша,
-    отсортированные по количеству офферов (DESC).
+    Возвращает уникальные имена серверов из кэша.
+
+    Сортировка:
+      1. Версия (Anniversary=0, Seasonal=1, Classic Era=2, Classic=3, SoD=4)
+      2. Минимальная цена по серверу (ASC)
 
     Использует display_server (читаемое имя) как ключ —
     именно это значение показывается пользователю в UI.
 
-    Пример: ["(EU) Flamegor", "(EU) Firemaw", "(EU) Gehennas"]
+    Пример: ["(EU) Anniversary", "(EU) Seasonal", "(EU) Classic Era", "(EU) Classic"]
     """
-    counts: dict[str, int] = {}
+    min_prices: dict[str, float] = {}
     for offer in _cache:
-        counts[offer.display_server] = counts.get(offer.display_server, 0) + 1
+        ds = offer.display_server
+        cur = min_prices.get(ds)
+        if cur is None or offer.price_per_1k < cur:
+            min_prices[ds] = offer.price_per_1k
 
-    return sorted(counts, key=lambda s: counts[s], reverse=True)
+    return sorted(
+        min_prices,
+        key=lambda s: (_version_rank(s), min_prices[s]),
+    )
 
 
 def get_offers(
@@ -265,9 +319,12 @@ def get_offers(
     if faction:
         result = [o for o in result if o.faction.lower() == faction.lower()]
 
-    # Первичная сортировка: display_server (группа), server_name (сервер),
-    # Вторичная сортировка: зависит от sort_by (price ASC / amount ASC)
-    secondary_key = "price_per_1k" if sort_by == "price" else "amount_gold"
-    result.sort(key=lambda o: (o.display_server, o.server_name, getattr(o, secondary_key)))
+    # Сортировка офферов внутри выборки:
+    #   sort_by="price"  → цена ASC, затем количество DESC (больше золота — лучше при той же цене)
+    #   sort_by="amount" → количество DESC, затем цена ASC
+    if sort_by == "price":
+        result.sort(key=lambda o: (o.price_per_1k, -o.amount_gold))
+    else:
+        result.sort(key=lambda o: (-o.amount_gold, o.price_per_1k))
 
     return result
