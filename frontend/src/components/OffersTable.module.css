@@ -99,8 +99,25 @@
   letter-spacing: 0.03em;
 }
 
+/* Сервер — fallback (серый, курсив): показывается когда server_name пустой */
+.serverFallback {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 /* Цена */
 .price { font-size: 14px; color: var(--text-primary); }
+
+/* Иконка аномальной G2G-цены */
+.priceWarn {
+  display: inline-block;
+  margin-right: 4px;
+  font-size: 11px;
+  color: #f59e0b;
+  cursor: default;
+  vertical-align: middle;
+}
 
 /* Объём */
 .gold  { font-size: 13px; color: var(--text-secondary); }

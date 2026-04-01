@@ -105,7 +105,12 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
           />
 
           <main className={styles.main}>
-            <OffersTable offers={filteredOffers} loading={loading} error={error} />
+            <OffersTable
+              offers={filteredOffers}
+              loading={loading}
+              error={error}
+              currentServer={filters.server}
+            />
           </main>
         </div>
       </div>

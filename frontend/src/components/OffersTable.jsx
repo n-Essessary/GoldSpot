@@ -42,9 +42,14 @@ function getTop3Threshold(offers) {
 }
 
 /**
- * @param {{ offers: import('../api/offers').Offer[], loading: boolean, error: string|null }} props
+ * @param {{
+ *   offers: import('../api/offers').Offer[],
+ *   loading: boolean,
+ *   error: string|null,
+ *   currentServer?: string   — display_server текущей страницы (для G2G fallback)
+ * }} props
  */
-export function OffersTable({ offers, loading, error }) {
+export function OffersTable({ offers, loading, error, currentServer = '' }) {
   if (error) {
     return (
       <div className={styles.state}>
@@ -94,9 +99,14 @@ export function OffersTable({ offers, loading, error }) {
         </thead>
         <tbody>
           {sorted.map((offer, i) => {
-            const isBest = offer.price_per_1k === minPrice
-            const isTop3 = !isBest && offer.price_per_1k <= top3Thr
-            const src    = SOURCE_META[offer.source] ?? { label: offer.source, color: 'var(--text-secondary)' }
+            const isBest      = offer.price_per_1k === minPrice
+            const isTop3      = !isBest && offer.price_per_1k <= top3Thr
+            const src         = SOURCE_META[offer.source] ?? { label: offer.source, color: 'var(--text-secondary)' }
+            // ⚠ Аномально дорогой G2G-оффер: >= 3× от min_price сервера
+            const isExpensive = offer.source === 'g2g' && offer.price_per_1k >= minPrice * 3
+            // Сервер в ячейке: реалм (G2G) или fallback на текущую группу (серый)
+            const realmLabel  = offer.server_name || null
+            const serverLabel = realmLabel ?? currentServer
 
             const rowCls = [
               styles.row,
@@ -127,7 +137,11 @@ export function OffersTable({ offers, loading, error }) {
 
                 {/* Сервер + Фракция в одной ячейке */}
                 <td className={styles.serverCell}>
-                  <span className={styles.server}>{normalizeServer(offer.server).label}</span>
+                  {serverLabel && (
+                    <span className={realmLabel ? styles.server : styles.serverFallback}>
+                      {serverLabel}
+                    </span>
+                  )}
                   <span
                     className={styles.faction}
                     style={{ color: FACTION_COLOR[offer.faction] ?? 'var(--text-secondary)' }}
@@ -138,6 +152,14 @@ export function OffersTable({ offers, loading, error }) {
 
                 {/* Цена — главная цифра */}
                 <td className={`${styles.price} ${styles.right} mono`}>
+                  {isExpensive && (
+                    <span
+                      className={styles.priceWarn}
+                      title="Цена значительно выше рынка"
+                    >
+                      ⚠
+                    </span>
+                  )}
                   {formatPrice(offer.price_per_1k)}
                 </td>
 
