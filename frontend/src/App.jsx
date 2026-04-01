@@ -42,12 +42,13 @@ function RootRedirect() {
 
   if (loading) return null
 
-  const first = servers[0] ?? ''
+  // servers[0] — ServerGroup, берём display_server
+  const first = servers[0]?.display_server ?? ''
   return <Navigate to={`/server/${encodeURIComponent(first)}`} replace />
 }
 
 // ── Основной layout ───────────────────────────────────────────
-function Dashboard({ initialServer, servers, onSelectServer }) {
+function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
   const {
     offers,
     filteredOffers,
@@ -58,7 +59,7 @@ function Dashboard({ initialServer, servers, onSelectServer }) {
     loading,
     error,
     lastFetched,
-  } = useOffers(initialServer)
+  } = useOffers(initialServer, initialRealm)
 
   return (
     <div className={styles.layout}>
@@ -75,6 +76,7 @@ function Dashboard({ initialServer, servers, onSelectServer }) {
         <ServerSidebar
           servers={servers}
           selectedServer={filters.server}
+          selectedRealm={filters.server_name ?? ''}
           onSelect={onSelectServer}
         />
 
@@ -111,18 +113,26 @@ function Dashboard({ initialServer, servers, onSelectServer }) {
   )
 }
 
-function DashboardRoute({ initialServer }) {
+function DashboardRoute({ initialServer, initialRealm }) {
   const navigate = useNavigate()
   const { servers } = useServers()
 
-  const onSelectServer = (server) => {
-    if (!server) navigate('/')
-    else navigate(`/server/${encodeURIComponent(server)}`)
+  // onSelect получает (display_server, realm)
+  const onSelectServer = (server, realm) => {
+    if (!server) {
+      navigate('/')
+      return
+    }
+    const path = realm
+      ? `/server/${encodeURIComponent(server)}/realm/${encodeURIComponent(realm)}`
+      : `/server/${encodeURIComponent(server)}`
+    navigate(path)
   }
 
   return (
     <Dashboard
       initialServer={initialServer}
+      initialRealm={initialRealm}
       servers={servers}
       onSelectServer={onSelectServer}
     />
@@ -131,13 +141,24 @@ function DashboardRoute({ initialServer }) {
 
 function ServerRoute() {
   const { serverName } = useParams()
-  return <DashboardRoute initialServer={serverName} />
+  return <DashboardRoute initialServer={decodeURIComponent(serverName)} initialRealm="" />
+}
+
+function RealmRoute() {
+  const { serverName, realmName } = useParams()
+  return (
+    <DashboardRoute
+      initialServer={decodeURIComponent(serverName)}
+      initialRealm={decodeURIComponent(realmName)}
+    />
+  )
 }
 
 // ── Роуты ─────────────────────────────────────────────────────
 export default function App() {
   return (
     <Routes>
+      <Route path="/server/:serverName/realm/:realmName" element={<RealmRoute />} />
       <Route path="/server/:serverName" element={<ServerRoute />} />
       <Route path="/" element={<RootRedirect />} />
     </Routes>

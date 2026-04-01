@@ -15,14 +15,22 @@ export const API_BASE = 'https://scintillating-flexibility-production-809a.up.ra
  */
 
 /**
+ * @typedef {Object} ServerGroup
+ * @property {string}   display_server  — читаемое название группы: "(EU) Anniversary"
+ * @property {string[]} realms          — реалмы внутри группы (только G2G); [] для FunPay
+ * @property {number}   min_price       — минимальная цена $/1k по группе
+ */
+
+/**
  * @typedef {Object} OffersFilters
  * @property {string} [server]
+ * @property {string} [server_name]
  * @property {string} [faction]
  * @property {'price'|'amount'} [sort_by]
  */
 
 /**
- * @returns {Promise<{ last_update: string | null }>} Версия данных (UTC ISO 8601)
+ * @returns {Promise<{ last_update: string | null }>}
  */
 export async function fetchMeta() {
   const res = await fetch(`${API_BASE}/meta`)
@@ -31,7 +39,7 @@ export async function fetchMeta() {
 }
 
 /**
- * @returns {Promise<string[]>} Список всех серверов с бэкенда
+ * @returns {Promise<ServerGroup[]>}
  */
 export async function fetchServers() {
   const res = await fetch(`${API_BASE}/servers`)
@@ -47,9 +55,10 @@ export async function fetchServers() {
 export async function fetchOffers(filters = {}) {
   const params = new URLSearchParams()
 
-  if (filters.server)  params.set('server',  filters.server)
-  if (filters.faction) params.set('faction', filters.faction)
-  if (filters.sort_by) params.set('sort_by', filters.sort_by)
+  if (filters.server)      params.set('server',      filters.server)
+  if (filters.server_name) params.set('server_name', filters.server_name)
+  if (filters.faction)     params.set('faction',     filters.faction)
+  if (filters.sort_by)     params.set('sort_by',     filters.sort_by)
 
   const qs = params.toString()
   const url = `${API_BASE}/offers${qs ? `?${qs}` : ''}`

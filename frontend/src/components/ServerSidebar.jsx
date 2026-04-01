@@ -1,155 +1,84 @@
-import { useState, useMemo } from 'react'
+import { useState } from 'react'
 import styles from './ServerSidebar.module.css'
 
-// ── Группировка ────────────────────────────────────────────────
 /**
- * Разбивает flat-список серверов на именованные группы.
+ * Левая панель с двухуровневым деревом серверов.
  *
- * CASE 1: строка содержит "#"
- *   "(EU) #Anniversary - Годовщина"  → группа "(EU) #Anniversary"
- *   "(EU) #Season of Discovery - Wild Growth" → группа "(EU) #Season of Discovery"
- *   Берём часть ДО последнего " - ".
- *
- * CASE 2: строки без "#"
- *   "(EU) Bloodfang", "(US) Faerlina"  → группа "Classic"
- *
- * Возвращает Map<groupName, string[]> — серверы внутри отсортированы по алфавиту.
- * Порядок групп: сначала "#"-группы (по алфавиту), затем "Classic".
- *
- * @param {string[]} servers
- * @returns {Map<string, string[]>}
- */
-function groupServers(servers) {
-  const map = new Map()
-
-  for (const server of servers) {
-    let group
-
-    if (server.includes('#')) {
-      // Часть до последнего " - " — это и есть группа
-      const dashIdx = server.lastIndexOf(' - ')
-      group = dashIdx !== -1 ? server.slice(0, dashIdx) : server
-    } else {
-      group = 'Classic'
-    }
-
-    if (!map.has(group)) map.set(group, [])
-    map.get(group).push(server)
-  }
-
-  // Сортируем серверы внутри каждой группы по алфавиту
-  for (const list of map.values()) {
-    list.sort((a, b) => a.localeCompare(b))
-  }
-
-  // Порядок групп: "#"-группы по алфавиту, Classic — в конец
-  const sorted = new Map(
-    [...map.entries()].sort(([a], [b]) => {
-      const aIsClassic = a === 'Classic'
-      const bIsClassic = b === 'Classic'
-      if (aIsClassic && !bIsClassic) return 1
-      if (!aIsClassic && bIsClassic) return -1
-      return a.localeCompare(b)
-    }),
-  )
-
-  return sorted
-}
-
-// ── Display helpers ────────────────────────────────────────────
-
-/**
- * Форматирует название группы для отображения в UI.
- * Удаляет символ "#", всё остальное остаётся без изменений.
- *
- * "(EU) #Anniversary"          → "(EU) Anniversary"
- * "(EU) #Season of Discovery"  → "(EU) Season of Discovery"
- * "Classic"                    → "Classic"
- */
-function formatGroupName(group) {
-  return group.replace(/#/g, '')
-}
-
-/**
- * Форматирует название сервера для отображения в UI.
- * Берёт часть после последнего " - ", если оно есть.
- * RAW-значение при этом не меняется — используется только в title/onClick.
- *
- * "(EU) #Anniversary - Soulseeker"  → "Soulseeker"
- * "(EU) Bloodfang"                  → "(EU) Bloodfang"
- */
-function formatServerName(server) {
-  const dashIdx = server.lastIndexOf(' - ')
-  return dashIdx !== -1 ? server.slice(dashIdx + 3) : server
-}
-
-// ── Компонент ──────────────────────────────────────────────────
-/**
- * Левая панель со сгруппированным списком серверов.
- * RAW-строки без нормализации — как приходят с /servers.
+ * servers        — массив ServerGroup с бэкенда:
+ *                  [{ display_server: "(EU) Anniversary", realms: ["Firemaw", "Spineshatter"], min_price: 0.42 }]
+ * selectedServer — display_server выбранной группы: "(EU) Anniversary"
+ * selectedRealm  — реалм внутри группы: "Spineshatter" (или "" если не выбран)
+ * onSelect(server, realm) — колбэк при выборе
  *
  * @param {{
- *   servers: string[]
+ *   servers: { display_server: string, realms: string[], min_price: number }[]
  *   selectedServer: string
- *   onSelect: (server: string) => void
+ *   selectedRealm?: string
+ *   onSelect: (server: string, realm: string) => void
  * }} props
  */
-export function ServerSidebar({ servers, selectedServer, onSelect }) {
-  const grouped = useMemo(() => groupServers(servers), [servers])
-
-  // Авто-раскрываем группу, в которой находится выбранный сервер
+export function ServerSidebar({ servers, selectedServer, selectedRealm = '', onSelect }) {
+  // Авто-раскрываем группу выбранного сервера при инициализации
   const [openGroups, setOpenGroups] = useState(() => {
     const initial = {}
-    for (const [group, list] of groupServers(servers)) {
-      if (list.includes(selectedServer)) initial[group] = true
-    }
+    if (selectedServer) initial[selectedServer] = true
     return initial
   })
 
-  const toggle = (group) =>
-    setOpenGroups((prev) => ({ ...prev, [group]: !prev[group] }))
+  const toggle = (displayServer) =>
+    setOpenGroups((prev) => ({ ...prev, [displayServer]: !prev[displayServer] }))
 
   return (
     <aside className={styles.sidebar}>
       <div className={styles.heading}>Серверы</div>
 
-      {[...grouped.entries()].map(([group, list]) => {
-        const isOpen = !!openGroups[group]
-        const hasActive = list.includes(selectedServer)
+      {servers.map(({ display_server, realms }) => {
+        const isOpen = !!openGroups[display_server]
+        const isGroupActive = display_server === selectedServer
+        const hasRealms = realms.length > 0
 
         return (
-          <div key={group} className={styles.group}>
+          <div key={display_server} className={styles.group}>
             {/* ── Заголовок группы ── */}
             <div
               className={
-                hasActive
+                isGroupActive
                   ? `${styles.groupTitle} ${styles.groupTitleActive}`
                   : styles.groupTitle
               }
-              onClick={() => toggle(group)}
-              title={group}
+              onClick={() => {
+                if (hasRealms) {
+                  // Раскрываем/скрываем список реалмов
+                  toggle(display_server)
+                } else {
+                  // У группы нет реалмов (FunPay) — выбираем сразу
+                  onSelect(display_server, '')
+                }
+              }}
+              title={display_server}
             >
-              <span className={styles.arrow}>{isOpen ? '▼' : '▶'}</span>
-              {formatGroupName(group)}
+              <span className={styles.arrow}>
+                {hasRealms ? (isOpen ? '▼' : '▶') : '·'}
+              </span>
+              {display_server}
             </div>
 
-            {/* ── Серверы внутри группы ── */}
-            {isOpen && (
+            {/* ── Реалмы внутри группы ── */}
+            {isOpen && hasRealms && (
               <div className={styles.groupItems}>
-                {list.map((server) => (
-                  <div
-                    key={server}
-                    className={
-                      server === selectedServer
-                        ? `${styles.item} ${styles.active}`
-                        : styles.item
-                    }
-                    onClick={() => onSelect(server)}
-                    title={server}
-                  >
-                    {formatServerName(server)}
-                  </div>
-                ))}
+                {realms.map((realm) => {
+                  const isActive = isGroupActive && realm === selectedRealm
+                  return (
+                    <div
+                      key={realm}
+                      className={isActive ? `${styles.item} ${styles.active}` : styles.item}
+                      onClick={() => onSelect(display_server, realm)}
+                      title={realm}
+                    >
+                      {realm}
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>
