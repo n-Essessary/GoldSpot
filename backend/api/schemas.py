@@ -66,6 +66,7 @@ class OfferRow(BaseModel):
 
     id: str
     source: str
+    server_name: str = ""   # реалм внутри группы (G2G: "Spineshatter", FunPay: "")
     faction: str
     price_per_1k: float
     amount_gold: int
