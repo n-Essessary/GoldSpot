@@ -38,11 +38,13 @@ GAME_CONFIG: dict[str, dict[str, str]] = {
         "brand_id": "lgc_game_27816",
         "service_id": "lgc_service_1",
         "label": "WoW Classic Era",
+        "category_slug": "wow-classic-era-vanilla-gold",
     },
     "wow_mop_classic": {
         "brand_id": "lgc_game_2299",
         "service_id": "lgc_service_1",
         "label": "WoW MoP Classic",
+        "category_slug": "wow-mop-classic-gold",
     },
 }
 
@@ -82,6 +84,8 @@ class G2GOffer:
     seller: str
     brand_id: str
     service_id: str
+    offer_url: Optional[str] = None   # правильный URL: группа или одиночный оффер
+    is_group: bool = False            # True = is_group_display (групповой листинг)
     raw: dict = field(default_factory=dict, repr=False)
 
 
@@ -219,6 +223,7 @@ class G2GClient:
         brand_id: str,
         service_id: str,
         relation_id: str,
+        category_slug: str = "",
         sort: str = "lowest_price",
         page_size: int = 48,
     ) -> list[G2GOffer]:
@@ -249,12 +254,29 @@ class G2GClient:
 
             for o in results:
                 try:
+                    # ── Построение правильного offer_url ─────────────────────
+                    is_group  = bool(o.get("is_group_display", False))
+                    region_id = o.get("region_id", "")
+                    offer_id  = o.get("offer_id", "")
+
+                    if is_group and category_slug:
+                        attrs  = o.get("offer_attributes", [])
+                        col_id = attrs[0].get("collection_id", "") if attrs else ""
+                        dat_id = attrs[0].get("dataset_id", "")    if attrs else ""
+                        fa     = f"{col_id}:{dat_id}"
+                        offer_url: Optional[str] = (
+                            f"https://www.g2g.com/categories/{category_slug}/offer/group"
+                            f"?fa={fa}&region_id={region_id}"
+                        )
+                    else:
+                        offer_url = f"https://www.g2g.com/offer/{offer_id}" if offer_id else None
+
                     all_offers.append(
                         G2GOffer(
-                            offer_id=o.get("offer_id", ""),
+                            offer_id=offer_id,
                             title=o.get("title", ""),
                             server_name=(_parse_title(o.get("title", ""))[0] or o.get("title", "")),
-                            region_id=o.get("region_id", ""),
+                            region_id=region_id,
                             relation_id=o.get("relation_id", ""),
                             price_usd=float(o.get("unit_price_in_usd") or 0),
                             min_qty=int(o.get("min_qty") or 1),
@@ -262,6 +284,8 @@ class G2GClient:
                             seller=(o.get("username") or "").strip(),
                             brand_id=o.get("brand_id", ""),
                             service_id=o.get("service_id", ""),
+                            offer_url=offer_url,
+                            is_group=is_group,
                             raw=o,
                         )
                     )
@@ -293,8 +317,9 @@ async def fetch_g2g_game(
         raise ValueError(f"Unknown game: {game_key}. Available: {list(GAME_CONFIG)}")
 
     cfg = GAME_CONFIG[game_key]
-    brand_id = cfg["brand_id"]
-    service_id = cfg["service_id"]
+    brand_id      = cfg["brand_id"]
+    service_id    = cfg["service_id"]
+    category_slug = cfg.get("category_slug", "")
     all_offers: list[G2GOffer] = []
 
     async with G2GClient(country=country) as client:
@@ -308,6 +333,7 @@ async def fetch_g2g_game(
                     brand_id=brand_id,
                     service_id=service_id,
                     relation_id=region.relation_id,
+                    category_slug=category_slug,
                     sort=sort,
                 )
                 all_offers.extend(offers)
@@ -358,7 +384,7 @@ def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
     else:
         logger.debug("G2G: пропуск нераспознанного оффера title=%r", raw.title)
         return None
-    offer_url = f"https://www.g2g.com/offer/{raw.offer_id}" if raw.offer_id else None
+    offer_url = raw.offer_url  # правильно собран при фетче (группа или одиночный)
     seller = raw.seller or "unknown"
 
     try:
