@@ -14,12 +14,13 @@ const META_POLL_MS = 10_000
  *    State НЕ очищается перед обновлением — UI не мигает.
  * 3. Смена фильтра (сервер / фракция) — немедленный запрос.
  */
-export function useOffers(initialServer = '') {
+export function useOffers(initialServer = '', initialRealm = '') {
   const [offers, setOffers] = useState([])
   /** Set<string> | null — null означает, что фильтр по source ещё не инициализирован */
   const [enabledSources, setEnabledSources] = useState(null)
   const [filters, setFiltersRaw] = useState({
     server: initialServer || '',
+    server_name: initialRealm || '',
     faction: '',
     sort_by: 'price',
   })
@@ -80,16 +81,16 @@ export function useOffers(initialServer = '') {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- только mount
   }, [])
 
-  // ── Реакция на смену маршрута (initialServer) ───────────────
+  // ── Реакция на смену маршрута (initialServer / initialRealm) ──
   useEffect(() => {
     setFiltersRaw((prev) => {
-      if (prev.server === initialServer) return prev
-      const next = { ...prev, server: initialServer }
+      if (prev.server === initialServer && prev.server_name === (initialRealm || '')) return prev
+      const next = { ...prev, server: initialServer, server_name: initialRealm || '' }
       filtersRef.current = next
       load(next)
       return next
     })
-  }, [initialServer, load])
+  }, [initialServer, initialRealm, load])
 
   // ── Смена фильтра пользователем ─────────────────────────────
   const setFilters = useCallback(
