@@ -1,5 +1,4 @@
 import styles from './OffersTable.module.css'
-import { normalizeServer } from '../utils/server'
 
 // Цвета фракций
 const FACTION_COLOR = {
