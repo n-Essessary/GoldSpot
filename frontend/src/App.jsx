@@ -15,25 +15,41 @@ import styles from './App.module.css'
 function useServers() {
   const [servers, setServers] = useState([])
   const [loading, setLoading] = useState(true)
+  const [attempt, setAttempt] = useState(0)
+  const MAX_ATTEMPTS = 12 // ~1-2 минуты при задержке 5-10с
 
-  useEffect(() => {
-    let cancelled = false
+  const load = () => {
+    setLoading(true)
     fetchServers()
-      .then((list) => {
-        if (!cancelled) setServers(list)
-      })
+      .then((list) => setServers(Array.isArray(list) ? list : []))
       .catch((err) => {
         console.error('[useServers] failed to load servers:', err)
+        setServers([])
       })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  return { servers, loading }
+  // Если backend cache пока пустой — делаем повторные попытки.
+  useEffect(() => {
+    if (loading) return
+    if (servers.length > 0) return
+    if (attempt >= MAX_ATTEMPTS) return
+
+    const t = setTimeout(() => {
+      setAttempt((a) => a + 1)
+      load()
+    }, 5000)
+
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [servers.length, loading, attempt])
+
+  return { servers, loading, attempt, maxAttempts: MAX_ATTEMPTS }
 }
 
 // ── Корневой маршрут: редирект на /server/:first ──────────────
