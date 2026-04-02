@@ -1,75 +1,27 @@
-import asyncio
-import contextlib
 import logging
-import random
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
-from service import offers_service
+from service.offers_service import start_background_parsers
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# httpx может спамить "HTTP Request: GET ..." на INFO-уровне и
-# забивает логи долгими refresh-циклами. Глушим access-log, оставляем
-# ошибки/ва}арнинги.
+# Глушим httpx INFO-спам, оставляем WARNING+
 for _httpx_logger_name in ("httpx", "httpcore"):
     logging.getLogger(_httpx_logger_name).setLevel(logging.WARNING)
-
-_MAX_BACKOFF_SECONDS = 60
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # ── Начальный blocking-refresh (до первого запроса) ───────────────────────
-    # create_task() только ПЛАНИРУЕТ задачу — она не получит CPU до первого
-    # await в lifespan/handler. Поэтому делаем явный await здесь, пока
-    # сервер ещё не принимает запросы. Таймаут 120 сек — G2G может быть медленным.
-    logger.info("Начальное заполнение кэша (blocking)…")
-    try:
-        await asyncio.wait_for(offers_service.refresh(), timeout=120.0)
-        logger.info("Кэш готов, сервер стартует.")
-    except asyncio.TimeoutError:
-        logger.warning(
-            "Начальный refresh превысил 120 сек — сервер стартует с пустым кэшем, "
-            "фоновый цикл продолжит попытки."
-        )
-    except Exception:
-        logger.exception(
-            "Начальный refresh завершился с ошибкой — сервер стартует с пустым кэшем, "
-            "фоновый цикл продолжит попытки."
-        )
-
-    async def refresh_loop() -> None:
-        consecutive_errors = 0
-        while True:
-            try:
-                await offers_service.refresh()
-                consecutive_errors = 0
-            except Exception:
-                consecutive_errors += 1
-                backoff = min(2 ** consecutive_errors, _MAX_BACKOFF_SECONDS)
-                logger.exception(
-                    "Фоновое обновление кэша не удалось (попытка %d), retry через %d сек.",
-                    consecutive_errors, backoff,
-                )
-                await asyncio.sleep(backoff)
-                continue
-
-            interval = random.uniform(50, 70)
-            logger.info("Next refresh in %.1fs", interval)
-            await asyncio.sleep(interval)
-
-    task = asyncio.create_task(refresh_loop())
-    try:
-        yield
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+    # Запускаем независимые фоновые циклы FunPay и G2G.
+    # create_task внутри start_background_parsers — не блокирует старт сервера.
+    # Первые данные появятся через ~5-30 сек (G2G быстрее, FunPay дольше).
+    await start_background_parsers()
+    yield
 
 
 app = FastAPI(title="WoW Gold Market Analytics", lifespan=lifespan)
@@ -80,6 +32,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-from api.router import router
+
+from api.router import router  # noqa: E402
 
 app.include_router(router)

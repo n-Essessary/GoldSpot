@@ -39,17 +39,12 @@ HEADERS = {
 }
 
 GAME_CONFIG: dict[str, dict[str, str]] = {
-    "wow_classic_era": {
-        "brand_id": "lgc_game_27816",
+    # Верифицировано: https://www.g2g.com/categories/wow-classic-era-vanilla-gold
+    # Покрывает Classic Era, Seasonal, TBC Anniversary — один brand_id
+    "wow_classic_era_seasonal_anniversary": {
+        "brand_id":   "lgc_game_27816",
         "service_id": "lgc_service_1",
-        "label": "WoW Classic Era",
-        "category_slug": "wow-classic-era-vanilla-gold",
-    },
-    "wow_mop_classic": {
-        "brand_id": "lgc_game_2299",
-        "service_id": "lgc_service_1",
-        "label": "WoW MoP Classic",
-        "category_slug": "wow-mop-classic-gold",
+        "label":      "WoW Classic Era / Seasonal / TBC Anniversary",
     },
 }
 
@@ -524,17 +519,12 @@ def _dedupe(offers: list[Offer]) -> list[Offer]:
 
 async def fetch_offers() -> list[Offer]:
     """
-    Compatibility entrypoint for offers_service.
-    Парсит WoW Classic Era + MoP Classic, дедуплицирует по offer_id.
+    Entrypoint для offers_service._run_g2g_loop().
+    Парсит WoW Classic Era / Seasonal / TBC Anniversary (один brand_id).
     """
     fetched_at = datetime.now(timezone.utc)
     try:
-        raw_offers: list[G2GOffer] = []
-        for game_key in ("wow_classic_era", "wow_mop_classic"):
-            try:
-                raw_offers.extend(await fetch_g2g_game(game_key))
-            except Exception:
-                logger.exception("G2G fetch_g2g_game(%s) failed", game_key)
+        raw_offers = await fetch_g2g_game("wow_classic_era_seasonal_anniversary")
         offers = [o for o in (_to_offer(r, fetched_at) for r in raw_offers) if o is not None]
         return _dedupe(offers)
     except Exception:

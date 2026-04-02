@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Query
 
 from api.schemas import MetaResponse, OfferRow, OffersResponse, PriceHistoryResponse, ServersResponse
-from service.offers_service import get_meta, get_offers, get_price_history, get_servers
+from service.offers_service import get_meta, get_offers, get_parser_status, get_price_history, get_servers
 
 router = APIRouter()
 
@@ -44,6 +44,20 @@ async def get_offers_handler(
     offers = get_offers(server, faction, sort_by, server_name)
     rows = [OfferRow.model_validate(o) for o in offers]
     return OffersResponse(count=len(rows), offers=rows)
+
+
+@router.get("/parser-status")
+async def parser_status_handler():
+    """
+    Диагностический эндпоинт: состояние каждого парсера.
+
+    Пример ответа:
+      {
+        "funpay": {"offers": 142, "last_update": "2024-...", "running": false},
+        "g2g":    {"offers":  87, "last_update": "2024-...", "running": true}
+      }
+    """
+    return get_parser_status()
 
 
 @router.get("/price-history")
