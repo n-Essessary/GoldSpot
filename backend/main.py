@@ -13,6 +13,12 @@ from service import offers_service
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# httpx может спамить "HTTP Request: GET ..." на INFO-уровне и
+# забивает логи долгими refresh-циклами. Глушим access-log, оставляем
+# ошибки/ва}арнинги.
+for _httpx_logger_name in ("httpx", "httpcore"):
+    logging.getLogger(_httpx_logger_name).setLevel(logging.WARNING)
+
 _MAX_BACKOFF_SECONDS = 60
 
 

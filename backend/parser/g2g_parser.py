@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 SOURCE = "g2g"
 BASE = "https://sls.g2g.com"
 
+# IMPORTANT: httpx при уровне INFO пишет "HTTP Request: ...", что забивает логи.
+# Оставляем логи в основном модуле, а сетевой "access log" глушим.
+for _httpx_logger_name in ("httpx", "httpcore"):
+    logging.getLogger(_httpx_logger_name).setLevel(logging.WARNING)
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -217,6 +222,13 @@ class G2GClient:
             if r.get("region_id") and r.get("relation_id")
         ]
         self._region_cache[cache_key] = regions
+        logger.info(
+            "G2G regions: brand_id=%s service_id=%s country=%s -> %d regions",
+            brand_id,
+            service_id,
+            self.country,
+            len(regions),
+        )
         return regions
 
     def _make_offer(self, o: dict, brand_id: str, service_id: str) -> G2GOffer:
@@ -323,6 +335,9 @@ class G2GClient:
         max_pages = 10
         # Ограничиваем параллелизм expand-групп, чтобы не устроить burst из десятков запросов.
         expand_sem = asyncio.Semaphore(6)
+        expanded_groups_total = 0
+        expanded_sellers_total = 0
+        singles_added_total = 0
 
         while page <= max_pages:
             resp = await self._client.get(
@@ -375,6 +390,7 @@ class G2GClient:
             for o in singles:
                 try:
                     all_offers.append(self._make_offer(o, brand_id, service_id))
+                    singles_added_total += 1
                 except (ValueError, TypeError):
                     continue
 
@@ -397,6 +413,8 @@ class G2GClient:
                     if isinstance(r, Exception):
                         logger.warning("G2G expand group failed: %s", r)
                         continue
+                    expanded_groups_total += 1
+                    expanded_sellers_total += len(r)
                     all_offers.extend(r)
 
             logger.debug(
@@ -409,7 +427,19 @@ class G2GClient:
 
             page += 1
             await asyncio.sleep(0.2)
-
+        unique_sellers = {o.seller for o in all_offers if o.seller}
+        logger.info(
+            "G2G offers: relation_id=%s (brand_id=%s service_id=%s) -> pages=%d offers=%d unique_sellers=%d expand_groups=%d singles_added=%d expanded_sellers=%d",
+            relation_id,
+            brand_id,
+            service_id,
+            page - 1,
+            len(all_offers),
+            len(unique_sellers),
+            expanded_groups_total,
+            singles_added_total,
+            expanded_sellers_total,
+        )
         return all_offers
 
 
@@ -433,9 +463,26 @@ async def fetch_g2g_game(
         regions = await client.fetch_regions(brand_id, service_id)
         if max_regions:
             regions = regions[:max_regions]
+        logger.info(
+            "G2G game=%s: servers(regions)=%d (brand_id=%s service_id=%s country=%s)",
+            game_key,
+            len(regions),
+            brand_id,
+            service_id,
+            country,
+        )
 
+        loaded_regions = 0
         for i, region in enumerate(regions):
             try:
+                logger.info(
+                    "G2G game=%s loading %d/%d: relation_id=%s region_id=%s",
+                    game_key,
+                    i + 1,
+                    len(regions),
+                    region.relation_id,
+                    region.region_id,
+                )
                 offers = await client.fetch_offers(
                     brand_id=brand_id,
                     service_id=service_id,
@@ -444,10 +491,21 @@ async def fetch_g2g_game(
                     sort=sort,
                 )
                 all_offers.extend(offers)
+                loaded_regions += 1
             except httpx.HTTPStatusError as e:
                 logger.warning("G2G HTTP error for region %s: %s", region.region_id, e)
             if i < len(regions) - 1:
                 await asyncio.sleep(delay)
+
+        unique_sellers = {o.seller for o in all_offers if o.seller}
+        logger.info(
+            "G2G game=%s done: regions_found=%d regions_loaded=%d offers=%d unique_sellers=%d",
+            game_key,
+            len(regions),
+            loaded_regions,
+            len(all_offers),
+            len(unique_sellers),
+        )
 
     return all_offers
 
