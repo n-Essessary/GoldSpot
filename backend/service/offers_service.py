@@ -8,6 +8,7 @@ Lock убран намеренно: asyncio — однопоточный event l
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import re
@@ -80,6 +81,8 @@ SOURCES: dict[str, Callable[[], Awaitable[list[Offer]]]] = {
 
 _cache: list[Offer] = []
 _last_update: datetime | None = None  # UTC-время последнего успешного refresh()
+_is_fetching: bool = False
+_CACHE_TTL_SECONDS: int = 300  # 5 минут
 _LIQUIDITY_THRESHOLD = 1_000_000
 _MIN_OFFERS = 5
 
@@ -198,6 +201,20 @@ def get_price_history(
 
 async def refresh() -> None:
     global _cache, _last_update
+    global _is_fetching
+
+    # Если уже идёт обновление — не запускаем параллельно.
+    if _is_fetching:
+        return
+
+    _is_fetching = True
+    try:
+        await _refresh_internal()
+    finally:
+        _is_fetching = False
+
+
+async def _refresh_internal() -> None:
     all_offers: list[Offer] = []
 
     for source_name, fetch_fn in SOURCES.items():
@@ -234,8 +251,27 @@ async def refresh() -> None:
             logger.debug("  %-35s %d офферов", ds, cnt)
 
 
+def _schedule_refresh_if_stale() -> None:
+    """
+    Планирует обновление кеша в фоне, если кеш ещё не инициализирован
+    или устарел. Никаких await — чтобы не блокировать HTTP handlers.
+    """
+    global _last_update, _is_fetching
+
+    now = datetime.now(timezone.utc)
+    stale = _last_update is None or (now - _last_update).total_seconds() > _CACHE_TTL_SECONDS
+
+    if stale and not _is_fetching:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(refresh())
+
+
 def get_meta() -> datetime | None:
     """Возвращает UTC-время последнего успешного обновления кэша."""
+    _schedule_refresh_if_stale()
     return _last_update
 
 
@@ -272,6 +308,7 @@ def get_servers() -> list[ServerGroup]:
 
     Сортировка реалмов: алфавитная.
     """
+    _schedule_refresh_if_stale()
     # Собираем данные по каждой группе
     group_min_price: dict[str, float] = {}
     group_realms: dict[str, set[str]] = {}
@@ -313,6 +350,7 @@ def get_offers(
     sort_by: str = "price",
     server_name: str | None = None,
 ) -> list[Offer]:
+    _schedule_refresh_if_stale()
     result = list(_cache)
 
     if server:

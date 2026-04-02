@@ -18,8 +18,6 @@ _MAX_BACKOFF_SECONDS = 60
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    await offers_service.refresh()
-
     async def refresh_loop() -> None:
         consecutive_errors = 0
         while True:

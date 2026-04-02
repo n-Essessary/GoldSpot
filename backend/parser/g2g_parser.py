@@ -321,6 +321,8 @@ class G2GClient:
         all_offers: list[G2GOffer] = []
         page = 1
         max_pages = 10
+        # Ограничиваем параллелизм expand-групп, чтобы не устроить burst из десятков запросов.
+        expand_sem = asyncio.Semaphore(6)
 
         while page <= max_pages:
             resp = await self._client.get(
@@ -343,28 +345,59 @@ class G2GClient:
             if not results:
                 break
 
+            singles: list[dict] = []
+            group_items: list[dict] = []
+
+            def _is_true_flag(v: object) -> bool:
+                if v is True:
+                    return True
+                if v in (1, "1"):
+                    return True
+                if isinstance(v, str) and v.strip().lower() == "true":
+                    return True
+                return False
+
             for o in results:
-                is_group = o.get("is_group_display", False)
-                total    = int(o.get("total_offer") or 1)
+                is_group = _is_true_flag(o.get("is_group_display", False))
+                total_raw = o.get("total_offer", None)
+                try:
+                    total = int(total_raw) if total_raw is not None else 1
+                except (ValueError, TypeError):
+                    total = 1
 
+                # Fix 1: expand только для настоящих групп, где total_offer > 1
                 if is_group and total > 1:
-                    sellers = await self._expand_group(
-                        brand_id=brand_id,
-                        service_id=service_id,
-                        relation_id=relation_id,
-                        offer_id=o.get("offer_id", ""),
-                        offer_group=o.get("offer_group", ""),
-                        max_sellers=min(total, 10),
-                    )
-                    all_offers.extend(sellers)
-                    await asyncio.sleep(0.2)
-                    continue
+                    group_items.append(o)
+                else:
+                    singles.append(o)
 
-                # одиночный оффер (или группа с 1 продавцом)
+            # одиночные офферы — сразу
+            for o in singles:
                 try:
                     all_offers.append(self._make_offer(o, brand_id, service_id))
                 except (ValueError, TypeError):
                     continue
+
+            # Fix 2: expand grouped офферов параллельно внутри страницы
+            if group_items:
+                async def _expand_one(o: dict) -> list[G2GOffer]:
+                    async with expand_sem:
+                        return await self._expand_group(
+                            brand_id=brand_id,
+                            service_id=service_id,
+                            relation_id=relation_id,
+                            offer_id=o.get("offer_id", ""),
+                            offer_group=o.get("offer_group", ""),
+                            max_sellers=min(int(o.get("total_offer") or 1), 10),
+                        )
+
+                tasks = [_expand_one(o) for o in group_items]
+                expanded = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in expanded:
+                    if isinstance(r, Exception):
+                        logger.warning("G2G expand group failed: %s", r)
+                        continue
+                    all_offers.extend(r)
 
             logger.debug(
                 "G2G: relation_id=%s page=%d → %d офферов (всего %d)",
