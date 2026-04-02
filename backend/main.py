@@ -24,6 +24,25 @@ _MAX_BACKOFF_SECONDS = 60
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # ── Начальный blocking-refresh (до первого запроса) ───────────────────────
+    # create_task() только ПЛАНИРУЕТ задачу — она не получит CPU до первого
+    # await в lifespan/handler. Поэтому делаем явный await здесь, пока
+    # сервер ещё не принимает запросы. Таймаут 120 сек — G2G может быть медленным.
+    logger.info("Начальное заполнение кэша (blocking)…")
+    try:
+        await asyncio.wait_for(offers_service.refresh(), timeout=120.0)
+        logger.info("Кэш готов, сервер стартует.")
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Начальный refresh превысил 120 сек — сервер стартует с пустым кэшем, "
+            "фоновый цикл продолжит попытки."
+        )
+    except Exception:
+        logger.exception(
+            "Начальный refresh завершился с ошибкой — сервер стартует с пустым кэшем, "
+            "фоновый цикл продолжит попытки."
+        )
+
     async def refresh_loop() -> None:
         consecutive_errors = 0
         while True:

@@ -215,7 +215,10 @@ async def refresh() -> None:
 
 
 async def _refresh_internal() -> None:
+    global _cache, _last_update
+
     all_offers: list[Offer] = []
+    sources_ok = 0
 
     for source_name, fetch_fn in SOURCES.items():
         try:
@@ -223,9 +226,21 @@ async def _refresh_internal() -> None:
             if source_name == "funpay":
                 offers = [_normalize_funpay_offer(o) for o in offers]
             all_offers.extend(offers)
+            sources_ok += 1
             logger.info("Источник %s: загружено %d офферов", source_name, len(offers))
         except Exception:
             logger.exception("Источник %s: ошибка загрузки", source_name)
+
+    # Если все источники упали и новый результат пустой — сохраняем старый кеш.
+    # Это предотвращает затирание рабочих данных транзиентными сетевыми ошибками.
+    # _last_update НЕ обновляем → _schedule_refresh_if_stale() повторит попытку
+    # раньше следующего планового интервала.
+    if not all_offers and sources_ok == 0:
+        logger.warning(
+            "Все источники вернули ошибку — кэш (%d офферов) сохранён без изменений.",
+            len(_cache),
+        )
+        return
 
     _cache = all_offers
     _last_update = datetime.now(timezone.utc)
