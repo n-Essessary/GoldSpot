@@ -42,9 +42,18 @@ function RootRedirect() {
 
   if (loading) return null
 
-  // servers[0] — ServerGroup, берём display_server
-  const first = servers[0]?.display_server ?? ''
-  return <Navigate to={`/server/${encodeURIComponent(first)}`} replace />
+  // servers[0] — ServerGroup
+  const firstGroup = servers[0]
+  const firstDisplay = firstGroup?.display_server ?? ''
+  const firstRealm = firstGroup?.realms?.[0] ?? ''
+
+  // Если у группы есть realms — редиректим сразу на первый realm,
+  // иначе редиректим только на группу.
+  const to = firstRealm
+    ? `/server/${encodeURIComponent(firstDisplay)}/realm/${encodeURIComponent(firstRealm)}`
+    : `/server/${encodeURIComponent(firstDisplay)}`
+
+  return <Navigate to={to} replace />
 }
 
 // ── Основной layout ───────────────────────────────────────────
@@ -122,6 +131,14 @@ function DashboardRoute({ initialServer, initialRealm }) {
   const navigate = useNavigate()
   const { servers } = useServers()
 
+  const resolvedInitialRealm = (() => {
+    // Backend требует server_name для получения офферов.
+    // На маршруте /server/:serverName без /realm мы выбираем первый realm из группы.
+    if (initialRealm) return initialRealm
+    const group = servers.find((s) => s.display_server === initialServer)
+    return group?.realms?.[0] ?? ''
+  })()
+
   // onSelect получает (display_server, realm)
   const onSelectServer = (server, realm) => {
     if (!server) {
@@ -137,7 +154,7 @@ function DashboardRoute({ initialServer, initialRealm }) {
   return (
     <Dashboard
       initialServer={initialServer}
-      initialRealm={initialRealm}
+      initialRealm={resolvedInitialRealm}
       servers={servers}
       onSelectServer={onSelectServer}
     />
@@ -146,7 +163,8 @@ function DashboardRoute({ initialServer, initialRealm }) {
 
 function ServerRoute() {
   const { serverName } = useParams()
-  return <DashboardRoute initialServer={decodeURIComponent(serverName)} initialRealm="" />
+  const initialServer = decodeURIComponent(serverName)
+  return <DashboardRoute initialServer={initialServer} initialRealm="" />
 }
 
 function RealmRoute() {
