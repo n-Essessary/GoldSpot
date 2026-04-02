@@ -40,7 +40,21 @@ function useServers() {
 function RootRedirect() {
   const { servers, loading } = useServers()
 
-  if (loading) return null
+  if (loading) {
+    return (
+      <div style={{ padding: 24, color: '#e5e7eb', fontFamily: 'system-ui, sans-serif' }}>
+        Загрузка серверов…
+      </div>
+    )
+  }
+
+  if (!servers || servers.length === 0) {
+    return (
+      <div style={{ padding: 24, color: '#e5e7eb', fontFamily: 'system-ui, sans-serif' }}>
+        Нет данных о серверах (API /servers пустой).
+      </div>
+    )
+  }
 
   // servers[0] — ServerGroup
   const firstGroup = servers[0]
