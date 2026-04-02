@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import random
 import re
 from datetime import datetime, timezone
 from typing import Optional
@@ -35,12 +36,24 @@ OUTLIER_TRIM_PCT     = 0.05
 MIN_PRICE_PER_1K     = 0.10
 _TRIM_MIN_SAMPLE     = 10
 
+# Канонические имена версий (применять ко всем источникам перед записью в кэш).
+# "Seasonal" (G2G) и "Season of Discovery" (FunPay) — один и тот же контент.
+_VERSION_ALIASES: dict[str, str] = {
+    "seasonal":            "Season of Discovery",
+    "season of discovery": "Season of Discovery",
+    "sod":                 "Season of Discovery",
+    "anniversary":         "Anniversary",
+    "classic era":         "Classic Era",
+    "classic":             "Classic",
+}
+
+# Порядок отображения групп в сайдбаре (меньше = выше).
+# "Seasonal" удалён — после нормализации его не будет.
 _VERSION_ORDER: dict[str, int] = {
     "Anniversary":         0,
-    "Seasonal":            1,
+    "Season of Discovery": 1,
     "Classic Era":         2,
     "Classic":             3,
-    "Season of Discovery": 4,
 }
 
 
@@ -51,14 +64,18 @@ def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).lower()
 
 
+def _canonicalize_version(version: str) -> str:
+    """Приводит любое название версии к каноническому имени."""
+    return _VERSION_ALIASES.get(version.lower().strip(), version)
+
+
 def _detect_version(text: str) -> str:
+    """Определяет версию из произвольного текста и возвращает каноническое имя."""
     t = _clean(text)
-    if "season of discovery" in t or re.search(r"\bsod\b", t):
+    if "season of discovery" in t or re.search(r"\bsod\b|\bseasonal\b", t):
         return "Season of Discovery"
     if "anniversary" in t:
         return "Anniversary"
-    if re.search(r"\bseasonal\b", t):
-        return "Seasonal"
     if "classic era" in t:
         return "Classic Era"
     return "Classic"
@@ -86,6 +103,18 @@ def _normalize_funpay_offer(offer: Offer) -> Offer:
     offer.display_server = f"({region}) {version}"
     if realm:
         offer.server_name = realm
+    return offer
+
+
+def _normalize_g2g_offer(offer: Offer) -> Offer:
+    """Канонизирует display_server G2G-оффера через _VERSION_ALIASES."""
+    ds = offer.display_server or ""
+    m = re.match(r"^\((?P<region>[A-Za-z]{2,})\)\s*(?P<version>.+)$", ds)
+    if m:
+        region  = m.group("region").upper()
+        version = _canonicalize_version(m.group("version").strip())
+        offer.display_server = f"({region}) {version}"
+        offer.server         = offer.display_server
     return offer
 
 
@@ -133,7 +162,10 @@ async def _run_funpay_loop() -> None:
             logger.exception("FunPay parser failed")
         finally:
             _running["funpay"] = False
-        await asyncio.sleep(FUNPAY_INTERVAL)
+
+        delay = random.uniform(50, 70)
+        logger.debug("FunPay next update in %.1fs", delay)
+        await asyncio.sleep(delay)
 
 
 async def _run_g2g_loop() -> None:
@@ -144,6 +176,7 @@ async def _run_g2g_loop() -> None:
         t0 = asyncio.get_event_loop().time()
         try:
             offers = await g2g_fetch()
+            offers = [_normalize_g2g_offer(o) for o in offers]
             _cache["g2g"] = offers
             _last_update["g2g"] = datetime.now(timezone.utc)
             elapsed = asyncio.get_event_loop().time() - t0
