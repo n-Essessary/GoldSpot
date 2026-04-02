@@ -86,6 +86,7 @@ class G2GOffer:
     service_id: str
     offer_url: Optional[str] = None   # правильный URL: группа или одиночный оффер
     is_group: bool = False            # True = is_group_display (групповой листинг)
+    total_sellers: int = 1            # total_offer из группового листинга
     raw: dict = field(default_factory=dict, repr=False)
 
 
@@ -218,6 +219,96 @@ class G2GClient:
         self._region_cache[cache_key] = regions
         return regions
 
+    def _make_offer(self, o: dict, brand_id: str, service_id: str) -> G2GOffer:
+        """Создаёт G2GOffer из сырого dict API-ответа."""
+        offer_id = o.get("offer_id", "")
+        return G2GOffer(
+            offer_id=offer_id,
+            title=o.get("title", ""),
+            server_name=(_parse_title(o.get("title", ""))[0] or o.get("title", "")),
+            region_id=o.get("region_id", ""),
+            relation_id=o.get("relation_id", ""),
+            price_usd=float(o.get("unit_price_in_usd") or 0),
+            min_qty=int(o.get("min_qty") or 1),
+            available_qty=int(o.get("available_qty") or 0),
+            seller=(o.get("username") or "").strip(),
+            brand_id=brand_id,
+            service_id=service_id,
+            offer_url=f"https://www.g2g.com/offer/{offer_id}" if offer_id else None,
+            is_group=bool(o.get("is_group_display", False)),
+            total_sellers=int(o.get("total_offer") or 1),
+            raw=o,
+        )
+
+    async def _expand_group(
+        self,
+        brand_id: str,
+        service_id: str,
+        relation_id: str,
+        offer_id: str,
+        offer_group: str,
+        max_sellers: int = 10,
+    ) -> list[G2GOffer]:
+        """
+        Раскрывает grouped оффер в список индивидуальных продавцов.
+        Использует точный API G2G (group=0 + offer_id + v=v2),
+        затем фильтрует client-side по offer_group.
+        """
+        all_sellers: list[dict] = []
+        page = 1
+
+        while len(all_sellers) < max_sellers:
+            try:
+                resp = await self._client.get(
+                    f"{BASE}/offer/search",
+                    params={
+                        "brand_id":    brand_id,
+                        "service_id":  service_id,
+                        "relation_id": relation_id,
+                        "country":     self.country,
+                        "currency":    self.currency,
+                        "group":       "0",
+                        "offer_id":    offer_id,
+                        "page":        page,
+                        "page_size":   100,
+                        "v":           "v2",
+                        "sort":        "lowest_price",
+                    },
+                )
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                logger.warning("G2G expand group %s page %d: %s", offer_group, page, e)
+                break
+
+            results = resp.json().get("payload", {}).get("results", [])
+            if not results:
+                break
+
+            # Фильтрация client-side по offer_group
+            matching = [
+                o for o in results
+                if o.get("offer_group") == offer_group
+                and not o.get("is_group_display", True)
+            ]
+            all_sellers.extend(matching)
+
+            # Если страница неполная — больше нет смысла идти дальше
+            if len(results) < 100:
+                break
+
+            # Если продавцов нужной группы на этой странице нет — они закончились
+            if not matching and page > 1:
+                break
+
+            page += 1
+            await asyncio.sleep(0.15)
+
+        # Уже отсортированы по lowest_price, берём cap
+        return [
+            self._make_offer(o, brand_id, service_id)
+            for o in all_sellers[:max_sellers]
+        ]
+
     async def fetch_offers(
         self,
         brand_id: str,
@@ -253,42 +344,25 @@ class G2GClient:
                 break
 
             for o in results:
-                try:
-                    # ── Построение правильного offer_url ─────────────────────
-                    is_group  = bool(o.get("is_group_display", False))
-                    region_id = o.get("region_id", "")
-                    offer_id  = o.get("offer_id", "")
+                is_group = o.get("is_group_display", False)
+                total    = int(o.get("total_offer") or 1)
 
-                    if is_group and category_slug:
-                        attrs  = o.get("offer_attributes", [])
-                        col_id = attrs[0].get("collection_id", "") if attrs else ""
-                        dat_id = attrs[0].get("dataset_id", "")    if attrs else ""
-                        fa     = f"{col_id}:{dat_id}"
-                        offer_url: Optional[str] = (
-                            f"https://www.g2g.com/categories/{category_slug}/offer/group"
-                            f"?fa={fa}&region_id={region_id}"
-                        )
-                    else:
-                        offer_url = f"https://www.g2g.com/offer/{offer_id}" if offer_id else None
-
-                    all_offers.append(
-                        G2GOffer(
-                            offer_id=offer_id,
-                            title=o.get("title", ""),
-                            server_name=(_parse_title(o.get("title", ""))[0] or o.get("title", "")),
-                            region_id=region_id,
-                            relation_id=o.get("relation_id", ""),
-                            price_usd=float(o.get("unit_price_in_usd") or 0),
-                            min_qty=int(o.get("min_qty") or 1),
-                            available_qty=int(o.get("available_qty") or 0),
-                            seller=(o.get("username") or "").strip(),
-                            brand_id=o.get("brand_id", ""),
-                            service_id=o.get("service_id", ""),
-                            offer_url=offer_url,
-                            is_group=is_group,
-                            raw=o,
-                        )
+                if is_group and total > 1:
+                    sellers = await self._expand_group(
+                        brand_id=brand_id,
+                        service_id=service_id,
+                        relation_id=relation_id,
+                        offer_id=o.get("offer_id", ""),
+                        offer_group=o.get("offer_group", ""),
+                        max_sellers=min(total, 10),
                     )
+                    all_offers.extend(sellers)
+                    await asyncio.sleep(0.2)
+                    continue
+
+                # одиночный оффер (или группа с 1 продавцом)
+                try:
+                    all_offers.append(self._make_offer(o, brand_id, service_id))
                 except (ValueError, TypeError):
                     continue
 
