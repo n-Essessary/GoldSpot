@@ -268,58 +268,54 @@ class G2GClient:
             raw=o,
         )
 
-    async def _expand_group(
+    async def _fetch_server_sellers(
         self,
         brand_id: str,
         service_id: str,
         relation_id: str,
-        offer_id: str,
-        offer_group: str,
+        collection_id: str,
+        dataset_id: str,
         max_sellers: int = 10,
     ) -> list[G2GOffer]:
         """
-        Получает до max_sellers продавцов группы.
-        Один запрос page_size=100, фильтрация client-side по offer_group.
-        Никаких циклов — один запрос, детерминированный результат.
+        Возвращает до max_sellers продавцов для конкретного сервера+фракции.
+
+        Использует fa={collection_id}:{dataset_id} — точный фильтр по серверу
+        и фракции, установленный из offer_attributes[0] группового оффера.
+        Заменяет старый _expand_group(), который фильтровал client-side по
+        offer_group и давал нестабильные результаты.
         """
+        fa = f"{collection_id}:{dataset_id}"
         try:
             resp = await self._client.get(
                 f"{BASE}/offer/search",
                 params={
-                    "brand_id":    brand_id,
-                    "service_id":  service_id,
-                    "relation_id": relation_id,
-                    "country":     self.country,
-                    "currency":    self.currency,
-                    "group":       "0",
-                    "offer_id":    offer_id,
-                    "page":        1,
-                    "page_size":   100,
-                    "v":           "v2",
-                    "sort":        "lowest_price",
+                    "brand_id":       brand_id,
+                    "service_id":     service_id,
+                    "relation_id":    relation_id,
+                    "country":        self.country,
+                    "currency":       self.currency,
+                    "fa":             fa,
+                    "sort":           "lowest_price",
+                    "include_offline": "0",
+                    "page":           1,
+                    "page_size":      max_sellers,
                 },
             )
             resp.raise_for_status()
         except Exception as e:
-            logger.warning("G2G _expand_group failed offer_id=%s: %s", offer_id, e)
+            logger.warning("G2G _fetch_server_sellers failed fa=%s: %s", fa, e)
             return []
 
         results = resp.json().get("payload", {}).get("results", [])
-
-        # Фильтруем client-side по offer_group
-        matching = [
-            o for o in results
-            if o.get("offer_group") == offer_group
-            and not o.get("is_group_display", True)
-        ]
-
-        # Уже отсортированы по lowest_price, берём топ max_sellers
         out: list[G2GOffer] = []
-        for o in matching[:max_sellers]:
+        for o in results:
+            if o.get("is_group_display"):
+                continue  # пропускаем агрегированные строки
             try:
                 out.append(self._make_offer(o, brand_id, service_id))
             except (ValueError, TypeError) as e:
-                logger.debug("G2G _expand_group skip offer: %s", e)
+                logger.debug("G2G _fetch_server_sellers skip: %s", e)
         return out
 
     async def fetch_offers(
@@ -328,11 +324,14 @@ class G2GClient:
         service_id: str,
         relation_id: str,
         sort: str = "lowest_price",
-        page_size: int = 48,
+        page_size: int = 100,
     ) -> list[G2GOffer]:
         all_offers: list[G2GOffer] = []
         page = 1
         max_pages = 10
+        # Семафор живёт на уровне метода — ограничивает общее число
+        # одновременных fa= запросов независимо от числа страниц.
+        _sem = asyncio.Semaphore(15)
 
         while page <= max_pages:
             try:
@@ -376,24 +375,28 @@ class G2GClient:
                         }, ensure_ascii=False, indent=None),
                     )
 
-            singles: list[dict] = []
             group_tasks: list = []
+            singles: list[dict] = []
 
             for o in results:
+                attrs    = o.get("offer_attributes") or []
                 is_group = o.get("is_group_display", False)
                 total    = int(o.get("total_offer") or 1)
-                og       = o.get("offer_group", "")
-                oid      = o.get("offer_id", "")
 
-                if is_group and total > 1 and og and oid:
-                    group_tasks.append(
-                        self._expand_group(
-                            brand_id, service_id, relation_id,
-                            oid, og, min(total, 10),
+                if is_group and attrs:
+                    col = attrs[0].get("collection_id", "")
+                    dat = attrs[0].get("dataset_id", "")
+                    if col and dat:
+                        # fa= запрос возвращает реальных продавцов; берём топ-10
+                        group_tasks.append(
+                            self._fetch_server_sellers(
+                                brand_id, service_id, relation_id,
+                                col, dat, min(total, 10),
+                            )
                         )
-                    )
-                else:
-                    singles.append(o)
+                        continue
+                # Одиночный оффер или группа без атрибутов — берём как есть
+                singles.append(o)
 
             for o in singles:
                 try:
@@ -402,12 +405,19 @@ class G2GClient:
                     continue
 
             if group_tasks:
-                expanded_lists = await asyncio.gather(*group_tasks, return_exceptions=True)
+                async def _guarded(task):
+                    async with _sem:
+                        return await task
+
+                expanded_lists = await asyncio.gather(
+                    *[_guarded(t) for t in group_tasks],
+                    return_exceptions=True,
+                )
                 for result in expanded_lists:
                     if isinstance(result, list):
                         all_offers.extend(result)
                     elif isinstance(result, Exception):
-                        logger.warning("G2G expand group error: %s", result)
+                        logger.warning("G2G fetch_server_sellers error: %s", result)
 
             logger.debug(
                 "G2G: relation_id=%s page=%d → %d raw, итого %d офферов",
@@ -451,39 +461,40 @@ async def fetch_g2g_game(
             country,
         )
 
-        # Все relation_id возвращают одинаковый набор офферов (подтверждено логами:
-        # одни и те же offer_id появляются для каждого из 3 relation_id).
-        # Используем только первый relation_id — дублирование бессмысленно и
-        # утраивает время парсинга (~23 сек → ~8 сек).
         if not regions:
             logger.warning("G2G game=%s: no regions found, skipping", game_key)
             return []
 
-        region = regions[0]
-        try:
-            logger.info(
-                "G2G game=%s fetching: relation_id=%s region_id=%s (using first of %d)",
-                game_key,
-                region.relation_id,
-                region.region_id,
-                len(regions),
-            )
-            all_offers = await client.fetch_offers(
-                brand_id=brand_id,
-                service_id=service_id,
-                relation_id=region.relation_id,
-                sort=sort,
-            )
-        except httpx.HTTPStatusError as e:
-            logger.warning("G2G HTTP error for region %s: %s", region.region_id, e)
+        # Запускаем все relation_id параллельно — каждый может покрывать
+        # отдельную игровую версию (Classic Era / SoD / Anniversary).
+        # asyncio.gather даёт скорость одного запроса при полном покрытии.
+        async def _fetch_one(region: G2GRegion) -> list[G2GOffer]:
+            try:
+                logger.info(
+                    "G2G game=%s fetching relation_id=%s region_id=%s",
+                    game_key, region.relation_id, region.region_id,
+                )
+                return await client.fetch_offers(
+                    brand_id=brand_id,
+                    service_id=service_id,
+                    relation_id=region.relation_id,
+                    sort=sort,
+                )
+            except httpx.HTTPStatusError as e:
+                logger.warning("G2G HTTP error region=%s: %s", region.region_id, e)
+                return []
+
+        results_per_region = await asyncio.gather(
+            *[_fetch_one(r) for r in regions],
+            return_exceptions=False,
+        )
+        for region_offers in results_per_region:
+            all_offers.extend(region_offers)
 
         unique_sellers = {o.seller for o in all_offers if o.seller}
         logger.info(
-            "G2G game=%s done: regions_found=%d offers=%d unique_sellers=%d",
-            game_key,
-            len(regions),
-            len(all_offers),
-            len(unique_sellers),
+            "G2G game=%s done: regions=%d raw_offers=%d unique_sellers=%d",
+            game_key, len(regions), len(all_offers), len(unique_sellers),
         )
 
     return all_offers
