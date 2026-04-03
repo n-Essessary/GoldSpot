@@ -7,6 +7,7 @@ Verified pipeline:
 """
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -355,19 +356,24 @@ class G2GClient:
             if not results:
                 break
 
-            # Диагностика: структура raw payload (первые 3 оффера первой страницы)
+            # Диагностика: структура raw payload (первые 3 оффера первой страницы).
+            # Уровень INFO чтобы видеть в продакшн-логах без изменения log level.
+            # После получения реальной структуры offer_attributes — понизить до DEBUG.
             if page == 1:
                 for _dbg_o in results[:3]:
-                    logger.debug(
-                        "G2G raw offer sample: offer_id=%s available_qty=%s "
-                        "min_qty=%s price=%s is_group=%s offer_group=%r title=%r",
-                        _dbg_o.get("offer_id"),
-                        _dbg_o.get("available_qty"),
-                        _dbg_o.get("min_qty"),
-                        _dbg_o.get("unit_price_in_usd"),
-                        _dbg_o.get("is_group_display"),
-                        _dbg_o.get("offer_group"),
-                        _dbg_o.get("title"),
+                    logger.info(
+                        "G2G RAW OFFER: %s",
+                        json.dumps({
+                            "title":             _dbg_o.get("title"),
+                            "offer_id":          _dbg_o.get("offer_id"),
+                            "is_group_display":  _dbg_o.get("is_group_display"),
+                            "total_offer":       _dbg_o.get("total_offer"),
+                            "offer_attributes":  _dbg_o.get("offer_attributes"),
+                            "region_id":         _dbg_o.get("region_id"),
+                            "available_qty":     _dbg_o.get("available_qty"),
+                            "unit_price_in_usd": _dbg_o.get("unit_price_in_usd"),
+                            "offer_group":       _dbg_o.get("offer_group"),
+                        }, ensure_ascii=False, indent=None),
                     )
 
             singles: list[dict] = []
