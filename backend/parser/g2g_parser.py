@@ -268,56 +268,6 @@ class G2GClient:
             raw=o,
         )
 
-    async def _fetch_server_sellers(
-        self,
-        brand_id: str,
-        service_id: str,
-        relation_id: str,
-        collection_id: str,
-        dataset_id: str,
-        max_sellers: int = 10,
-    ) -> list[G2GOffer]:
-        """
-        Возвращает до max_sellers продавцов для конкретного сервера+фракции.
-
-        Использует fa={collection_id}:{dataset_id} — точный фильтр по серверу
-        и фракции, установленный из offer_attributes[0] группового оффера.
-        Заменяет старый _expand_group(), который фильтровал client-side по
-        offer_group и давал нестабильные результаты.
-        """
-        fa = f"{collection_id}:{dataset_id}"
-        try:
-            resp = await self._client.get(
-                f"{BASE}/offer/search",
-                params={
-                    "brand_id":       brand_id,
-                    "service_id":     service_id,
-                    "relation_id":    relation_id,
-                    "country":        self.country,
-                    "currency":       self.currency,
-                    "fa":             fa,
-                    "sort":           "lowest_price",
-                    "include_offline": "0",
-                    "page":           1,
-                    "page_size":      max_sellers,
-                },
-            )
-            resp.raise_for_status()
-        except Exception as e:
-            logger.warning("G2G _fetch_server_sellers failed fa=%s: %s", fa, e)
-            return []
-
-        results = resp.json().get("payload", {}).get("results", [])
-        out: list[G2GOffer] = []
-        for o in results:
-            if o.get("is_group_display"):
-                continue  # пропускаем агрегированные строки
-            try:
-                out.append(self._make_offer(o, brand_id, service_id))
-            except (ValueError, TypeError) as e:
-                logger.debug("G2G _fetch_server_sellers skip: %s", e)
-        return out
-
     async def fetch_offers(
         self,
         brand_id: str,
@@ -326,12 +276,18 @@ class G2GClient:
         sort: str = "lowest_price",
         page_size: int = 100,
     ) -> list[G2GOffer]:
+        """
+        Возвращает group-display офферы: 1 cheapest per server+faction.
+
+        G2G API не поддерживает фильтрацию по fa= в /offer/search —
+        параметр игнорируется, ответ всегда is_group_display=true.
+        Поэтому берём group entries напрямую: каждый уже содержит cheapest
+        price и qty для конкретного сервера+фракции. URL строится правильно
+        через fa= в _make_offer() → _build_g2g_offer_url().
+        """
         all_offers: list[G2GOffer] = []
         page = 1
         max_pages = 10
-        # Семафор живёт на уровне метода — ограничивает общее число
-        # одновременных fa= запросов независимо от числа страниц.
-        _sem = asyncio.Semaphore(15)
 
         while page <= max_pages:
             try:
@@ -357,70 +313,14 @@ class G2GClient:
             if not results:
                 break
 
-            # Диагностика структуры raw payload (первые 3 оффера первой страницы).
-            if page == 1:
-                for _dbg_o in results[:3]:
-                    logger.debug(
-                        "G2G raw offer sample: %s",
-                        json.dumps({
-                            "title":             _dbg_o.get("title"),
-                            "offer_id":          _dbg_o.get("offer_id"),
-                            "is_group_display":  _dbg_o.get("is_group_display"),
-                            "total_offer":       _dbg_o.get("total_offer"),
-                            "offer_attributes":  _dbg_o.get("offer_attributes"),
-                            "region_id":         _dbg_o.get("region_id"),
-                            "available_qty":     _dbg_o.get("available_qty"),
-                            "unit_price_in_usd": _dbg_o.get("unit_price_in_usd"),
-                            "offer_group":       _dbg_o.get("offer_group"),
-                        }, ensure_ascii=False, indent=None),
-                    )
-
-            group_tasks: list = []
-            singles: list[dict] = []
-
             for o in results:
-                attrs    = o.get("offer_attributes") or []
-                is_group = o.get("is_group_display", False)
-                total    = int(o.get("total_offer") or 1)
-
-                if is_group and attrs:
-                    col = attrs[0].get("collection_id", "")
-                    dat = attrs[0].get("dataset_id", "")
-                    if col and dat:
-                        # fa= запрос возвращает реальных продавцов; берём топ-10
-                        group_tasks.append(
-                            self._fetch_server_sellers(
-                                brand_id, service_id, relation_id,
-                                col, dat, min(total, 10),
-                            )
-                        )
-                        continue
-                # Одиночный оффер или группа без атрибутов — берём как есть
-                singles.append(o)
-
-            for o in singles:
                 try:
                     all_offers.append(self._make_offer(o, brand_id, service_id))
-                except (ValueError, TypeError):
-                    continue
-
-            if group_tasks:
-                async def _guarded(task):
-                    async with _sem:
-                        return await task
-
-                expanded_lists = await asyncio.gather(
-                    *[_guarded(t) for t in group_tasks],
-                    return_exceptions=True,
-                )
-                for result in expanded_lists:
-                    if isinstance(result, list):
-                        all_offers.extend(result)
-                    elif isinstance(result, Exception):
-                        logger.warning("G2G fetch_server_sellers error: %s", result)
+                except (ValueError, TypeError) as e:
+                    logger.debug("G2G _make_offer skip: %s", e)
 
             logger.debug(
-                "G2G: relation_id=%s page=%d → %d raw, итого %d офферов",
+                "G2G: relation_id=%s page=%d → %d results, total so far %d",
                 relation_id, page, len(results), len(all_offers),
             )
 
