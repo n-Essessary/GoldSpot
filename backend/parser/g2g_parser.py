@@ -116,9 +116,8 @@ class G2GOffer:
     seller: str
     brand_id: str
     service_id: str
-    offer_url: Optional[str] = None   # правильный URL: группа или одиночный оффер
-    is_group: bool = False            # True = is_group_display (групповой листинг)
-    total_sellers: int = 1            # total_offer из группового листинга
+    offer_url: str = ""          # прямая ссылка /offer/{offer_id} для индивидуальных офферов
+    offer_group: str = ""        # "/{dataset_id}" — идентификатор группы сервер+фракция
     raw: dict = field(default_factory=dict, repr=False)
 
 
@@ -258,54 +257,22 @@ class G2GClient:
         )
         return regions
 
-    def _make_offer(self, o: dict, brand_id: str, service_id: str) -> G2GOffer:
-        """Создаёт G2GOffer из сырого dict API-ответа."""
-        offer_id = o.get("offer_id", "")
-        return G2GOffer(
-            offer_id=offer_id,
-            title=o.get("title", ""),
-            server_name=(_parse_title(o.get("title", ""))[0] or o.get("title", "")),
-            region_id=o.get("region_id", ""),
-            relation_id=o.get("relation_id", ""),
-            price_usd=float(o.get("unit_price_in_usd") or 0),
-            min_qty=int(o.get("min_qty") or 1),
-            available_qty=max(
-                int(o.get("available_qty") or 0),
-                int(o.get("min_qty") or 1),
-            ),
-            seller=(o.get("username") or "").strip(),
-            brand_id=brand_id,
-            service_id=service_id,
-            offer_url=_build_offer_url(
-                offer_id,
-                o.get("offer_attributes") or [],
-                o.get("region_id", ""),
-            ),
-            is_group=bool(o.get("is_group_display", False)),
-            total_sellers=int(o.get("total_offer") or 1),
-            raw=o,
-        )
-
-    async def fetch_offers(
+    async def fetch_seller_offers(
         self,
         brand_id: str,
         service_id: str,
-        relation_id: str,
-        sort: str = "lowest_price",
-        page_size: int = 100,
+        seller: str,
+        page_size: int = 48,
     ) -> list[G2GOffer]:
         """
-        Возвращает group-display офферы: 1 cheapest per server+faction.
+        Возвращает все индивидуальные офферы конкретного продавца.
 
-        G2G API не поддерживает фильтрацию по fa= в /offer/search —
-        параметр игнорируется, ответ всегда is_group_display=true.
-        Поэтому берём group entries напрямую: каждый уже содержит cheapest
-        price и qty для конкретного сервера+фракции. URL строится правильно
-        через fa= в _make_offer() → _build_offer_url().
+        ?seller={username} → is_group_display=false, stable offer_id,
+        реальный available_qty > 0, URL = /offer/{offer_id}.
         """
         all_offers: list[G2GOffer] = []
         page = 1
-        max_pages = 10
+        max_pages = 5
 
         while page <= max_pages:
             try:
@@ -314,34 +281,48 @@ class G2GClient:
                     params={
                         "brand_id":        brand_id,
                         "service_id":      service_id,
-                        "relation_id":     relation_id,
                         "country":         self.country,
                         "currency":        self.currency,
-                        "sort":            sort,
+                        "sort":            "lowest_price",
                         "include_offline": "0",
+                        "seller":          seller,
                         "page":            page,
                         "page_size":       page_size,
                     },
                 )
                 resp.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                logger.warning("G2G fetch_offers page=%d failed: %s", page, e)
+                results = resp.json().get("payload", {}).get("results", [])
+            except Exception as e:
+                logger.warning("G2G seller=%s page=%d error: %s", seller, page, e)
                 break
 
-            results = resp.json().get("payload", {}).get("results", [])
             if not results:
                 break
 
             for o in results:
                 try:
-                    all_offers.append(self._make_offer(o, brand_id, service_id))
-                except (ValueError, TypeError) as e:
-                    logger.debug("G2G _make_offer skip: %s", e)
-
-            logger.debug(
-                "G2G: relation_id=%s page=%d → %d results, total so far %d",
-                relation_id, page, len(results), len(all_offers),
-            )
+                    offer_id = o.get("offer_id", "")
+                    qty = int(o.get("available_qty") or 0)
+                    if qty <= 0:
+                        qty = int(o.get("min_qty") or 1)
+                    all_offers.append(G2GOffer(
+                        offer_id=offer_id,
+                        title=o.get("title", ""),
+                        server_name=(_parse_title(o.get("title", ""))[0] or o.get("title", "")),
+                        region_id=o.get("region_id", ""),
+                        relation_id=o.get("relation_id", ""),
+                        price_usd=float(o.get("unit_price_in_usd") or 0),
+                        min_qty=int(o.get("min_qty") or 1),
+                        available_qty=qty,
+                        seller=(o.get("username") or "").strip(),
+                        brand_id=o.get("brand_id", brand_id),
+                        service_id=o.get("service_id", service_id),
+                        offer_url=(f"https://www.g2g.com/offer/{offer_id}" if offer_id else ""),
+                        offer_group=o.get("offer_group", ""),
+                        raw=o,
+                    ))
+                except (ValueError, TypeError):
+                    continue
 
             if len(results) < page_size:
                 break
@@ -352,6 +333,51 @@ class G2GClient:
         return all_offers
 
 
+async def _discover_sellers(
+    client: "G2GClient",
+    brand_id: str,
+    service_id: str,
+    regions: list[G2GRegion],
+    delay: float = 0.3,
+) -> list[str]:
+    """
+    Собирает уникальные имена продавцов из group-display офферов по всем регионам.
+
+    По каждому region.relation_id делает один запрос page_size=48 (group entries).
+    Каждый group entry содержит поле username продавца с cheapest ценой.
+    Полученный список используется для последующего fetch_seller_offers().
+    """
+    sellers: set[str] = set()
+    for region in regions:
+        try:
+            resp = await client._client.get(
+                f"{BASE}/offer/search",
+                params={
+                    "brand_id":        brand_id,
+                    "service_id":      service_id,
+                    "relation_id":     region.relation_id,
+                    "country":         client.country,
+                    "currency":        client.currency,
+                    "sort":            "lowest_price",
+                    "include_offline": "0",
+                    "page":            1,
+                    "page_size":       48,
+                },
+            )
+            resp.raise_for_status()
+            results = resp.json().get("payload", {}).get("results", [])
+            for o in results:
+                u = (o.get("username") or "").strip()
+                if u:
+                    sellers.add(u)
+        except Exception as e:
+            logger.warning("G2G discover sellers region=%s: %s", region.region_id, e)
+        await asyncio.sleep(delay)
+
+    logger.info("G2G discovered %d unique sellers", len(sellers))
+    return sorted(sellers)
+
+
 async def fetch_g2g_game(
     game_key: str,
     sort: str = "lowest_price",
@@ -359,64 +385,61 @@ async def fetch_g2g_game(
     max_regions: Optional[int] = None,
     delay: float = 0.35,
 ) -> list[G2GOffer]:
+    """
+    3-шаговый pipeline:
+      1) fetch_regions   — получить все region_id / relation_id
+      2) _discover_sellers — собрать уникальных продавцов из group entries
+      3) fetch_seller_offers (параллельно, батчами по 5) — индивидуальные офферы
+         is_group_display=false, stable offer_id, реальный available_qty
+    """
     if game_key not in GAME_CONFIG:
         raise ValueError(f"Unknown game: {game_key}. Available: {list(GAME_CONFIG)}")
 
-    cfg = GAME_CONFIG[game_key]
+    cfg        = GAME_CONFIG[game_key]
     brand_id   = cfg["brand_id"]
     service_id = cfg["service_id"]
-    all_offers: list[G2GOffer] = []
 
     async with G2GClient(country=country) as client:
         regions = await client.fetch_regions(brand_id, service_id)
         if max_regions:
             regions = regions[:max_regions]
-        logger.info(
-            "G2G game=%s: servers(regions)=%d (brand_id=%s service_id=%s country=%s)",
-            game_key,
-            len(regions),
-            brand_id,
-            service_id,
-            country,
-        )
 
         if not regions:
             logger.warning("G2G game=%s: no regions found, skipping", game_key)
             return []
 
-        # Запускаем все relation_id параллельно — каждый может покрывать
-        # отдельную игровую версию (Classic Era / SoD / Anniversary).
-        # asyncio.gather даёт скорость одного запроса при полном покрытии.
-        async def _fetch_one(region: G2GRegion) -> list[G2GOffer]:
-            try:
-                logger.info(
-                    "G2G game=%s fetching relation_id=%s region_id=%s",
-                    game_key, region.relation_id, region.region_id,
-                )
-                return await client.fetch_offers(
-                    brand_id=brand_id,
-                    service_id=service_id,
-                    relation_id=region.relation_id,
-                    sort=sort,
-                )
-            except httpx.HTTPStatusError as e:
-                logger.warning("G2G HTTP error region=%s: %s", region.region_id, e)
-                return []
-
-        results_per_region = await asyncio.gather(
-            *[_fetch_one(r) for r in regions],
-            return_exceptions=False,
-        )
-        for region_offers in results_per_region:
-            all_offers.extend(region_offers)
-
-        unique_sellers = {o.seller for o in all_offers if o.seller}
         logger.info(
-            "G2G game=%s done: regions=%d raw_offers=%d unique_sellers=%d",
-            game_key, len(regions), len(all_offers), len(unique_sellers),
+            "G2G game=%s: regions=%d (brand_id=%s service_id=%s country=%s)",
+            game_key, len(regions), brand_id, service_id, country,
         )
 
-    return all_offers
+        sellers = await _discover_sellers(client, brand_id, service_id, regions, delay=delay)
+        if not sellers:
+            logger.warning("G2G: no sellers discovered for %s", game_key)
+            return []
+
+        logger.info("G2G: fetching offers for %d sellers", len(sellers))
+
+        all_offers: list[G2GOffer] = []
+        batch_size = 5
+
+        for i in range(0, len(sellers), batch_size):
+            batch = sellers[i : i + batch_size]
+            tasks = [client.fetch_seller_offers(brand_id, service_id, s) for s in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for seller, result in zip(batch, results):
+                if isinstance(result, Exception):
+                    logger.warning("G2G seller=%s failed: %s", seller, result)
+                else:
+                    all_offers.extend(result)
+            if i + batch_size < len(sellers):
+                await asyncio.sleep(delay)
+
+        logger.info(
+            "G2G game=%s done: sellers=%d raw_offers=%d",
+            game_key, len(sellers), len(all_offers),
+        )
+        return all_offers
 
 
 async def discover_brand_ids(
@@ -438,10 +461,6 @@ def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
     if raw.price_usd <= 0:
         return None
 
-    # available_qty гарантированно > 0 после _make_offer (max с min_qty),
-    # поэтому guard на qty <= 0 здесь не нужен.
-    amount_gold = raw.available_qty
-
     price_per_1k = round(raw.price_usd * 1000.0, 4)
     if price_per_1k > _MAX_PRICE_PER_1K:
         return None
@@ -457,23 +476,24 @@ def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
         logger.debug("G2G: пропуск нераспознанного оффера title=%r", raw.title)
         return None
 
-    # URL уже собран правильно в _make_offer() через _build_offer_url()
-    offer_url = raw.offer_url or None
-
-    seller = raw.seller or "unknown"
+    # Уникальный ID: offer_group (без ведущего "/") + seller гарантирует
+    # что два продавца на одном сервере не дедуплицируются.
+    # Если offer_group пустой — fallback на offer_id.
+    raw_id = raw.offer_group.lstrip("/") if raw.offer_group else raw.offer_id
+    offer_id_key = f"g2g_{raw_id}_{raw.seller}" if raw_id else f"g2g_{raw.offer_id}"
 
     try:
         return Offer(
-            id=f"g2g_{raw.offer_id}" if raw.offer_id else f"g2g_{raw.relation_id}",
+            id=offer_id_key,
             source=SOURCE,
             server=display_server,
             display_server=display_server,
             server_name=server_name,
             faction=faction,
             price_per_1k=price_per_1k,
-            amount_gold=amount_gold,
-            seller=seller,
-            offer_url=offer_url,
+            amount_gold=raw.available_qty,
+            seller=raw.seller or "unknown",
+            offer_url=raw.offer_url or None,
             updated_at=fetched_at,
             fetched_at=fetched_at,
         )
