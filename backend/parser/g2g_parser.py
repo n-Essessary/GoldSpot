@@ -53,20 +53,31 @@ GAME_CONFIG: dict[str, dict[str, str]] = {
 _CATEGORY_SLUG = "wow-classic-era-vanilla-gold"
 
 
-def _build_g2g_offer_url(region_id: str, collection_id: str = "", dataset_id: str = "") -> str:
+def _build_offer_url(
+    offer_id: str,
+    offer_attributes: list[dict],
+    region_id: str,
+    game_slug: str = _CATEGORY_SLUG,
+) -> str:
     """
-    Строит ссылку на страницу группы офферов G2G для конкретного сервера+фракции.
+    Строит рабочую ссылку на страницу группы офферов G2G для конкретного сервера+фракции.
 
-    Если переданы collection_id + dataset_id (из offer_attributes[0]), добавляет
-    fa={collection_id}:{dataset_id} — фильтр по конкретному серверу/фракции.
-    Без fa= ссылка ведёт на страницу всего региона (fallback).
+    Приоритет: fa={col_id}:{dat_id} из offer_attributes[0] → прямая ссылка на
+    конкретный сервер с sort=lowest_price. Fallback на /offer/{offer_id} только
+    если offer_attributes пустой.
     """
-    from urllib.parse import urlencode
-    base = f"https://www.g2g.com/categories/{_CATEGORY_SLUG}/offer/group"
-    params: dict = {"region_id": region_id, "sort": "lowest_price"}
-    if collection_id and dataset_id:
-        params = {"fa": f"{collection_id}:{dataset_id}", **params}
-    return f"{base}?{urlencode(params)}"
+    if offer_attributes:
+        col_id = offer_attributes[0].get("collection_id", "")
+        dat_id = offer_attributes[0].get("dataset_id", "")
+        if col_id and dat_id:
+            fa = f"{col_id}:{dat_id}"
+            return (
+                f"https://www.g2g.com/categories/{game_slug}/offer/group"
+                f"?fa={fa}&region_id={region_id}&sort=lowest_price"
+            )
+    if offer_id:
+        return f"https://www.g2g.com/offer/{offer_id}"
+    return ""
 
 
 # Строгий regex: "Server [Region - Version] - Faction"
@@ -258,11 +269,18 @@ class G2GClient:
             relation_id=o.get("relation_id", ""),
             price_usd=float(o.get("unit_price_in_usd") or 0),
             min_qty=int(o.get("min_qty") or 1),
-            available_qty=int(o.get("available_qty") or 0),
+            available_qty=max(
+                int(o.get("available_qty") or 0),
+                int(o.get("min_qty") or 1),
+            ),
             seller=(o.get("username") or "").strip(),
             brand_id=brand_id,
             service_id=service_id,
-            offer_url=f"https://www.g2g.com/offer/{offer_id}" if offer_id else None,
+            offer_url=_build_offer_url(
+                offer_id,
+                o.get("offer_attributes") or [],
+                o.get("region_id", ""),
+            ),
             is_group=bool(o.get("is_group_display", False)),
             total_sellers=int(o.get("total_offer") or 1),
             raw=o,
@@ -283,7 +301,7 @@ class G2GClient:
         параметр игнорируется, ответ всегда is_group_display=true.
         Поэтому берём group entries напрямую: каждый уже содержит cheapest
         price и qty для конкретного сервера+фракции. URL строится правильно
-        через fa= в _make_offer() → _build_g2g_offer_url().
+        через fa= в _make_offer() → _build_offer_url().
         """
         all_offers: list[G2GOffer] = []
         page = 1
@@ -294,14 +312,15 @@ class G2GClient:
                 resp = await self._client.get(
                     f"{BASE}/offer/search",
                     params={
-                        "brand_id":    brand_id,
-                        "service_id":  service_id,
-                        "relation_id": relation_id,
-                        "country":     self.country,
-                        "currency":    self.currency,
-                        "sort":        sort,
-                        "page":        page,
-                        "page_size":   page_size,
+                        "brand_id":        brand_id,
+                        "service_id":      service_id,
+                        "relation_id":     relation_id,
+                        "country":         self.country,
+                        "currency":        self.currency,
+                        "sort":            sort,
+                        "include_offline": "0",
+                        "page":            page,
+                        "page_size":       page_size,
                     },
                 )
                 resp.raise_for_status()
@@ -419,12 +438,9 @@ def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
     if raw.price_usd <= 0:
         return None
 
-    # available_qty в G2G API может приходить как null/0 даже для живых офферов.
-    # Используем min_qty как fallback — лучше показать оффер с неточным кол-вом,
-    # чем потерять его совсем.
-    amount_gold = raw.available_qty if raw.available_qty > 0 else raw.min_qty
-    if amount_gold <= 0:
-        return None
+    # available_qty гарантированно > 0 после _make_offer (max с min_qty),
+    # поэтому guard на qty <= 0 здесь не нужен.
+    amount_gold = raw.available_qty
 
     price_per_1k = round(raw.price_usd * 1000.0, 4)
     if price_per_1k > _MAX_PRICE_PER_1K:
@@ -441,18 +457,8 @@ def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
         logger.debug("G2G: пропуск нераспознанного оффера title=%r", raw.title)
         return None
 
-    # Правильная ссылка: страница конкретного сервера+фракции (fa= фильтр).
-    # offer_attributes[0] содержит {collection_id, dataset_id} — уникальный
-    # идентификатор сервер+фракция. Без него — fallback на страницу региона.
-    attrs = raw.raw.get("offer_attributes") or []
-    if attrs and raw.region_id:
-        col = attrs[0].get("collection_id", "")
-        dat = attrs[0].get("dataset_id", "")
-        offer_url = _build_g2g_offer_url(raw.region_id, col, dat)
-    elif raw.region_id:
-        offer_url = _build_g2g_offer_url(raw.region_id)
-    else:
-        offer_url = raw.offer_url  # последний fallback
+    # URL уже собран правильно в _make_offer() через _build_offer_url()
+    offer_url = raw.offer_url or None
 
     seller = raw.seller or "unknown"
 
