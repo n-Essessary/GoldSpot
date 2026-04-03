@@ -257,6 +257,59 @@ class G2GClient:
         )
         return regions
 
+    async def fetch_all_sellers(
+        self,
+        brand_id: str,
+        service_id: str,
+        regions: list[G2GRegion],
+    ) -> list[str]:
+        """
+        Собирает ВСЕХ продавцов — с пагинацией по всем страницам каждого региона.
+        Без include_offline=0 — офлайн-продавцы тоже нужны для полного списка.
+        """
+        sellers: set[str] = set()
+
+        for region in regions:
+            page = 1
+            while True:
+                try:
+                    resp = await self._client.get(
+                        f"{BASE}/offer/search",
+                        params={
+                            "brand_id":   brand_id,
+                            "service_id": service_id,
+                            "relation_id": region.relation_id,
+                            "country":    self.country,
+                            "currency":   self.currency,
+                            "sort":       "lowest_price",
+                            "page":       page,
+                            "page_size":  48,
+                        },
+                    )
+                    resp.raise_for_status()
+                    results = resp.json().get("payload", {}).get("results", [])
+                except Exception as e:
+                    logger.warning(
+                        "G2G discovery region=%s page=%d: %s",
+                        region.region_id,
+                        page,
+                        e,
+                    )
+                    break
+
+                for o in results:
+                    u = (o.get("username") or "").strip()
+                    if u:
+                        sellers.add(u)
+
+                if len(results) < 48:
+                    break
+                page += 1
+                await asyncio.sleep(0.15)
+
+        logger.info("G2G discovered %d unique sellers", len(sellers))
+        return sorted(sellers)
+
     async def fetch_seller_offers(
         self,
         brand_id: str,
