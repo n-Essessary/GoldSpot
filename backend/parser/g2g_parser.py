@@ -53,17 +53,19 @@ GAME_CONFIG: dict[str, dict[str, str]] = {
 _CATEGORY_SLUG = "wow-classic-era-vanilla-gold"
 
 
-def _build_g2g_offer_url(region_id: str) -> str:
+def _build_g2g_offer_url(region_id: str, collection_id: str = "", dataset_id: str = "") -> str:
     """
-    Строит рабочую ссылку на страницу группы офферов G2G для данного региона.
+    Строит ссылку на страницу группы офферов G2G для конкретного сервера+фракции.
 
-    Использует упрощённый формат без fa-параметра (работает в браузере).
-    Полный формат с fa: ?fa=col_id:dat_id — можно добавить позже если нужна
-    фильтрация по конкретному реалму внутри региона.
+    Если переданы collection_id + dataset_id (из offer_attributes[0]), добавляет
+    fa={collection_id}:{dataset_id} — фильтр по конкретному серверу/фракции.
+    Без fa= ссылка ведёт на страницу всего региона (fallback).
     """
     from urllib.parse import urlencode
     base = f"https://www.g2g.com/categories/{_CATEGORY_SLUG}/offer/group"
-    params = {"region_id": region_id, "sort": "lowest_price"}
+    params: dict = {"region_id": region_id, "sort": "lowest_price"}
+    if collection_id and dataset_id:
+        params = {"fa": f"{collection_id}:{dataset_id}", **params}
     return f"{base}?{urlencode(params)}"
 
 
@@ -356,13 +358,11 @@ class G2GClient:
             if not results:
                 break
 
-            # Диагностика: структура raw payload (первые 3 оффера первой страницы).
-            # Уровень INFO чтобы видеть в продакшн-логах без изменения log level.
-            # После получения реальной структуры offer_attributes — понизить до DEBUG.
+            # Диагностика структуры raw payload (первые 3 оффера первой страницы).
             if page == 1:
                 for _dbg_o in results[:3]:
-                    logger.info(
-                        "G2G RAW OFFER: %s",
+                    logger.debug(
+                        "G2G raw offer sample: %s",
                         json.dumps({
                             "title":             _dbg_o.get("title"),
                             "offer_id":          _dbg_o.get("offer_id"),
@@ -451,36 +451,37 @@ async def fetch_g2g_game(
             country,
         )
 
-        loaded_regions = 0
-        for i, region in enumerate(regions):
-            try:
-                logger.info(
-                    "G2G game=%s loading %d/%d: relation_id=%s region_id=%s",
-                    game_key,
-                    i + 1,
-                    len(regions),
-                    region.relation_id,
-                    region.region_id,
-                )
-                offers = await client.fetch_offers(
-                    brand_id=brand_id,
-                    service_id=service_id,
-                    relation_id=region.relation_id,
-                    sort=sort,
-                )
-                all_offers.extend(offers)
-                loaded_regions += 1
-            except httpx.HTTPStatusError as e:
-                logger.warning("G2G HTTP error for region %s: %s", region.region_id, e)
-            if i < len(regions) - 1:
-                await asyncio.sleep(delay)
+        # Все relation_id возвращают одинаковый набор офферов (подтверждено логами:
+        # одни и те же offer_id появляются для каждого из 3 relation_id).
+        # Используем только первый relation_id — дублирование бессмысленно и
+        # утраивает время парсинга (~23 сек → ~8 сек).
+        if not regions:
+            logger.warning("G2G game=%s: no regions found, skipping", game_key)
+            return []
+
+        region = regions[0]
+        try:
+            logger.info(
+                "G2G game=%s fetching: relation_id=%s region_id=%s (using first of %d)",
+                game_key,
+                region.relation_id,
+                region.region_id,
+                len(regions),
+            )
+            all_offers = await client.fetch_offers(
+                brand_id=brand_id,
+                service_id=service_id,
+                relation_id=region.relation_id,
+                sort=sort,
+            )
+        except httpx.HTTPStatusError as e:
+            logger.warning("G2G HTTP error for region %s: %s", region.region_id, e)
 
         unique_sellers = {o.seller for o in all_offers if o.seller}
         logger.info(
-            "G2G game=%s done: regions_found=%d regions_loaded=%d offers=%d unique_sellers=%d",
+            "G2G game=%s done: regions_found=%d offers=%d unique_sellers=%d",
             game_key,
             len(regions),
-            loaded_regions,
             len(all_offers),
             len(unique_sellers),
         )
@@ -529,11 +530,18 @@ def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
         logger.debug("G2G: пропуск нераспознанного оффера title=%r", raw.title)
         return None
 
-    # Правильная ссылка: страница группы офферов G2G для данного региона
-    if raw.region_id:
+    # Правильная ссылка: страница конкретного сервера+фракции (fa= фильтр).
+    # offer_attributes[0] содержит {collection_id, dataset_id} — уникальный
+    # идентификатор сервер+фракция. Без него — fallback на страницу региона.
+    attrs = raw.raw.get("offer_attributes") or []
+    if attrs and raw.region_id:
+        col = attrs[0].get("collection_id", "")
+        dat = attrs[0].get("dataset_id", "")
+        offer_url = _build_g2g_offer_url(raw.region_id, col, dat)
+    elif raw.region_id:
         offer_url = _build_g2g_offer_url(raw.region_id)
     else:
-        offer_url = raw.offer_url  # fallback
+        offer_url = raw.offer_url  # последний fallback
 
     seller = raw.seller or "unknown"
 
