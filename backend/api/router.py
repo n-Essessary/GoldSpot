@@ -73,3 +73,26 @@ async def get_price_history_handler(
     }
 
 
+@router.get("/price-history/ohlc")
+async def price_history_ohlc(
+    server: str = Query(..., description="display_server slug, e.g. '(EU) Anniversary'"),
+    faction: str = Query("all", description="'all' | 'Alliance' | 'Horde'"),
+    last_hours: int = Query(168, ge=1, le=8760, description="How many hours of history"),
+    bucket_minutes: int = Query(60, ge=5, le=1440, description="Aggregation bucket size in minutes"),
+):
+    """
+    Aggregated OHLC-like price history from PostgreSQL.
+    Returns min/avg/max/median per time bucket for use with TradingView lightweight-charts.
+    Requires DATABASE_URL to be set. Returns empty list if DB is unavailable.
+    """
+    try:
+        from db.writer import query_price_history
+        data = await query_price_history(server, faction, last_hours, bucket_minutes)
+        return {"count": len(data), "points": data}
+    except RuntimeError as e:
+        # DATABASE_URL not set — DB feature disabled, return empty gracefully
+        return {"count": 0, "points": [], "error": str(e)}
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("price_history_ohlc failed")
+        return {"count": 0, "points": []}

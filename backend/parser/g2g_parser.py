@@ -466,7 +466,7 @@ async def fetch_g2g_game(
             game_key, len(regions), brand_id, service_id, country,
         )
 
-        sellers = await _discover_sellers(client, brand_id, service_id, regions, delay=delay)
+        sellers = await client.fetch_all_sellers(brand_id, service_id, regions)
         if not sellers:
             logger.warning("G2G: no sellers discovered for %s", game_key)
             return []

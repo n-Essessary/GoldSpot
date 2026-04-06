@@ -22,9 +22,12 @@ from api.schemas import Offer, PriceHistoryPoint, ServerGroup
 logger = logging.getLogger(__name__)
 
 # ── Per-source state ──────────────────────────────────────────────────────────
-_cache:       dict[str, list[Offer]]        = {"funpay": [], "g2g": []}
-_last_update: dict[str, Optional[datetime]] = {"funpay": None, "g2g": None}
-_running:     dict[str, bool]               = {"funpay": False, "g2g": False}
+_cache:         dict[str, list[Offer]]        = {"funpay": [], "g2g": []}
+_last_update:   dict[str, Optional[datetime]] = {"funpay": None, "g2g": None}
+_running:       dict[str, bool]               = {"funpay": False, "g2g": False}
+# Monotonically-increasing counter, incremented on every cache update.
+# Frontend can detect new data even when the wall-clock timestamp hasn't changed.
+_cache_version: dict[str, int]               = {"funpay": 0, "g2g": 0}
 
 FUNPAY_INTERVAL = 60   # пауза между циклами FunPay (секунд)
 G2G_INTERVAL    = 30   # пауза после завершения G2G-цикла
@@ -140,6 +143,7 @@ def get_parser_status() -> dict:
             "offers":      len(_cache[src]),
             "last_update": _last_update[src].isoformat() if _last_update[src] else None,
             "running":     _running[src],
+            "version":     _cache_version[src],
         }
         for src in ("funpay", "g2g")
     }
@@ -149,15 +153,20 @@ def get_parser_status() -> dict:
 
 async def _run_funpay_loop() -> None:
     from parser.funpay_parser import fetch_offers as fp_fetch
+    from db.writer import write_snapshots
 
     while True:
         _running["funpay"] = True
         try:
             offers = await fp_fetch()
             offers = [_normalize_funpay_offer(o) for o in offers]
+            # Atomic cache update + version bump
             _cache["funpay"] = offers
+            _cache_version["funpay"] += 1
             _last_update["funpay"] = datetime.now(timezone.utc)
             logger.info("FunPay updated: %d offers", len(offers))
+            # Non-blocking DB write — failures are logged but never crash the loop
+            asyncio.create_task(write_snapshots(offers))
         except Exception:
             logger.exception("FunPay parser failed")
         finally:
@@ -170,6 +179,7 @@ async def _run_funpay_loop() -> None:
 
 async def _run_g2g_loop() -> None:
     from parser.g2g_parser import fetch_offers as g2g_fetch
+    from db.writer import write_snapshots
 
     while True:
         _running["g2g"] = True
@@ -177,10 +187,14 @@ async def _run_g2g_loop() -> None:
         try:
             offers = await g2g_fetch()
             offers = [_normalize_g2g_offer(o) for o in offers]
+            # Atomic cache update + version bump
             _cache["g2g"] = offers
+            _cache_version["g2g"] += 1
             _last_update["g2g"] = datetime.now(timezone.utc)
             elapsed = asyncio.get_event_loop().time() - t0
             logger.info("G2G updated: %d offers in %.1fs", len(offers), elapsed)
+            # Non-blocking DB write — failures are logged but never crash the loop
+            asyncio.create_task(write_snapshots(offers))
         except Exception:
             logger.exception("G2G parser failed")
         finally:
