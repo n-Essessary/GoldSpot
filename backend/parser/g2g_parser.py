@@ -507,31 +507,38 @@ async def discover_brand_ids(
         return r.json().get("payload", {}).get("results", [])
 
 
-_MAX_PRICE_PER_1K = 300.0  # Жёсткий потолок: выше — аномалия, пропускаем
+_MAX_PRICE_PER_1K = 300.0  # Hard ceiling: above this is anomalous, skip
 
 
 def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
+    """Convert G2GOffer → Offer using raw price (unit_price_in_usd = per 1 gold).
+
+    Task 2: parsers always return raw price, NEVER compute price_per_1k.
+      raw_price      = unit_price_in_usd  (price per 1 gold unit, USD)
+      raw_price_unit = 'per_unit'
+      lot_size       = 1
+    price_per_1k is derived in Offer.model_validator: raw_price * 1000.
+    """
     if raw.price_usd <= 0:
         return None
 
-    price_per_1k = round(raw.price_usd * 1000.0, 4)
-    if price_per_1k > _MAX_PRICE_PER_1K:
+    # Validate against ceiling using derived price (raw_price * 1000)
+    if raw.price_usd * 1000.0 > _MAX_PRICE_PER_1K:
         return None
 
     server_name, region, version, faction = _parse_title(raw.title)
-    # Строим display_server в формате: "(EU) Version"
-    # Если ни региона, ни версии — оффер невозможно сгруппировать, пропускаем.
+    # Build display_server: "(EU) Version"
+    # If neither region nor version can be determined — skip; offer is ungroupable.
     if region and version:
         display_server = f"({region}) {version}"
     elif version:
         display_server = version
     else:
-        logger.debug("G2G: пропуск нераспознанного оффера title=%r", raw.title)
+        logger.debug("G2G: skipping unrecognised offer title=%r", raw.title)
         return None
 
-    # Уникальный ID: offer_group (без ведущего "/") + seller гарантирует
-    # что два продавца на одном сервере не дедуплицируются.
-    # Если offer_group пустой — fallback на offer_id.
+    # Unique ID: offer_group (strip leading "/") + seller
+    # ensures two sellers on the same server don't get deduplicated.
     raw_id = raw.offer_group.lstrip("/") if raw.offer_group else raw.offer_id
     offer_id_key = f"g2g_{raw_id}_{raw.seller}" if raw_id else f"g2g_{raw.offer_id}"
 
@@ -543,7 +550,11 @@ def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
             display_server=display_server,
             server_name=server_name,
             faction=faction,
-            price_per_1k=price_per_1k,
+            # ── Raw price (Task 2) ────────────────────────────────────────────
+            raw_price=raw.price_usd,      # unit_price_in_usd: price per 1 gold
+            raw_price_unit="per_unit",
+            lot_size=1,
+            # ── amount & metadata ─────────────────────────────────────────────
             amount_gold=raw.available_qty,
             seller=raw.seller or "unknown",
             offer_url=raw.offer_url or None,

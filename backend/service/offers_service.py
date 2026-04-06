@@ -1,11 +1,17 @@
 """
-In-memory хранилище офферов.
+service/offers_service.py — In-memory offer cache + background parser loops.
 
-Раздельные фоновые циклы на каждый парсер:
-  - FunPay: запускается сразу, обновление каждые 60 с после завершения
-  - G2G:    запускается сразу, обновление каждые 30 с после завершения
+Architecture:
+  - Separate background loops per parser (FunPay, G2G).
+  - Reads from _cache are < 5 ms (no DB, no blocking).
+  - After each parse cycle, fire-and-forget:
+      1. _snapshot_all_servers()   — group-level IndexPrice → DB (legacy OHLC)
+      2. _snapshot_server_indexes() — per-real-server index → DB (Task 4)
+      3. write_price_snapshots()    — raw offer prices → DB (Task 1)
 
-HTTP-handlers читают из _cache без ожидания (< 5 мс).
+Task 2: price_per_1k is NEVER stored; always derived from raw_price at read-time.
+Task 3: server_resolver maps raw titles → canonical server_id.
+Task 4: index computed per individual server (not per group).
 """
 from __future__ import annotations
 
@@ -25,19 +31,24 @@ logger = logging.getLogger(__name__)
 _cache:         dict[str, list[Offer]]        = {"funpay": [], "g2g": []}
 _last_update:   dict[str, Optional[datetime]] = {"funpay": None, "g2g": None}
 _running:       dict[str, bool]               = {"funpay": False, "g2g": False}
-# Monotonically-increasing counter — frontend detects updates even if timestamp unchanged
 _cache_version: dict[str, int]               = {"funpay": 0, "g2g": 0}
 
-FUNPAY_INTERVAL = 60   # пауза между циклами FunPay (секунд)
-G2G_INTERVAL    = 30   # пауза после завершения G2G-цикла
+FUNPAY_INTERVAL = 60
+G2G_INTERVAL    = 30
 
-# ── Аналитика — константы ─────────────────────────────────────────────────────
-_OUTLIER_MULTIPLIER  = 3.0       # цены > median * 3 — выброс, отбрасываем
-_MIN_LIQUID_GOLD     = 50_000    # порог ликвидности для best_ask
-_VWAP_GOLD_CAP       = 1_000_000 # лимит накопления объёма для VWAP
-_MIN_OFFERS          = 2         # минимум офферов для расчёта индекса
+# ── Analytics constants ───────────────────────────────────────────────────────
+_OUTLIER_MULTIPLIER  = 3.0
+_MIN_LIQUID_GOLD     = 50_000
+_VWAP_GOLD_CAP       = 1_000_000
+_MIN_OFFERS          = 2
+_INDEX_TOP_N         = 10   # Task 4: top-N cheapest offers for server index
 
-# Канонические имена версий (применять ко всем источникам перед записью в кэш).
+# Throttle for raw price snapshots: skip write if price changed less than this
+_SNAP_WRITE_THRESHOLD = 0.005   # 0.5%
+# Per-offer last-written price: offer_id → last raw_price written to DB
+_last_snap_price: dict[str, float] = {}
+
+# ── Version aliases ───────────────────────────────────────────────────────────
 _VERSION_ALIASES: dict[str, str] = {
     "seasonal":            "Season of Discovery",
     "season of discovery": "Season of Discovery",
@@ -47,7 +58,6 @@ _VERSION_ALIASES: dict[str, str] = {
     "classic":             "Classic",
 }
 
-# Порядок отображения групп в сайдбаре (меньше = выше).
 _VERSION_ORDER: dict[str, int] = {
     "Anniversary":         0,
     "Season of Discovery": 1,
@@ -56,38 +66,35 @@ _VERSION_ORDER: dict[str, int] = {
 }
 
 
-# ── IndexPrice ────────────────────────────────────────────────────────────────
+# ── IndexPrice (group-level, legacy) ─────────────────────────────────────────
 
 @dataclass
 class IndexPrice:
-    index_price:  float        # VW-Median — основная линия графика
-    vwap:         float        # Volume-Weighted Avg Price — вторая линия
-    best_ask:     float        # минимальная цена с ликвидностью >= 50k gold
-    price_min:    float        # абсолютный минимум (после фильтра выбросов)
-    price_max:    float        # абсолютный максимум (после фильтра выбросов)
+    index_price:  float   # VW-Median
+    vwap:         float
+    best_ask:     float
+    price_min:    float
+    price_max:    float
     offer_count:  int
     total_volume: int
-    sources:      list[str]    # ['funpay', 'g2g', ...]
+    sources:      list[str]
 
 
-# In-memory кэш индексных цен: key = "display_server::faction"
+# In-memory index cache: key = "display_server::faction"
 _index_cache: dict[str, IndexPrice] = {}
 
 
-# ── Утилиты ───────────────────────────────────────────────────────────────────
+# ── Utilities ─────────────────────────────────────────────────────────────────
 
 def _clean(s: str) -> str:
-    """Нормализует строку сервера: trim + collapse spaces + lowercase."""
     return re.sub(r"\s+", " ", (s or "").strip()).lower()
 
 
 def _canonicalize_version(version: str) -> str:
-    """Приводит любое название версии к каноническому имени."""
     return _VERSION_ALIASES.get(version.lower().strip(), version)
 
 
 def _detect_version(text: str) -> str:
-    """Определяет версию из произвольного текста и возвращает каноническое имя."""
     t = _clean(text)
     if "season of discovery" in t or re.search(r"\bsod\b|\bseasonal\b", t):
         return "Season of Discovery"
@@ -99,14 +106,14 @@ def _detect_version(text: str) -> str:
 
 
 def _normalize_funpay_offer(offer: Offer) -> Offer:
-    """Приводит FunPay-оффер к формату display_server=(EU) Version."""
+    """Normalise FunPay offer: set display_server to '(EU) Version' format."""
     raw = (offer.display_server or "").strip()
     m = re.match(r"^\((?P<region>[A-Za-z]{2,})\)\s*(?P<body>.*)$", raw)
     if not m:
         return offer
 
-    region = m.group("region").upper()
-    body   = (m.group("body") or "").strip()
+    region  = m.group("region").upper()
+    body    = (m.group("body") or "").strip()
     version = _detect_version(body)
     realm   = ""
 
@@ -124,7 +131,7 @@ def _normalize_funpay_offer(offer: Offer) -> Offer:
 
 
 def _normalize_g2g_offer(offer: Offer) -> Offer:
-    """Канонизирует display_server G2G-оффера через _VERSION_ALIASES."""
+    """Canonicalise display_server of G2G offer via _VERSION_ALIASES."""
     ds = offer.display_server or ""
     m = re.match(r"^\((?P<region>[A-Za-z]{2,})\)\s*(?P<version>.+)$", ds)
     if m:
@@ -143,15 +150,13 @@ def _version_rank(display_server: str) -> int:
     return 99
 
 
-# ── Публичный агрегат ─────────────────────────────────────────────────────────
+# ── Public cache read ─────────────────────────────────────────────────────────
 
 def get_all_offers() -> list[Offer]:
-    """Объединяет кэши всех источников."""
     return _cache["funpay"] + _cache["g2g"]
 
 
 def get_parser_status() -> dict:
-    """Возвращает состояние каждого парсера для /parser-status."""
     return {
         src: {
             "offers":      len(_cache[src]),
@@ -163,27 +168,19 @@ def get_parser_status() -> dict:
     }
 
 
-# ── Индексная цена ─────────────────────────────────────────────────────────────
+# ── Group-level IndexPrice (legacy) ──────────────────────────────────────────
 
 def compute_index_price(offers: list[Offer]) -> IndexPrice | None:
     """
-    Трёхкомпонентный индекс цены (биржевой подход).
+    Three-component price index (exchange approach).
 
-    index_price = Volume-Weighted Median:
-        Цена при которой 50% суммарного объёма — ниже неё.
-        Устойчива к выбросам: один продавец с огромным объёмом
-        не перекашивает результат.
-
-    vwap = Volume-Weighted Average Price по топ-офферам до 1M gold:
-        Аналог TradingView VWAP. Учитывает ликвидность.
-
-    best_ask = минимальная цена при которой накоплено >= 50k gold:
-        "Реально достижимая цена для покупателя прямо сейчас."
+    index_price = Volume-Weighted Median (resilient to volume outliers)
+    vwap        = Volume-Weighted Average Price on top offers up to 1M gold
+    best_ask    = first price where accumulated volume ≥ 50k gold
     """
     if not offers or len(offers) < _MIN_OFFERS:
         return None
 
-    # Шаг 1: фильтр выбросов (цены > median * 3)
     prices_sorted = sorted(o.price_per_1k for o in offers)
     raw_median = prices_sorted[len(prices_sorted) // 2]
     clean = [
@@ -197,7 +194,6 @@ def compute_index_price(offers: list[Offer]) -> IndexPrice | None:
 
     clean.sort(key=lambda o: o.price_per_1k)
 
-    # Шаг 2: VW-Median
     total_vol = sum(o.amount_gold for o in clean)
     cumulative, vw_median = 0, clean[0].price_per_1k
     for o in clean:
@@ -206,7 +202,6 @@ def compute_index_price(offers: list[Offer]) -> IndexPrice | None:
             vw_median = o.price_per_1k
             break
 
-    # Шаг 3: VWAP по топ-офферам до 1M gold
     selected, acc = [], 0
     for o in clean:
         selected.append(o)
@@ -219,7 +214,6 @@ def compute_index_price(offers: list[Offer]) -> IndexPrice | None:
         if total_w else clean[0].price_per_1k
     )
 
-    # Шаг 4: best_ask — первая цена с накопленным объёмом >= 50k
     acc_ask = 0
     best_ask = clean[0].price_per_1k
     for o in clean:
@@ -229,54 +223,238 @@ def compute_index_price(offers: list[Offer]) -> IndexPrice | None:
             break
 
     return IndexPrice(
-        index_price  = round(vw_median, 4),
-        vwap         = round(vwap, 4),
-        best_ask     = round(best_ask, 4),
-        price_min    = round(clean[0].price_per_1k, 4),
-        price_max    = round(clean[-1].price_per_1k, 4),
+        index_price  = round(vw_median, 6),
+        vwap         = round(vwap, 6),
+        best_ask     = round(best_ask, 6),
+        price_min    = round(clean[0].price_per_1k, 6),
+        price_max    = round(clean[-1].price_per_1k, 6),
         offer_count  = len(clean),
         total_volume = total_vol,
         sources      = sorted({o.source for o in clean}),
     )
 
 
-# ── Фоновые снимки ────────────────────────────────────────────────────────────
+# ── Task 4: per-server index computation ──────────────────────────────────────
+
+def compute_server_index(
+    server_id: int,
+    faction: str,
+    offers: list[Offer],
+) -> dict | None:
+    """
+    Compute price index for a specific server_id + faction.
+
+    Algorithm (Task 4):
+      1. Filter offers to same server_id + faction.
+      2. Sort by price_per_1k ASC — already normalised for both sources:
+           G2G (per_unit):  price_per_1k = raw_price * 1000
+           FunPay (per_lot): price_per_1k = (raw_price / lot_size) * 1000
+         Sorting by raw_price directly would give wrong results because
+         FunPay raw_price is per-lot (e.g. 3.0 for 1000 gold) while
+         G2G raw_price is per-unit (e.g. 0.003 per 1 gold), making FunPay
+         look 1000× more expensive.
+      3. Take top _INDEX_TOP_N cheapest.
+      4. Return mean as index_price in per-unit (per 1 gold) form.
+
+    Returns dict with index_price (per unit), min, max, sample_size.
+    Returns None if not enough offers.
+    """
+    matching = [
+        o for o in offers
+        if o.server_id == server_id
+        and (faction == "All" or o.faction.lower() == faction.lower())
+        and o.price_per_1k > 0  # use normalised price — correct for all sources
+    ]
+
+    if len(matching) < _MIN_OFFERS:
+        return None
+
+    # Sort by normalised price_per_1k ASC (works correctly for FunPay + G2G)
+    matching.sort(key=lambda o: o.price_per_1k)
+    top = matching[:_INDEX_TOP_N]
+
+    # Compute mean in per-1k space, then convert to per-unit for DB storage
+    mean_per_1k = sum(o.price_per_1k for o in top) / len(top)
+    prices_per_1k = [o.price_per_1k for o in top]
+
+    return {
+        "index_price": round(mean_per_1k / 1000.0, 8),   # per unit (per 1 gold)
+        "sample_size": len(top),
+        "min_price":   round(min(prices_per_1k) / 1000.0, 8),
+        "max_price":   round(max(prices_per_1k) / 1000.0, 8),
+    }
+
+
+# ── Background snapshots ──────────────────────────────────────────────────────
+
+_snapshot_running = False   # guard against concurrent _snapshot_all_servers runs
+
 
 async def _snapshot_all_servers() -> None:
     """
-    Вычисляет IndexPrice для всех server+faction комбинаций
-    из текущего объединённого кэша, записывает в БД и обновляет _index_cache.
-    Вызывается после каждого обновления парсера (non-blocking create_task).
+    After each parse cycle:
+      1. Compute group-level IndexPrice → write_index_snapshot (legacy OHLC)
+      2. Compute per-server index → upsert_server_index (Task 4)
+      3. Write raw offer snapshots → write_price_snapshot (Task 1)
+
+    Protected by _snapshot_running flag: if the previous snapshot hasn't
+    finished (e.g. slow DB on Railway), the new call exits immediately to
+    prevent duplicate writes and connection pool exhaustion.
     """
-    from db.writer import write_index_snapshot
+    global _snapshot_running
+    if _snapshot_running:
+        logger.debug("_snapshot_all_servers still running — skipping this cycle")
+        return
+    _snapshot_running = True
+    try:
+        await _do_snapshot_all_servers()
+    finally:
+        _snapshot_running = False
+
+
+async def _do_snapshot_all_servers() -> None:
+    """Actual snapshot logic — called only when no concurrent snapshot is running."""
+    from db.writer import (
+        upsert_server_index,
+        write_index_snapshot,
+        write_price_snapshot,
+    )
     ts = datetime.now(timezone.utc)
     all_offers = get_all_offers()
 
-    # Группируем: (display_server, faction) + (display_server, "All")
+    # ── 1. Group-level index (legacy OHLC path) ───────────────────────────────
     groups: dict[tuple[str, str], list[Offer]] = {}
     for o in all_offers:
         ds = o.display_server
         if not ds:
             continue
-        # По фракции
-        key = (ds, o.faction)
-        groups.setdefault(key, []).append(o)
-        # Агрегат All
-        key_all = (ds, "All")
-        groups.setdefault(key_all, []).append(o)
+        groups.setdefault((ds, o.faction), []).append(o)
+        groups.setdefault((ds, "All"), []).append(o)
 
-    tasks = []
+    index_tasks = []
     for (server, faction), offers in groups.items():
         idx = compute_index_price(offers)
         if idx is not None:
             _index_cache[f"{server}::{faction}"] = idx
-            tasks.append(write_index_snapshot(server, faction, idx, ts))
+            index_tasks.append(write_index_snapshot(server, faction, idx, ts))
+    if index_tasks:
+        await asyncio.gather(*index_tasks, return_exceptions=True)
 
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    # ── 2. Per-server index (Task 4) ──────────────────────────────────────────
+    # Collect unique (server_id, faction) pairs from offers that have server_id
+    server_faction_pairs: set[tuple[int, str]] = set()
+    for o in all_offers:
+        if o.server_id is not None:
+            server_faction_pairs.add((o.server_id, o.faction))
+            server_faction_pairs.add((o.server_id, "All"))
+
+    server_index_tasks = []
+    for (server_id, faction) in server_faction_pairs:
+        result = compute_server_index(server_id, faction, all_offers)
+        if result is not None:
+            server_index_tasks.append(
+                upsert_server_index(
+                    server_id=server_id,
+                    faction=faction,
+                    index_price=result["index_price"],
+                    sample_size=result["sample_size"],
+                    min_price=result["min_price"],
+                    max_price=result["max_price"],
+                    computed_at=ts,
+                )
+            )
+    if server_index_tasks:
+        await asyncio.gather(*server_index_tasks, return_exceptions=True)
+
+    # ── 3. Raw price snapshots (Task 1) ───────────────────────────────────────
+    # Only write if the offer's raw_price changed > 0.5% since last write.
+    # This prevents ~500k rows/day from writing every offer on every cycle.
+    snap_tasks = []
+    for o in all_offers:
+        last = _last_snap_price.get(o.id)
+        if last is not None and last != 0:
+            if abs(o.raw_price - last) / last <= _SNAP_WRITE_THRESHOLD:
+                continue  # price unchanged within threshold — skip DB write
+        _last_snap_price[o.id] = o.raw_price
+        snap_tasks.append(
+            write_price_snapshot(
+                source=o.source,
+                offer_id=o.id,
+                server_id=o.server_id,
+                faction=o.faction,
+                raw_price=o.raw_price,
+                raw_price_unit=o.raw_price_unit,
+                lot_size=o.lot_size,
+                seller=o.seller,
+                offer_url=o.offer_url,
+                fetched_at=o.fetched_at,
+            )
+        )
+    if snap_tasks:
+        # Process in batches to avoid overwhelming the DB connection pool
+        batch_size = 50
+        for i in range(0, len(snap_tasks), batch_size):
+            await asyncio.gather(*snap_tasks[i:i + batch_size], return_exceptions=True)
 
 
-# ── Фоновые циклы ─────────────────────────────────────────────────────────────
+# ── Server resolver integration ───────────────────────────────────────────────
+
+async def _resolve_server_ids(offers: list[Offer]) -> list[Offer]:
+    """
+    For each offer that doesn't have server_id set, try to resolve via
+    server_resolver. Updates offer.server_id in-place.
+
+    If DB pool is unavailable, returns offers unchanged (graceful degradation).
+    """
+    from db.writer import get_pool
+    pool = await get_pool()
+    if pool is None:
+        return offers
+
+    from db.server_resolver import resolve_server
+    for offer in offers:
+        if offer.server_id is not None:
+            continue
+        # Build a lookup key: for G2G use the full title (server_name + display_server);
+        # for FunPay use display_server (group label).
+        if offer.source == "g2g" and offer.server_name:
+            # Reconstruct the G2G-style title fragment: "ServerName (Region) Version"
+            # or try display_server + server_name combination.
+            # The best approach is to use server_name + display_server region/version.
+            m = re.match(
+                r"^\((?P<region>[A-Z]{2,})\)\s*(?P<version>.+)$",
+                offer.display_server or "",
+            )
+            if m:
+                region  = m.group("region")
+                version = m.group("version")
+                # Reconstruct canonical G2G alias key used in server_aliases
+                # Try both faction variants
+                for faction in (offer.faction, "Alliance", "Horde"):
+                    raw_key = f"{offer.server_name} [{region} - {version}] - {faction}"
+                    sid = await resolve_server(raw_key, offer.source, pool)
+                    if sid is not None:
+                        offer.server_id = sid
+                        break
+        elif offer.source == "funpay":
+            # FunPay uses group labels — try to resolve by server_name if present
+            if offer.server_name:
+                m = re.match(
+                    r"^\((?P<region>[A-Z]{2,})\)\s*(?P<version>.+)$",
+                    offer.display_server or "",
+                )
+                if m:
+                    region  = m.group("region")
+                    version = m.group("version")
+                    raw_key = f"({region}) {version} - {offer.server_name}"
+                    sid = await resolve_server(raw_key, offer.source, pool)
+                    if sid is not None:
+                        offer.server_id = sid
+
+    return offers
+
+
+# ── Background loops ──────────────────────────────────────────────────────────
 
 async def _run_funpay_loop() -> None:
     from parser.funpay_parser import fetch_offers as fp_fetch
@@ -286,12 +464,11 @@ async def _run_funpay_loop() -> None:
         try:
             offers = await fp_fetch()
             offers = [_normalize_funpay_offer(o) for o in offers]
-            # Атомарное обновление кэша + версии
+            offers = await _resolve_server_ids(offers)
             _cache["funpay"] = offers
             _cache_version["funpay"] += 1
             _last_update["funpay"] = datetime.now(timezone.utc)
             logger.info("FunPay updated: %d offers", len(offers))
-            # Non-blocking: снимки индексов + запись в БД
             asyncio.create_task(_snapshot_all_servers())
         except Exception:
             logger.exception("FunPay parser failed")
@@ -308,17 +485,16 @@ async def _run_g2g_loop() -> None:
 
     while True:
         _running["g2g"] = True
-        t0 = asyncio.get_event_loop().time()
+        t0 = asyncio.get_running_loop().time()   # get_event_loop() is deprecated in 3.10+
         try:
             offers = await g2g_fetch()
             offers = [_normalize_g2g_offer(o) for o in offers]
-            # Атомарное обновление кэша + версии
+            offers = await _resolve_server_ids(offers)
             _cache["g2g"] = offers
             _cache_version["g2g"] += 1
             _last_update["g2g"] = datetime.now(timezone.utc)
-            elapsed = asyncio.get_event_loop().time() - t0
+            elapsed = asyncio.get_running_loop().time() - t0
             logger.info("G2G updated: %d offers in %.1fs", len(offers), elapsed)
-            # Non-blocking: снимки индексов + запись в БД
             asyncio.create_task(_snapshot_all_servers())
         except Exception:
             logger.exception("G2G parser failed")
@@ -328,16 +504,15 @@ async def _run_g2g_loop() -> None:
 
 
 async def start_background_parsers() -> None:
-    """Запускает фоновые циклы FunPay и G2G. Вызвать один раз в lifespan."""
+    """Start background FunPay and G2G loops. Call once in lifespan."""
     asyncio.create_task(_run_funpay_loop())
     asyncio.create_task(_run_g2g_loop())
     logger.info("Background parsers started (funpay + g2g)")
 
 
-# ── Публичный API (читают из кэша) ────────────────────────────────────────────
+# ── Public read API ───────────────────────────────────────────────────────────
 
 def get_meta() -> Optional[datetime]:
-    """UTC-время последнего успешного обновления любого источника."""
     updates = [t for t in _last_update.values() if t is not None]
     return max(updates) if updates else None
 
@@ -347,7 +522,7 @@ def get_price_history(
     faction: str = "all",
     last: int = 50,
 ) -> list[PriceHistoryPoint]:
-    """Текущий снимок из in-memory кэша — для обратной совместимости /price-history."""
+    """In-memory price history snapshot — backward compat for /price-history."""
     offers = get_all_offers()
 
     if server != "all":
@@ -372,12 +547,11 @@ def get_price_history(
 
 def get_servers() -> list[ServerGroup]:
     """
-    Иерархический список групп серверов.
+    Hierarchical server group list for the sidebar.
 
-    min_price = best_ask из _index_cache (честная цена покупки).
-    Fallback на простой min по офферам если кэш ещё не заполнен.
-
-    Сортировка: версия (Anniversary=0 … Classic=3), затем min_price ASC.
+    min_price = best_ask from _index_cache (realistic buy price).
+    Falls back to simple min across offers if cache not yet populated.
+    Sorted by: version (Anniversary=0 … Classic=3), then min_price ASC.
     """
     group_min_price: dict[str, float]    = {}
     group_realms:    dict[str, set[str]] = {}
@@ -386,17 +560,14 @@ def get_servers() -> list[ServerGroup]:
         ds = offer.display_server
         if not ds:
             continue
-        # Реалмы
         group_realms.setdefault(ds, set())
         if offer.server_name:
             group_realms[ds].add(offer.server_name)
-        # Fallback min_price — если кэш ещё не готов
         cur = group_min_price.get(ds)
         if cur is None or offer.price_per_1k < cur:
             group_min_price[ds] = offer.price_per_1k
 
-    # Перекрываем fallback значениями из _index_cache (best_ask).
-    # Приоритет: All > Alliance > Horde (All всегда есть если есть хоть один оффер)
+    # Override fallback with cached best_ask
     for ds in group_min_price:
         cached = (
             _index_cache.get(f"{ds}::All")

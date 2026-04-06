@@ -213,12 +213,10 @@ def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
     if amount_gold is None or amount_gold <= 0:
         amount_gold = 1
 
-    raw_price = _text(item, ".tc-price")
-    price = _parse_float(raw_price)
-    if price is None or price <= 0:
-        raise ValueError(f".tc-price не распознана: {raw_price!r}")
-
-    price_per_1k = round(price * 1000, 4)
+    raw_price_text = _text(item, ".tc-price")
+    lot_price = _parse_float(raw_price_text)
+    if lot_price is None or lot_price <= 0:
+        raise ValueError(f".tc-price not recognised: {raw_price_text!r}")
 
     href = _attr(item, "href")
     offer_url: str | None = None
@@ -234,7 +232,15 @@ def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
         server=server_slug,
         display_server=display_server,
         faction=faction,
-        price_per_1k=price_per_1k,
+        # ── Raw price (Task 2) ────────────────────────────────────────────────
+        # FunPay shows price per lot (e.g. "1000 gold for $X").
+        # raw_price = lot_price (price for amount_gold gold, in USD)
+        # raw_price_unit = 'per_lot'
+        # lot_size = amount_gold
+        # price_per_1k is derived: (lot_price / amount_gold) * 1000
+        raw_price=lot_price,
+        raw_price_unit="per_lot",
+        lot_size=amount_gold,
         amount_gold=amount_gold,
         seller=seller,
         offer_url=offer_url,
