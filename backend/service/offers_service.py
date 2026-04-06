@@ -395,9 +395,14 @@ def get_servers() -> list[ServerGroup]:
         if cur is None or offer.price_per_1k < cur:
             group_min_price[ds] = offer.price_per_1k
 
-    # Перекрываем fallback значениями из _index_cache (best_ask)
+    # Перекрываем fallback значениями из _index_cache (best_ask).
+    # Приоритет: All > Alliance > Horde (All всегда есть если есть хоть один оффер)
     for ds in group_min_price:
-        cached = _index_cache.get(f"{ds}::All") or _index_cache.get(f"{ds}::Horde")
+        cached = (
+            _index_cache.get(f"{ds}::All")
+            or _index_cache.get(f"{ds}::Alliance")
+            or _index_cache.get(f"{ds}::Horde")
+        )
         if cached is not None:
             group_min_price[ds] = cached.best_ask
 

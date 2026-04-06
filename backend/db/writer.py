@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Порог изменения цены для записи нового снимка (0.5%).
-# Органичный граф: плотность точек растёт при волатильности, падает при стабильности.
 _WRITE_THRESHOLD = 0.005
 _last_written: dict[str, float] = {}
 
@@ -50,11 +49,22 @@ async def get_pool():
 
 
 def _should_write(key: str, new_price: float) -> bool:
-    """Возвращает True если цена изменилась на > 0.5% или первый раз."""
+    """True если цена изменилась на > 0.5% или это первая запись."""
     prev = _last_written.get(key)
     if prev is None or prev == 0:
         return True
     return abs(new_price - prev) / prev > _WRITE_THRESHOLD
+
+
+def _faction_to_db(faction: str) -> str:
+    """
+    Нормализует faction к значению как в БД.
+    Frontend шлёт lowercase ('all', 'alliance', 'horde').
+    БД хранит 'All', 'Alliance', 'Horde'.
+    """
+    if faction.lower() == "all":
+        return "All"
+    return faction.capitalize()  # 'alliance' → 'Alliance', 'horde' → 'Horde'
 
 
 async def write_index_snapshot(
@@ -66,7 +76,7 @@ async def write_index_snapshot(
     """
     Fire-and-forget запись индексного снимка в price_index_snapshots.
     Пишет только при изменении index_price > 0.5%.
-    Никогда не пробрасывает исключения.
+    Никогда не пробрасывает исключения наружу.
     """
     key = f"{server}::{faction}"
     if not _should_write(key, idx.index_price):
@@ -107,10 +117,15 @@ async def query_index_history(
     max_points: int = 500,
 ) -> list[dict]:
     """
-    Возвращает OHLC + vwap + best_ask для lightweight-charts.
+    OHLC + vwap + best_ask из price_index_snapshots для lightweight-charts.
 
     Адаптивный bucket: max(5, last_hours*60 / max_points) минут.
-    Возвращает [] если БД недоступна — фронтенд покажет заглушку.
+    Возвращает [] если БД недоступна.
+
+    Исправления:
+    - % вместо %% (f-string не нуждается в экранировании)
+    - CTE без unnest cross-join (дублировал строки при >1 source)
+    - _faction_to_db() нормализует case ('alliance' → 'Alliance')
     """
     pool = await get_pool()
     if pool is None:
@@ -118,38 +133,40 @@ async def query_index_history(
 
     bucket_minutes = max(5, (last_hours * 60) // max_points)
 
-    conditions = ["server = $1", "ts > NOW() - $2::INTERVAL"]
-    params: list = [server, f"{last_hours} hours"]
+    # Нормализуем faction к значению БД
+    faction_db = _faction_to_db(faction)
 
-    if faction != "all":
-        conditions.append(f"faction = ${len(params) + 1}")
-        params.append(faction)
-    else:
-        # "All" — агрегированный faction
-        conditions.append(f"faction = ${len(params) + 1}")
-        params.append("All")
-
+    conditions = ["server = $1", "ts > NOW() - $2::INTERVAL", "faction = $3"]
+    params: list = [server, f"{last_hours} hours", faction_db]
     where = " AND ".join(conditions)
 
     try:
+        # BUG FIX 1: % вместо %% — в f-string % не нужно экранировать
+        # BUG FIX 2: убран implicit cross-join с unnest(sources).
+        #   Раньше строки дублировались по числу источников → SUM(offer_count)
+        #   удваивался, array_agg для open/close возвращал мусор.
+        #   Теперь sources собираются через array_agg + unnest в подзапросе
+        #   внутри SELECT — без умножения строк.
         rows = await pool.fetch(
             f"""
             SELECT
                 date_trunc('minute', ts)
-                    - (EXTRACT(MINUTE FROM ts)::int %% {bucket_minutes})
-                    * INTERVAL '1 minute'                      AS bucket,
-                (array_agg(index_price ORDER BY ts))[1]        AS open,
-                MAX(index_price)                               AS high,
-                MIN(index_price)                               AS low,
-                (array_agg(index_price ORDER BY ts DESC))[1]   AS close,
-                AVG(index_price)                               AS avg_price,
-                AVG(vwap)                                      AS vwap,
-                MIN(best_ask)                                  AS best_ask,
-                SUM(offer_count)                               AS offer_count,
-                array_agg(DISTINCT src)
-                    FILTER (WHERE src IS NOT NULL)             AS sources
-            FROM price_index_snapshots,
-                 unnest(sources) AS src
+                    - (EXTRACT(MINUTE FROM ts)::int % {bucket_minutes})
+                    * INTERVAL '1 minute'                        AS bucket,
+                (array_agg(index_price ORDER BY ts))[1]          AS open,
+                MAX(index_price)                                 AS high,
+                MIN(index_price)                                 AS low,
+                (array_agg(index_price ORDER BY ts DESC))[1]     AS close,
+                AVG(index_price)                                 AS avg_price,
+                AVG(vwap)                                        AS vwap,
+                MIN(best_ask)                                    AS best_ask,
+                SUM(offer_count)                                 AS offer_count,
+                ARRAY(
+                    SELECT DISTINCT s
+                    FROM unnest(array_agg(sources)) AS s
+                    WHERE s IS NOT NULL
+                )                                                AS sources
+            FROM price_index_snapshots
             WHERE {where}
             GROUP BY bucket
             ORDER BY bucket ASC
