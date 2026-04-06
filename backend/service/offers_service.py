@@ -32,6 +32,8 @@ _cache:         dict[str, list[Offer]]        = {"funpay": [], "g2g": []}
 _last_update:   dict[str, Optional[datetime]] = {"funpay": None, "g2g": None}
 _running:       dict[str, bool]               = {"funpay": False, "g2g": False}
 _cache_version: dict[str, int]               = {"funpay": 0, "g2g": 0}
+_last_error:    dict[str, Optional[str]]      = {"funpay": None, "g2g": None}
+_cache_initialized: dict[str, bool]          = {"funpay": False, "g2g": False}
 
 FUNPAY_INTERVAL = 60
 G2G_INTERVAL    = 30
@@ -163,6 +165,7 @@ def get_parser_status() -> dict:
             "last_update": _last_update[src].isoformat() if _last_update[src] else None,
             "running":     _running[src],
             "version":     _cache_version[src],
+            "last_error":  _last_error[src],
         }
         for src in ("funpay", "g2g")
     }
@@ -399,6 +402,43 @@ async def _do_snapshot_all_servers() -> None:
 
 # ── Server resolver integration ───────────────────────────────────────────────
 
+def _collect_resolve_keys(offers: list[Offer]) -> list[tuple[str, str]]:
+    """Build (alias, source) pairs for batch alias lookup (deduped order preserved)."""
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    for offer in offers:
+        if offer.server_id is not None:
+            continue
+        if offer.source == "g2g" and offer.server_name:
+            m = re.match(
+                r"^\((?P<region>[A-Z]{2,})\)\s*(?P<version>.+)$",
+                offer.display_server or "",
+            )
+            if m:
+                region = m.group("region")
+                version = m.group("version")
+                for faction in (offer.faction, "Alliance", "Horde"):
+                    raw_key = f"{offer.server_name} [{region} - {version}] - {faction}"
+                    t = (raw_key, offer.source)
+                    if t not in seen:
+                        seen.add(t)
+                        out.append(t)
+        elif offer.source == "funpay" and offer.server_name:
+            m = re.match(
+                r"^\((?P<region>[A-Z]{2,})\)\s*(?P<version>.+)$",
+                offer.display_server or "",
+            )
+            if m:
+                region = m.group("region")
+                version = m.group("version")
+                raw_key = f"({region}) {version} - {offer.server_name}"
+                t = (raw_key, offer.source)
+                if t not in seen:
+                    seen.add(t)
+                    out.append(t)
+    return out
+
+
 async def _resolve_server_ids(offers: list[Offer]) -> list[Offer]:
     """
     For each offer that doesn't have server_id set, try to resolve via
@@ -411,43 +451,45 @@ async def _resolve_server_ids(offers: list[Offer]) -> list[Offer]:
     if pool is None:
         return offers
 
-    from db.server_resolver import resolve_server
+    from db.server_resolver import resolve_server, resolve_server_batch
+
+    batch_keys = _collect_resolve_keys(offers)
+    alias_map = await resolve_server_batch(pool, batch_keys)
+
     for offer in offers:
         if offer.server_id is not None:
             continue
-        # Build a lookup key: for G2G use the full title (server_name + display_server);
-        # for FunPay use display_server (group label).
         if offer.source == "g2g" and offer.server_name:
-            # Reconstruct the G2G-style title fragment: "ServerName (Region) Version"
-            # or try display_server + server_name combination.
-            # The best approach is to use server_name + display_server region/version.
             m = re.match(
                 r"^\((?P<region>[A-Z]{2,})\)\s*(?P<version>.+)$",
                 offer.display_server or "",
             )
             if m:
-                region  = m.group("region")
+                region = m.group("region")
                 version = m.group("version")
-                # Reconstruct canonical G2G alias key used in server_aliases
-                # Try both faction variants
                 for faction in (offer.faction, "Alliance", "Horde"):
                     raw_key = f"{offer.server_name} [{region} - {version}] - {faction}"
-                    sid = await resolve_server(raw_key, offer.source, pool)
+                    lk = raw_key.lower().strip()
+                    sid = alias_map.get(lk)
+                    if sid is None:
+                        sid = await resolve_server(raw_key, offer.source, pool)
                     if sid is not None:
                         offer.server_id = sid
                         break
         elif offer.source == "funpay":
-            # FunPay uses group labels — try to resolve by server_name if present
             if offer.server_name:
                 m = re.match(
                     r"^\((?P<region>[A-Z]{2,})\)\s*(?P<version>.+)$",
                     offer.display_server or "",
                 )
                 if m:
-                    region  = m.group("region")
+                    region = m.group("region")
                     version = m.group("version")
                     raw_key = f"({region}) {version} - {offer.server_name}"
-                    sid = await resolve_server(raw_key, offer.source, pool)
+                    lk = raw_key.lower().strip()
+                    sid = alias_map.get(lk)
+                    if sid is None:
+                        sid = await resolve_server(raw_key, offer.source, pool)
                     if sid is not None:
                         offer.server_id = sid
 
@@ -463,14 +505,29 @@ async def _run_funpay_loop() -> None:
         _running["funpay"] = True
         try:
             offers = await fp_fetch()
-            offers = [_normalize_funpay_offer(o) for o in offers]
-            offers = await _resolve_server_ids(offers)
-            _cache["funpay"] = offers
-            _cache_version["funpay"] += 1
-            _last_update["funpay"] = datetime.now(timezone.utc)
-            logger.info("FunPay updated: %d offers", len(offers))
-            asyncio.create_task(_snapshot_all_servers())
-        except Exception:
+            if offers:
+                offers = [_normalize_funpay_offer(o) for o in offers]
+                offers = await _resolve_server_ids(offers)
+                _cache["funpay"] = offers
+                _cache_initialized["funpay"] = True
+                _cache_version["funpay"] += 1
+                _last_update["funpay"] = datetime.now(timezone.utc)
+                _last_error["funpay"] = None
+                logger.info("FunPay updated: %d offers", len(offers))
+                asyncio.create_task(_snapshot_all_servers())
+            elif _cache_initialized["funpay"]:
+                _last_error["funpay"] = "empty_result"
+                logger.warning(
+                    "funpay returned 0 offers — keeping %d cached",
+                    len(_cache["funpay"]),
+                )
+            else:
+                _last_error["funpay"] = "empty_cold_start"
+                logger.warning(
+                    "funpay returned 0 offers on cold start — cache remains empty",
+                )
+        except Exception as e:
+            _last_error["funpay"] = type(e).__name__
             logger.exception("FunPay parser failed")
         finally:
             _running["funpay"] = False
@@ -488,15 +545,30 @@ async def _run_g2g_loop() -> None:
         t0 = asyncio.get_running_loop().time()   # get_event_loop() is deprecated in 3.10+
         try:
             offers = await g2g_fetch()
-            offers = [_normalize_g2g_offer(o) for o in offers]
-            offers = await _resolve_server_ids(offers)
-            _cache["g2g"] = offers
-            _cache_version["g2g"] += 1
-            _last_update["g2g"] = datetime.now(timezone.utc)
-            elapsed = asyncio.get_running_loop().time() - t0
-            logger.info("G2G updated: %d offers in %.1fs", len(offers), elapsed)
-            asyncio.create_task(_snapshot_all_servers())
-        except Exception:
+            if offers:
+                offers = [_normalize_g2g_offer(o) for o in offers]
+                offers = await _resolve_server_ids(offers)
+                _cache["g2g"] = offers
+                _cache_initialized["g2g"] = True
+                _cache_version["g2g"] += 1
+                _last_update["g2g"] = datetime.now(timezone.utc)
+                _last_error["g2g"] = None
+                elapsed = asyncio.get_running_loop().time() - t0
+                logger.info("G2G updated: %d offers in %.1fs", len(offers), elapsed)
+                asyncio.create_task(_snapshot_all_servers())
+            elif _cache_initialized["g2g"]:
+                _last_error["g2g"] = "empty_result"
+                logger.warning(
+                    "g2g returned 0 offers — keeping %d cached",
+                    len(_cache["g2g"]),
+                )
+            else:
+                _last_error["g2g"] = "empty_cold_start"
+                logger.warning(
+                    "g2g returned 0 offers on cold start — cache remains empty",
+                )
+        except Exception as e:
+            _last_error["g2g"] = type(e).__name__
             logger.exception("G2G parser failed")
         finally:
             _running["g2g"] = False

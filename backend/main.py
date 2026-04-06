@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -18,6 +20,10 @@ for _httpx_logger_name in ("httpx", "httpcore"):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Ограничиваем пул потоков для asyncio.to_thread (парсеры HTML и т.п.).
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=4))
+
     # Запускаем независимые фоновые циклы FunPay и G2G.
     # Первые данные появятся через ~5-30 сек (G2G быстрее, FunPay дольше).
     await start_background_parsers()
@@ -30,11 +36,14 @@ async def lifespan(_app: FastAPI):
     yield
 
 
+_origins_raw = os.getenv("ALLOWED_ORIGINS", "https://gold-spot.vercel.app")
+_allowed_origins = [o.strip() for o in _origins_raw.split(",") if o.strip()]
+
 app = FastAPI(title="WoW Gold Market Analytics", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # временно
-    allow_credentials=True,
+    allow_origins=_allowed_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

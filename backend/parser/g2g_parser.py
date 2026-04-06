@@ -23,6 +23,54 @@ logger = logging.getLogger(__name__)
 SOURCE = "g2g"
 BASE = "https://sls.g2g.com"
 
+_MAX_HTTP_ATTEMPTS = 3
+
+
+def _parse_retry_after_seconds(value: str | None, default: int = 60) -> int:
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+async def _http_get_retry(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
+    """GET with retries: 429 → Retry-After backoff; 5xx → exponential backoff; 4xx no retry."""
+    for attempt in range(_MAX_HTTP_ATTEMPTS):
+        try:
+            resp = await client.get(url, **kwargs)
+            if resp.status_code == 429:
+                retry_after = _parse_retry_after_seconds(
+                    resp.headers.get("Retry-After"),
+                    60,
+                )
+                if attempt < _MAX_HTTP_ATTEMPTS - 1:
+                    logger.warning(
+                        "G2G 429 rate limited — backing off %ds",
+                        retry_after,
+                    )
+                    await asyncio.sleep(retry_after)
+                    continue
+            elif resp.status_code >= 500:
+                if attempt < _MAX_HTTP_ATTEMPTS - 1:
+                    await asyncio.sleep(2**attempt)
+                    continue
+            resp.raise_for_status()
+            return resp
+        except httpx.TimeoutException:
+            if attempt < _MAX_HTTP_ATTEMPTS - 1:
+                await asyncio.sleep(2**attempt)
+                continue
+            raise
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code >= 500 and attempt < _MAX_HTTP_ATTEMPTS - 1:
+                await asyncio.sleep(2**attempt)
+                continue
+            raise
+    raise RuntimeError("_http_get_retry: exhausted without response")
+
+
 # IMPORTANT: httpx при уровне INFO пишет "HTTP Request: ...", что забивает логи.
 # Оставляем логи в основном модуле, а сетевой "access log" глушим.
 for _httpx_logger_name in ("httpx", "httpcore"):
@@ -231,7 +279,8 @@ class G2GClient:
         if cache_key in self._region_cache:
             return self._region_cache[cache_key]
 
-        resp = await self._client.get(
+        resp = await _http_get_retry(
+            self._client,
             f"{BASE}/offer/keyword_relation/region",
             params={
                 "brand_id": brand_id,
@@ -239,7 +288,6 @@ class G2GClient:
                 "country": self.country,
             },
         )
-        resp.raise_for_status()
 
         payload = resp.json().get("payload", {})
         regions = [
@@ -273,7 +321,8 @@ class G2GClient:
             page = 1
             while True:
                 try:
-                    resp = await self._client.get(
+                    resp = await _http_get_retry(
+                        self._client,
                         f"{BASE}/offer/search",
                         params={
                             "brand_id":   brand_id,
@@ -286,7 +335,6 @@ class G2GClient:
                             "page_size":  48,
                         },
                     )
-                    resp.raise_for_status()
                     results = resp.json().get("payload", {}).get("results", [])
                 except Exception as e:
                     logger.warning(
@@ -329,7 +377,8 @@ class G2GClient:
 
         while page <= max_pages:
             try:
-                resp = await self._client.get(
+                resp = await _http_get_retry(
+                    self._client,
                     f"{BASE}/offer/search",
                     params={
                         "brand_id":        brand_id,
@@ -343,7 +392,6 @@ class G2GClient:
                         "page_size":       page_size,
                     },
                 )
-                resp.raise_for_status()
                 results = resp.json().get("payload", {}).get("results", [])
             except Exception as e:
                 logger.warning("G2G seller=%s page=%d error: %s", seller, page, e)
@@ -403,7 +451,8 @@ async def _discover_sellers(
     sellers: set[str] = set()
     for region in regions:
         try:
-            resp = await client._client.get(
+            resp = await _http_get_retry(
+                client._client,
                 f"{BASE}/offer/search",
                 params={
                     "brand_id":        brand_id,
@@ -417,7 +466,6 @@ async def _discover_sellers(
                     "page_size":       48,
                 },
             )
-            resp.raise_for_status()
             results = resp.json().get("payload", {}).get("results", [])
             for o in results:
                 u = (o.get("username") or "").strip()
@@ -499,11 +547,11 @@ async def discover_brand_ids(
     category_id: str = "3c2a9034-2569-4484-92ad-c00e384e7085",
 ) -> list[dict]:
     async with httpx.AsyncClient(headers=HEADERS, timeout=20) as c:
-        r = await c.get(
+        r = await _http_get_retry(
+            c,
             f"{BASE}/offer/category/{category_id}/popular_brand",
             params={"country": "SG"},
         )
-        r.raise_for_status()
         return r.json().get("payload", {}).get("results", [])
 
 

@@ -11,6 +11,7 @@ FunPay HTML-парсер офферов WoW Classic gold.
 Зависимости: httpx, beautifulsoup4.
 """
 
+import asyncio
 import logging
 import re
 import uuid
@@ -257,41 +258,14 @@ def _group_by_server(offers: list[Offer]) -> dict[str, list[Offer]]:
     return grouped
 
 
-# ── Публичная точка входа ────────────────────────────────────────────────────
-
-async def fetch_funpay_offers() -> list[Offer]:
+def _parse_html(html: str, fetched_at: datetime) -> list[Offer]:
     """
-    GET https://funpay.com/en/chips/114/
-    Парсит все .tc-item из полного HTML, группирует по серверу,
-    дедуплицирует по offer.id, возвращает flat list[Offer].
+    Синхронный разбор HTML (BeautifulSoup + DOM). Вызывать через asyncio.to_thread.
     """
-    fetched_at = datetime.now(timezone.utc)
-
-    # ── HTTP запрос ──────────────────────────────────────────────────────────
-    try:
-        async with httpx.AsyncClient(
-            headers=_HEADERS,
-            timeout=_TIMEOUT,
-            follow_redirects=True,
-        ) as client:
-            resp = await client.get(_URL)
-            resp.raise_for_status()
-            html = resp.text
-    except httpx.TimeoutException:
-        logger.error("FunPay: таймаут при запросе %s", _URL)
-        return []
-    except httpx.HTTPStatusError as exc:
-        logger.error("FunPay: HTTP %d при запросе %s", exc.response.status_code, _URL)
-        return []
-    except Exception as exc:
-        logger.error("FunPay: ошибка запроса — %s", exc, exc_info=True)
-        return []
-
     if not html or not html.strip():
         logger.warning("FunPay: получен пустой HTML")
         return []
 
-    # ── Парсинг HTML ─────────────────────────────────────────────────────────
     try:
         soup = BeautifulSoup(html, "html.parser")
     except Exception as exc:
@@ -303,7 +277,6 @@ async def fetch_funpay_offers() -> list[Offer]:
         logger.warning("FunPay: .tc-item не найдены в HTML — возможно изменилась вёрстка")
         return []
 
-    # ── Online-фильтр ────────────────────────────────────────────────────────
     online_items = [it for it in items if _is_online(it)]
     if not online_items:
         logger.warning(
@@ -314,7 +287,6 @@ async def fetch_funpay_offers() -> list[Offer]:
     logger.debug("FunPay: online=%d / total=%d", len(online_items), len(items))
     items = online_items
 
-    # ── Парсим офферы ────────────────────────────────────────────────────────
     raw_offers: list[Offer] = []
     for item in items:
         try:
@@ -324,10 +296,8 @@ async def fetch_funpay_offers() -> list[Offer]:
         except Exception as exc:
             logger.warning("FunPay: неожиданная ошибка — %s", exc, exc_info=True)
 
-    # ── Группировка по серверу ───────────────────────────────────────────────
     grouped = _group_by_server(raw_offers)
 
-    # ── Дедупликация по offer.id ─────────────────────────────────────────────
     seen: set[str] = set()
     unique: list[Offer] = []
     for server_offers in grouped.values():
@@ -338,6 +308,68 @@ async def fetch_funpay_offers() -> list[Offer]:
 
     logger.info("FunPay: servers=%d offers=%d", len(grouped), len(unique))
     return unique
+
+
+# ── Публичная точка входа ────────────────────────────────────────────────────
+
+async def fetch_funpay_offers() -> list[Offer]:
+    """
+    GET https://funpay.com/en/chips/114/
+    Парсит все .tc-item из полного HTML, группирует по серверу,
+    дедуплицирует по offer.id, возвращает flat list[Offer].
+    """
+    fetched_at = datetime.now(timezone.utc)
+    html = ""
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(
+                headers=_HEADERS,
+                timeout=_TIMEOUT,
+                follow_redirects=True,
+            ) as client:
+                resp = await client.get(_URL)
+                if resp.status_code == 429:
+                    ra = resp.headers.get("Retry-After", "60")
+                    try:
+                        retry_after = int(ra)
+                    except ValueError:
+                        retry_after = 60
+                    if attempt < 2:
+                        logger.warning(
+                            "FunPay 429 rate limited — backing off %ds",
+                            retry_after,
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
+                if resp.status_code >= 500:
+                    if attempt < 2:
+                        await asyncio.sleep(2**attempt)
+                        continue
+                resp.raise_for_status()
+                html = resp.text
+            break
+        except httpx.TimeoutException:
+            if attempt < 2:
+                await asyncio.sleep(2**attempt)
+                continue
+            logger.error("FunPay: таймаут при запросе %s", _URL)
+            return []
+        except httpx.HTTPStatusError as exc:
+            sc = exc.response.status_code
+            if sc >= 500 and attempt < 2:
+                await asyncio.sleep(2**attempt)
+                continue
+            logger.error("FunPay: HTTP %d при запросе %s", sc, _URL)
+            return []
+        except Exception as exc:
+            logger.error("FunPay: ошибка запроса — %s", exc, exc_info=True)
+            return []
+
+    if not html:
+        return []
+
+    return await asyncio.to_thread(_parse_html, html, fetched_at)
 
 
 async def fetch_offers() -> list[Offer]:

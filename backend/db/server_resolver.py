@@ -18,7 +18,6 @@ without restarting the server.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import time
@@ -31,6 +30,35 @@ logger = logging.getLogger(__name__)
 _alias_cache:     dict[str, int] = {}
 _cache_loaded_at: float = 0.0
 _CACHE_TTL        = 60.0   # seconds
+
+# Batch alias lookup cache: per-entry TTL (no global flush — safe under concurrent batches)
+_BATCH_MISS = object()
+_batch_ttl_cache: dict[str, tuple[int, float]] = {}  # lower(alias) -> (server_id, expires_at mono)
+_BATCH_ENTRY_TTL = 300.0
+_BATCH_ENTRY_MAX = 500
+
+
+def _batch_cache_get(lo: str):
+    entry = _batch_ttl_cache.get(lo)
+    if entry is None:
+        return _BATCH_MISS
+    server_id, expires_at = entry
+    if time.monotonic() > expires_at:
+        del _batch_ttl_cache[lo]
+        return _BATCH_MISS
+    return server_id
+
+
+def _batch_cache_set(lo: str, server_id: int) -> None:
+    if len(_batch_ttl_cache) >= _BATCH_ENTRY_MAX:
+        n = max(1, _BATCH_ENTRY_MAX // 10)
+        oldest = sorted(
+            _batch_ttl_cache.items(),
+            key=lambda x: x[1][1],
+        )[:n]
+        for k, _ in oldest:
+            del _batch_ttl_cache[k]
+    _batch_ttl_cache[lo] = (server_id, time.monotonic() + _BATCH_ENTRY_TTL)
 
 # ── Unresolved registry (for /admin/unresolved-servers) ──────────────────────
 # {raw_title: {"source": str, "first_seen": float, "count": int}}
@@ -88,6 +116,60 @@ async def _ensure_cache(pool) -> None:
     now = time.monotonic()
     if now - _cache_loaded_at > _CACHE_TTL:
         await _load_alias_cache(pool)
+
+
+async def resolve_server_batch(
+    pool,
+    keys: list[tuple[str, str]],
+) -> dict[str, int]:
+    """
+    Resolve many aliases with one DB round-trip (WHERE LOWER(alias) = ANY($1)).
+
+    keys: list of (raw_alias, source) — source is ignored for SQL; kept for API symmetry.
+    Returns: mapping lower(alias) -> server_id for hits only.
+
+    In-process cache: per-entry TTL (_BATCH_ENTRY_TTL), max _BATCH_ENTRY_MAX keys.
+    Merges hits into _alias_cache for resolve_server().
+    """
+    if not pool or not keys:
+        return {}
+
+    lowers_unique: list[str] = []
+    seen_lo: set[str] = set()
+    for raw, _src in keys:
+        lo = (raw or "").lower().strip()
+        if not lo or lo in seen_lo:
+            continue
+        seen_lo.add(lo)
+        lowers_unique.append(lo)
+
+    need_fetch = [lo for lo in lowers_unique if _batch_cache_get(lo) is _BATCH_MISS]
+    if need_fetch:
+        try:
+            rows = await pool.fetch(
+                """
+                SELECT LOWER(alias) AS la, server_id
+                FROM server_aliases
+                WHERE LOWER(alias) = ANY($1::text[])
+                """,
+                need_fetch,
+            )
+            for r in rows:
+                la = r["la"]
+                sid = r["server_id"]
+                _batch_cache_set(la, sid)
+                _alias_cache[la] = sid
+            # Aliases queried but absent in DB: short TTL negative cache would go here;
+            # omitted — uncached misses go to DB each batch until alias is added.
+        except Exception:
+            logger.exception("server_resolver: resolve_server_batch DB query failed")
+
+    out: dict[str, int] = {}
+    for lo in lowers_unique:
+        hit = _batch_cache_get(lo)
+        if hit is not _BATCH_MISS:
+            out[lo] = hit
+    return out
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

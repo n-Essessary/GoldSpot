@@ -14,7 +14,10 @@ New endpoints (refactor):
   GET /price-index        — current index for all active servers (per real server)
   GET /admin/unresolved-servers — titles that couldn't be mapped to a canonical server
 """
-from fastapi import APIRouter, HTTPException, Query
+import os
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Security
+from fastapi.security import APIKeyHeader
 
 from api.schemas import (
     MetaResponse,
@@ -37,6 +40,14 @@ from service.offers_service import (
 )
 
 router = APIRouter()
+
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+api_key_header = APIKeyHeader(name="X-Admin-Key", auto_error=False)
+
+
+async def require_admin_key(key: str | None = Security(api_key_header)) -> None:
+    if not ADMIN_API_KEY or key != ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 
 # ── Data version ──────────────────────────────────────────────────────────────
@@ -273,7 +284,7 @@ async def get_index_price(
 
 # ── Admin: unresolved server titles (Task 3) ──────────────────────────────────
 
-@router.get("/admin/unresolved-servers")
+@router.get("/admin/unresolved-servers", dependencies=[Depends(require_admin_key)])
 async def get_unresolved_servers():
     """
     Admin endpoint: list all offer titles that couldn't be mapped to a
@@ -301,7 +312,7 @@ async def get_unresolved_servers():
     }
 
 
-@router.post("/admin/register-alias")
+@router.post("/admin/register-alias", dependencies=[Depends(require_admin_key)])
 async def register_alias(
     alias:     str = Query(..., description="Raw title to register as alias"),
     server_id: int = Query(..., description="Target server ID from servers table"),
