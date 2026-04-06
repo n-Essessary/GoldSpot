@@ -159,6 +159,25 @@ class TestWriterIntervalFix(unittest.TestCase):
         self.assertIn("timedelta(hours=last_hours)", source,
             "timedelta(hours=last_hours) отсутствует — фикс не применён!")
 
+    def test_sql_keeps_interval_cast(self):
+        """
+        $2::INTERVAL ДОЛЖЕН остаться в SQL.
+
+        Без ::INTERVAL PostgreSQL при prepare не может однозначно определить
+        тип $2 в выражении NOW() - $2.
+        Он предпочитает оператор timestamp - timestamp = interval, поэтому
+        RIGHT часть оператора > получает тип interval, а НЕ timestamp.
+        Результат: «operator does not exist: timestamp with time zone > interval».
+
+        Правило: timedelta как Python-объект + ::INTERVAL в SQL = единственно
+        корректная комбинация для asyncpg + PostgreSQL.
+        """
+        import inspect
+        from db import writer as w
+        source = inspect.getsource(w.query_index_history)
+        self.assertIn("$2::INTERVAL", source,
+            "$2::INTERVAL отсутствует в SQL — PostgreSQL не сможет вывести тип и упадёт!")
+
     def test_timedelta_imported_in_writer(self):
         """db.writer должен импортировать timedelta."""
         from db import writer as w
