@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import random
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -25,22 +25,19 @@ logger = logging.getLogger(__name__)
 _cache:         dict[str, list[Offer]]        = {"funpay": [], "g2g": []}
 _last_update:   dict[str, Optional[datetime]] = {"funpay": None, "g2g": None}
 _running:       dict[str, bool]               = {"funpay": False, "g2g": False}
-# Monotonically-increasing counter, incremented on every cache update.
-# Frontend can detect new data even when the wall-clock timestamp hasn't changed.
+# Monotonically-increasing counter — frontend detects updates even if timestamp unchanged
 _cache_version: dict[str, int]               = {"funpay": 0, "g2g": 0}
 
 FUNPAY_INTERVAL = 60   # пауза между циклами FunPay (секунд)
 G2G_INTERVAL    = 30   # пауза после завершения G2G-цикла
 
-# ── Аналитика ─────────────────────────────────────────────────────────────────
-_LIQUIDITY_THRESHOLD = 1_000_000
-_MIN_OFFERS          = 5
-OUTLIER_TRIM_PCT     = 0.05
-MIN_PRICE_PER_1K     = 0.10
-_TRIM_MIN_SAMPLE     = 10
+# ── Аналитика — константы ─────────────────────────────────────────────────────
+_OUTLIER_MULTIPLIER  = 3.0       # цены > median * 3 — выброс, отбрасываем
+_MIN_LIQUID_GOLD     = 50_000    # порог ликвидности для best_ask
+_VWAP_GOLD_CAP       = 1_000_000 # лимит накопления объёма для VWAP
+_MIN_OFFERS          = 2         # минимум офферов для расчёта индекса
 
 # Канонические имена версий (применять ко всем источникам перед записью в кэш).
-# "Seasonal" (G2G) и "Season of Discovery" (FunPay) — один и тот же контент.
 _VERSION_ALIASES: dict[str, str] = {
     "seasonal":            "Season of Discovery",
     "season of discovery": "Season of Discovery",
@@ -51,13 +48,30 @@ _VERSION_ALIASES: dict[str, str] = {
 }
 
 # Порядок отображения групп в сайдбаре (меньше = выше).
-# "Seasonal" удалён — после нормализации его не будет.
 _VERSION_ORDER: dict[str, int] = {
     "Anniversary":         0,
     "Season of Discovery": 1,
     "Classic Era":         2,
     "Classic":             3,
 }
+
+
+# ── IndexPrice ────────────────────────────────────────────────────────────────
+
+@dataclass
+class IndexPrice:
+    index_price:  float        # VW-Median — основная линия графика
+    vwap:         float        # Volume-Weighted Avg Price — вторая линия
+    best_ask:     float        # минимальная цена с ликвидностью >= 50k gold
+    price_min:    float        # абсолютный минимум (после фильтра выбросов)
+    price_max:    float        # абсолютный максимум (после фильтра выбросов)
+    offer_count:  int
+    total_volume: int
+    sources:      list[str]    # ['funpay', 'g2g', ...]
+
+
+# In-memory кэш индексных цен: key = "display_server::faction"
+_index_cache: dict[str, IndexPrice] = {}
 
 
 # ── Утилиты ───────────────────────────────────────────────────────────────────
@@ -149,24 +163,136 @@ def get_parser_status() -> dict:
     }
 
 
+# ── Индексная цена ─────────────────────────────────────────────────────────────
+
+def compute_index_price(offers: list[Offer]) -> IndexPrice | None:
+    """
+    Трёхкомпонентный индекс цены (биржевой подход).
+
+    index_price = Volume-Weighted Median:
+        Цена при которой 50% суммарного объёма — ниже неё.
+        Устойчива к выбросам: один продавец с огромным объёмом
+        не перекашивает результат.
+
+    vwap = Volume-Weighted Average Price по топ-офферам до 1M gold:
+        Аналог TradingView VWAP. Учитывает ликвидность.
+
+    best_ask = минимальная цена при которой накоплено >= 50k gold:
+        "Реально достижимая цена для покупателя прямо сейчас."
+    """
+    if not offers or len(offers) < _MIN_OFFERS:
+        return None
+
+    # Шаг 1: фильтр выбросов (цены > median * 3)
+    prices_sorted = sorted(o.price_per_1k for o in offers)
+    raw_median = prices_sorted[len(prices_sorted) // 2]
+    clean = [
+        o for o in offers
+        if o.price_per_1k <= raw_median * _OUTLIER_MULTIPLIER and o.price_per_1k > 0
+    ]
+    if len(clean) < _MIN_OFFERS:
+        clean = [o for o in offers if o.price_per_1k > 0]
+    if not clean:
+        return None
+
+    clean.sort(key=lambda o: o.price_per_1k)
+
+    # Шаг 2: VW-Median
+    total_vol = sum(o.amount_gold for o in clean)
+    cumulative, vw_median = 0, clean[0].price_per_1k
+    for o in clean:
+        cumulative += o.amount_gold
+        if cumulative >= total_vol * 0.5:
+            vw_median = o.price_per_1k
+            break
+
+    # Шаг 3: VWAP по топ-офферам до 1M gold
+    selected, acc = [], 0
+    for o in clean:
+        selected.append(o)
+        acc += o.amount_gold
+        if acc >= _VWAP_GOLD_CAP:
+            break
+    total_w = sum(o.amount_gold for o in selected)
+    vwap = (
+        sum(o.price_per_1k * o.amount_gold for o in selected) / total_w
+        if total_w else clean[0].price_per_1k
+    )
+
+    # Шаг 4: best_ask — первая цена с накопленным объёмом >= 50k
+    acc_ask = 0
+    best_ask = clean[0].price_per_1k
+    for o in clean:
+        acc_ask += o.amount_gold
+        best_ask = o.price_per_1k
+        if acc_ask >= _MIN_LIQUID_GOLD:
+            break
+
+    return IndexPrice(
+        index_price  = round(vw_median, 4),
+        vwap         = round(vwap, 4),
+        best_ask     = round(best_ask, 4),
+        price_min    = round(clean[0].price_per_1k, 4),
+        price_max    = round(clean[-1].price_per_1k, 4),
+        offer_count  = len(clean),
+        total_volume = total_vol,
+        sources      = sorted({o.source for o in clean}),
+    )
+
+
+# ── Фоновые снимки ────────────────────────────────────────────────────────────
+
+async def _snapshot_all_servers() -> None:
+    """
+    Вычисляет IndexPrice для всех server+faction комбинаций
+    из текущего объединённого кэша, записывает в БД и обновляет _index_cache.
+    Вызывается после каждого обновления парсера (non-blocking create_task).
+    """
+    from db.writer import write_index_snapshot
+    ts = datetime.now(timezone.utc)
+    all_offers = get_all_offers()
+
+    # Группируем: (display_server, faction) + (display_server, "All")
+    groups: dict[tuple[str, str], list[Offer]] = {}
+    for o in all_offers:
+        ds = o.display_server
+        if not ds:
+            continue
+        # По фракции
+        key = (ds, o.faction)
+        groups.setdefault(key, []).append(o)
+        # Агрегат All
+        key_all = (ds, "All")
+        groups.setdefault(key_all, []).append(o)
+
+    tasks = []
+    for (server, faction), offers in groups.items():
+        idx = compute_index_price(offers)
+        if idx is not None:
+            _index_cache[f"{server}::{faction}"] = idx
+            tasks.append(write_index_snapshot(server, faction, idx, ts))
+
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 # ── Фоновые циклы ─────────────────────────────────────────────────────────────
 
 async def _run_funpay_loop() -> None:
     from parser.funpay_parser import fetch_offers as fp_fetch
-    from db.writer import write_snapshots
 
     while True:
         _running["funpay"] = True
         try:
             offers = await fp_fetch()
             offers = [_normalize_funpay_offer(o) for o in offers]
-            # Atomic cache update + version bump
+            # Атомарное обновление кэша + версии
             _cache["funpay"] = offers
             _cache_version["funpay"] += 1
             _last_update["funpay"] = datetime.now(timezone.utc)
             logger.info("FunPay updated: %d offers", len(offers))
-            # Non-blocking DB write — failures are logged but never crash the loop
-            asyncio.create_task(write_snapshots(offers))
+            # Non-blocking: снимки индексов + запись в БД
+            asyncio.create_task(_snapshot_all_servers())
         except Exception:
             logger.exception("FunPay parser failed")
         finally:
@@ -179,7 +305,6 @@ async def _run_funpay_loop() -> None:
 
 async def _run_g2g_loop() -> None:
     from parser.g2g_parser import fetch_offers as g2g_fetch
-    from db.writer import write_snapshots
 
     while True:
         _running["g2g"] = True
@@ -187,14 +312,14 @@ async def _run_g2g_loop() -> None:
         try:
             offers = await g2g_fetch()
             offers = [_normalize_g2g_offer(o) for o in offers]
-            # Atomic cache update + version bump
+            # Атомарное обновление кэша + версии
             _cache["g2g"] = offers
             _cache_version["g2g"] += 1
             _last_update["g2g"] = datetime.now(timezone.utc)
             elapsed = asyncio.get_event_loop().time() - t0
             logger.info("G2G updated: %d offers in %.1fs", len(offers), elapsed)
-            # Non-blocking DB write — failures are logged but never crash the loop
-            asyncio.create_task(write_snapshots(offers))
+            # Non-blocking: снимки индексов + запись в БД
+            asyncio.create_task(_snapshot_all_servers())
         except Exception:
             logger.exception("G2G parser failed")
         finally:
@@ -217,37 +342,12 @@ def get_meta() -> Optional[datetime]:
     return max(updates) if updates else None
 
 
-def compute_index_price(
-    offers: list[Offer],
-) -> tuple[float, float, float] | None:
-    if not offers:
-        return None
-
-    sorted_offers = sorted(offers, key=lambda o: o.price_per_1k)
-
-    if len(sorted_offers) < _MIN_OFFERS:
-        selected = sorted_offers
-    else:
-        selected = []
-        accumulated = 0
-        for offer in sorted_offers:
-            selected.append(offer)
-            accumulated += offer.amount_gold
-            if accumulated >= _LIQUIDITY_THRESHOLD:
-                break
-
-    prices = [o.price_per_1k for o in selected]
-    index_price = round(sum(prices) / len(prices), 4)
-    min_price   = round(min(prices), 4)
-    max_price   = round(max(prices), 4)
-    return index_price, min_price, max_price
-
-
 def get_price_history(
     server: str = "all",
     faction: str = "all",
     last: int = 50,
 ) -> list[PriceHistoryPoint]:
+    """Текущий снимок из in-memory кэша — для обратной совместимости /price-history."""
     offers = get_all_offers()
 
     if server != "all":
@@ -259,14 +359,13 @@ def get_price_history(
     if result is None:
         return []
 
-    index_price, min_price, max_price = result
     return [
         PriceHistoryPoint(
             timestamp=datetime.now(timezone.utc),
-            price=index_price,
-            min=min_price,
-            max=max_price,
-            count=len(offers),
+            price=result.index_price,
+            min=result.price_min,
+            max=result.price_max,
+            count=result.offer_count,
         )
     ]
 
@@ -275,25 +374,32 @@ def get_servers() -> list[ServerGroup]:
     """
     Иерархический список групп серверов.
 
-    Сортировка: версия (Anniversary=0 … SoD=4), затем min_price ASC.
-    Реалмы: только непустые server_name (G2G), алфавитная сортировка.
+    min_price = best_ask из _index_cache (честная цена покупки).
+    Fallback на простой min по офферам если кэш ещё не заполнен.
+
+    Сортировка: версия (Anniversary=0 … Classic=3), затем min_price ASC.
     """
-    group_min_price: dict[str, float]     = {}
-    group_realms:    dict[str, set[str]]  = {}
+    group_min_price: dict[str, float]    = {}
+    group_realms:    dict[str, set[str]] = {}
 
     for offer in get_all_offers():
         ds = offer.display_server
         if not ds:
             continue
-
+        # Реалмы
+        group_realms.setdefault(ds, set())
+        if offer.server_name:
+            group_realms[ds].add(offer.server_name)
+        # Fallback min_price — если кэш ещё не готов
         cur = group_min_price.get(ds)
         if cur is None or offer.price_per_1k < cur:
             group_min_price[ds] = offer.price_per_1k
 
-        if ds not in group_realms:
-            group_realms[ds] = set()
-        if offer.server_name:
-            group_realms[ds].add(offer.server_name)
+    # Перекрываем fallback значениями из _index_cache (best_ask)
+    for ds in group_min_price:
+        cached = _index_cache.get(f"{ds}::All") or _index_cache.get(f"{ds}::Horde")
+        if cached is not None:
+            group_min_price[ds] = cached.best_ask
 
     sorted_groups = sorted(
         group_min_price,

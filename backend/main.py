@@ -16,35 +16,17 @@ for _httpx_logger_name in ("httpx", "httpcore"):
     logging.getLogger(_httpx_logger_name).setLevel(logging.WARNING)
 
 
-async def _cleanup_old_snapshots() -> None:
-    """
-    Daily task: deletes price_snapshots older than 1 year.
-    Runs only when DATABASE_URL is set. Failures are logged but non-fatal.
-    """
-    while True:
-        await asyncio.sleep(86400)  # run once per day
-        try:
-            from db.writer import get_pool
-            pool = await get_pool()
-            deleted = await pool.fetchval(
-                "DELETE FROM price_snapshots "
-                "WHERE ts < NOW() - INTERVAL '1 year' "
-                "RETURNING COUNT(*)"
-            )
-            logger.info("DB cleanup: deleted %s old snapshots", deleted)
-        except RuntimeError:
-            pass  # DATABASE_URL not set — DB feature disabled
-        except Exception:
-            logger.exception("DB cleanup failed")
-
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # Запускаем независимые фоновые циклы FunPay и G2G.
-    # create_task внутри start_background_parsers — не блокирует старт сервера.
     # Первые данные появятся через ~5-30 сек (G2G быстрее, FunPay дольше).
     await start_background_parsers()
-    asyncio.create_task(_cleanup_old_snapshots())
+
+    # Ежесуточная очистка снимков старше 1 года.
+    # Безопасен: если DATABASE_URL не задан — просто спит.
+    from db.writer import cleanup_old_snapshots
+    asyncio.create_task(cleanup_old_snapshots())
+
     yield
 
 

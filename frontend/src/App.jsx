@@ -140,7 +140,6 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
           <PriceChart
             refreshSignal={lastFetched}
             serverSlug={filters.server || 'all'}
-            factionSlug={filters.faction || 'all'}
           />
 
           <main className={styles.main}>

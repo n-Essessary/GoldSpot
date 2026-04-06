@@ -1,57 +1,56 @@
-.wrapper {
-  padding: 0 0 8px;
-}
+.wrapper { padding: 0 0 4px; }
 
 .controls {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 0 8px;
+  padding: 0 0 6px;
   flex-wrap: wrap;
 }
 
-.btnGroup {
-  display: flex;
-  gap: 2px;
-}
+.group { display: flex; gap: 2px; }
 
 .btn {
-  padding: 3px 8px;
+  padding: 3px 9px;
   font-size: 11px;
   border-radius: 4px;
-  border: 1px solid var(--color-border-secondary, var(--border, rgba(156, 154, 146, 0.2)));
+  border: 1px solid var(--color-border-secondary, var(--border, rgba(156,154,146,.2)));
   background: transparent;
-  color: var(--color-text-secondary, var(--text-secondary, rgba(156, 154, 146, 0.8)));
+  color: var(--color-text-secondary, var(--text-secondary, rgba(156,154,146,.8)));
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all .15s;
   font-family: var(--font-mono);
 }
+.btn:hover { background: var(--color-background-secondary, var(--bg-surface, rgba(156,154,146,.06))); }
 
-.btn:hover {
-  background: var(--color-background-secondary, var(--bg-surface, rgba(156, 154, 146, 0.06)));
-}
-
-.btnActive {
+.active {
   composes: btn;
-  background: var(--color-background-secondary, var(--bg-surface, rgba(156, 154, 146, 0.1)));
+  background: var(--color-background-secondary, var(--bg-surface, rgba(156,154,146,.1)));
   color: var(--color-text-primary, #e5e7eb);
-  border-color: var(--color-border-primary, var(--border, rgba(156, 154, 146, 0.4)));
+  border-color: var(--color-border-primary, var(--border, rgba(156,154,146,.4)));
 }
 
-.chart {
-  width: 100%;
-}
+.chart { width: 100%; }
 
 .hint {
   font-size: 11px;
   font-family: var(--font-mono);
-  color: var(--color-text-tertiary, var(--text-muted, rgba(156, 154, 146, 0.5)));
+  color: var(--color-text-tertiary, var(--text-muted, rgba(156,154,146,.5)));
+}
+
+.sources {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--color-text-tertiary, var(--text-muted, rgba(156,154,146,.45)));
+  margin-left: auto;
+  text-transform: uppercase;
+  letter-spacing: .04em;
 }
 
 .empty {
   text-align: center;
   font-size: 12px;
   font-family: var(--font-mono);
-  color: var(--color-text-tertiary, var(--text-muted, rgba(156, 154, 146, 0.5)));
+  color: var(--color-text-tertiary, var(--text-muted, rgba(156,154,146,.5)));
   padding: 16px 0;
 }
