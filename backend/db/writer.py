@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -136,8 +136,8 @@ async def query_index_history(
     # Нормализуем faction к значению БД
     faction_db = _faction_to_db(faction)
 
-    conditions = ["server = $1", "ts > NOW() - $2::INTERVAL", "faction = $3"]
-    params: list = [server, f"{last_hours} hours", faction_db]
+    conditions = ["server = $1", "ts > NOW() - $2", "faction = $3"]
+    params: list = [server, timedelta(hours=last_hours), faction_db]
     where = " AND ".join(conditions)
 
     try:
