@@ -314,7 +314,7 @@ async def query_index_history(
                 SUM(offer_count)                                 AS offer_count,
                 ARRAY(
                     SELECT DISTINCT s
-                    FROM unnest(array_agg(sources)) AS s
+                    FROM unnest(array_agg(sources) FILTER (WHERE sources IS NOT NULL)) AS s
                     WHERE s IS NOT NULL
                 )                                                AS sources
             FROM price_index_snapshots
