@@ -96,6 +96,19 @@ def _faction_to_db(faction: str) -> str:
     return faction.capitalize()
 
 
+def _flatten_param(value):
+    """Defensive param normalizer: ensure list-like values are 1D."""
+    if isinstance(value, (list, tuple, set)):
+        flat: list = []
+        for item in value:
+            if isinstance(item, (list, tuple, set)):
+                flat.extend(list(item))
+            else:
+                flat.append(item)
+        return flat
+    return value
+
+
 # ── Legacy: group-level index snapshot ───────────────────────────────────────
 
 async def write_index_snapshot(
@@ -295,6 +308,7 @@ async def query_index_history(
     faction_db = _faction_to_db(faction)
     conditions = ["server = $1", "ts > NOW() - $2::INTERVAL", "faction = $3"]
     params: list = [server, timedelta(hours=last_hours), faction_db]
+    params = [_flatten_param(p) for p in params]
     where = " AND ".join(conditions)
 
     try:
@@ -314,8 +328,16 @@ async def query_index_history(
                 SUM(offer_count)                                 AS offer_count,
                 ARRAY(
                     SELECT DISTINCT s
-                    FROM unnest(array_agg(sources) FILTER (WHERE sources IS NOT NULL)) AS s
-                    WHERE s IS NOT NULL
+                    FROM price_index_snapshots p2
+                    CROSS JOIN LATERAL unnest(COALESCE(p2.sources, ARRAY[]::text[])) AS s
+                    WHERE p2.server = $1
+                      AND p2.ts > NOW() - $2::INTERVAL
+                      AND p2.faction = $3
+                      AND (
+                        date_trunc('minute', p2.ts)
+                            - (EXTRACT(MINUTE FROM p2.ts)::int % {bucket_minutes})
+                            * INTERVAL '1 minute'
+                      ) = bucket
                 )                                                AS sources
             FROM price_index_snapshots
             WHERE {where}
