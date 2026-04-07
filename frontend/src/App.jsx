@@ -100,6 +100,9 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
     lastFetched,
   } = useOffers(initialServer, initialRealm)
 
+  // Per-1 / Per-1K price unit toggle (client-side display only)
+  const [showPer1, setShowPer1] = useState(false)
+
   return (
     <div className={styles.layout}>
       {/* ── Шапка ─────────────────────────────────────────── */}
@@ -125,6 +128,8 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
               filters={filters}
               setFilters={setFilters}
               disabled={loading}
+              showPer1={showPer1}
+              onTogglePer1={() => setShowPer1(v => !v)}
             />
           </div>
 
@@ -136,7 +141,7 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
             />
           </div>
 
-          <StatsBar offers={filteredOffers} loading={loading} />
+          <StatsBar offers={filteredOffers} loading={loading} showPer1={showPer1} />
           <PriceChart
             refreshSignal={lastFetched}
             serverSlug={filters.server || 'all'}
@@ -148,6 +153,7 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
               loading={loading}
               error={error}
               currentServer={filters.server}
+              showPer1={showPer1}
             />
           </main>
         </div>

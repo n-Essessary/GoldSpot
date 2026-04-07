@@ -41,7 +41,8 @@ class Offer(BaseModel):
       so DB writers always have a raw value to store.
     """
     id: str
-    source: str
+    # TODO(I6): keep strict source enum for all parsers; expand only with explicit new source rollout.
+    source: Literal["funpay", "g2g"]
     server: str           # slug, always lowercase: "(eu) anniversary"
     display_server: str = ""    # group: "(EU) Anniversary"; set by parser
     server_name: str = ""       # realm inside group: "Spineshatter" (G2G)

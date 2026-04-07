@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from api.schemas import Offer, PriceHistoryPoint, ServerGroup
+from utils.version_utils import _VERSION_ALIASES, _canonicalize_version
 
 logger = logging.getLogger(__name__)
 
@@ -69,16 +70,6 @@ _INDEX_TOP_N         = 10   # Task 4: top-N cheapest offers for server index
 _SNAP_WRITE_THRESHOLD = 0.005   # 0.5%
 # Per-offer last-written price: offer_id → last raw_price written to DB
 _last_snap_price: dict[str, float] = {}
-
-# ── Version aliases ───────────────────────────────────────────────────────────
-_VERSION_ALIASES: dict[str, str] = {
-    "seasonal":            "Season of Discovery",
-    "season of discovery": "Season of Discovery",
-    "sod":                 "Season of Discovery",
-    "anniversary":         "Anniversary",
-    "classic era":         "Classic Era",
-    "classic":             "Classic",
-}
 
 _VERSION_ORDER: dict[str, int] = {
     "Anniversary":         0,
@@ -143,10 +134,6 @@ def get_quarantine() -> list[dict]:
     return list(reversed(_quarantine))
 
 
-def _canonicalize_version(version: str) -> str:
-    return _VERSION_ALIASES.get(version.lower().strip(), version)
-
-
 def _detect_version(text: str) -> str:
     t = _clean(text)
     if "season of discovery" in t or re.search(r"\bsod\b|\bseasonal\b", t):
@@ -191,7 +178,7 @@ def _normalize_g2g_offer(offer: Offer) -> Offer:
         region  = m.group("region").upper()
         version = _canonicalize_version(m.group("version").strip())
         offer.display_server = f"({region}) {version}"
-        offer.server         = offer.display_server
+        offer.server         = offer.display_server.lower()
     return offer
 
 
@@ -539,6 +526,7 @@ async def _run_g2g_loop() -> None:
                 from db.writer import get_pool
                 pool = await get_pool()
                 offers, quarantined = await normalize_offer_batch(raw_offers, pool)
+                # TODO(I3): include seller_count from parser once g2g_fetch returns meta.
 
                 _add_to_quarantine(quarantined)
                 if quarantined:
@@ -633,7 +621,7 @@ def get_servers() -> list[ServerGroup]:
 
     for offer in get_all_offers():
         ds = offer.display_server
-        if not ds:
+        if not ds or offer.price_per_1k <= 0:
             continue
         group_realms.setdefault(ds, set())
         if offer.server_name:

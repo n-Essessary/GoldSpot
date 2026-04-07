@@ -218,6 +218,17 @@ def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
     lot_price = _parse_float(raw_price_text)
     if lot_price is None or lot_price <= 0:
         raise ValueError(f".tc-price not recognised: {raw_price_text!r}")
+    if lot_price <= 0.001:
+        raise ValueError(f"near-zero lot price: {lot_price!r}")
+
+    # Guard: derived price_per_1k must be positive.
+    # round(..., 6) can collapse a near-zero float to 0.0 → shows as $0.00 in UI.
+    price_per_1k_preview = round(lot_price / max(amount_gold, 1) * 1000.0, 6)
+    if price_per_1k_preview <= 0:
+        raise ValueError(
+            f"near-zero derived price_per_1k={price_per_1k_preview!r} "
+            f"lot_price={lot_price!r} amount_gold={amount_gold!r}"
+        )
 
     href = _attr(item, "href")
     offer_url: str | None = None

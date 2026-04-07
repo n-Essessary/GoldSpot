@@ -46,10 +46,11 @@
 .row.best td:first-child    { box-shadow: inset 3px 0 0 var(--accent); }
 .row.best .price            { color: var(--accent); font-weight: 500; }
 
-/* Топ-2/3: мягкая подсветка */
-.row.top3 td                { background: rgba(0, 255, 157, 0.025); }
-.row.top3:hover td          { background: rgba(0, 255, 157, 0.06); }
-.row.top3 .price            { color: rgba(0, 255, 157, 0.75); }
+/* Топ-5 кросс-платформенная подсветка: 2 лучших FunPay + 2 лучших G2G + cheapest overall */
+.row.top5 td                { background: rgba(240, 180, 41, 0.045); }
+.row.top5:hover td          { background: rgba(240, 180, 41, 0.09); }
+.row.top5 td:first-child    { box-shadow: inset 3px 0 0 #f0b429; }
+.row.top5 .price            { color: #f0b429; }
 
 /* ── Колонки ─────────────────────────────────────────────── */
 .right     { text-align: right; }

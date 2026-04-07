@@ -13,10 +13,12 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 
 from api.schemas import Offer
+from utils.version_utils import _canonicalize_version
 
 logger = logging.getLogger(__name__)
 
@@ -111,17 +113,17 @@ def _build_offer_url(
     Строит рабочую ссылку на страницу группы офферов G2G для конкретного сервера+фракции.
 
     Приоритет: fa={col_id}:{dat_id} из offer_attributes[0] → прямая ссылка на
-    конкретный сервер с sort=lowest_price. Fallback на /offer/{offer_id} только
-    если offer_attributes пустой.
+    конкретный сервер. Двоеточие URL-энкодируется как %3A (требование G2G).
+    Fallback на /offer/{offer_id} только если offer_attributes пустой.
     """
     if offer_attributes:
         col_id = offer_attributes[0].get("collection_id", "")
         dat_id = offer_attributes[0].get("dataset_id", "")
         if col_id and dat_id:
-            fa = f"{col_id}:{dat_id}"
+            fa = quote(f"{col_id}:{dat_id}", safe="")
             return (
                 f"https://www.g2g.com/categories/{game_slug}/offer/group"
-                f"?fa={fa}&region_id={region_id}&sort=lowest_price"
+                f"?fa={fa}&region_id={region_id}"
             )
     if offer_id:
         return f"https://www.g2g.com/offer/{offer_id}"
@@ -149,7 +151,6 @@ _VERSION_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("Classic Era",         re.compile(r"classic\s+era",                         re.I)),
     ("Classic",             re.compile(r"\bclassic\b",                           re.I)),
 ]
-
 
 @dataclass
 class G2GOffer:
@@ -418,7 +419,11 @@ class G2GClient:
                         seller=(o.get("username") or "").strip(),
                         brand_id=o.get("brand_id", brand_id),
                         service_id=o.get("service_id", service_id),
-                        offer_url=(f"https://www.g2g.com/offer/{offer_id}" if offer_id else ""),
+                        offer_url=_build_offer_url(
+                            offer_id=offer_id,
+                            offer_attributes=o.get("offer_attributes") or [],
+                            region_id=o.get("region_id", ""),
+                        ),
                         offer_group=o.get("offer_group", ""),
                         raw=o,
                     ))
@@ -558,7 +563,11 @@ async def discover_brand_ids(
 _MAX_PRICE_PER_1K = 300.0  # Hard ceiling: above this is anomalous, skip
 
 
-def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
+def _to_offer(
+    raw: G2GOffer,
+    fetched_at: datetime,
+    skip_qty_check: bool = False,
+) -> Optional[Offer]:
     """Convert G2GOffer → Offer using raw price (unit_price_in_usd = per 1 gold).
 
     Task 2: parsers always return raw price, NEVER compute price_per_1k.
@@ -574,7 +583,11 @@ def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
     if raw.price_usd * 1000.0 > _MAX_PRICE_PER_1K:
         return None
 
+    if raw.available_qty <= 0 and not skip_qty_check:
+        return None
+
     server_name, region, version, faction = _parse_title(raw.title)
+    version = _canonicalize_version(version) if version else version
     # Build display_server: "(EU) Version"
     # If neither region nor version can be determined — skip; offer is ungroupable.
     if region and version:
@@ -603,7 +616,7 @@ def _to_offer(raw: G2GOffer, fetched_at: datetime) -> Optional[Offer]:
             raw_price_unit="per_unit",
             lot_size=1,
             # ── amount & metadata ─────────────────────────────────────────────
-            amount_gold=raw.available_qty,
+            amount_gold=raw.available_qty if raw.available_qty > 0 else 1,
             seller=raw.seller or "unknown",
             offer_url=raw.offer_url or None,
             updated_at=fetched_at,
@@ -643,7 +656,9 @@ async def fetch_offers() -> list[Offer]:
             if r.price_usd <= 0:
                 skipped_price += 1
                 continue
-            offer = _to_offer(r, fetched_at)
+            # Seller-based path may still occasionally return qty=0 for edge sellers.
+            # Keep these offers with minimal amount to avoid dropping valid URLs.
+            offer = _to_offer(r, fetched_at, skip_qty_check=True)
             if offer is None:
                 skipped_qty += 1
             else:

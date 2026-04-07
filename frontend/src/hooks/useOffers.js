@@ -26,6 +26,7 @@ export function useOffers(initialServer = '', initialRealm = '') {
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  // TODO(I4): expose backend /meta last_update as dataVersion in UI.
   const [lastFetched, setLastFetched] = useState(null)
 
   const filtersRef = useRef(filters)
@@ -50,6 +51,12 @@ export function useOffers(initialServer = '', initialRealm = '') {
       )
       setEnabledSources((prev) => (prev !== null ? prev : new Set(sources)))
       setLastFetched(new Date())
+      // Sync local data version after successful offers load (no extra request on mount path).
+      fetchMeta()
+        .then((meta) => {
+          if (meta?.last_update) lastUpdateRef.current = meta.last_update
+        })
+        .catch(() => {})
     } catch (err) {
       if (!silent) setError(err?.message ?? String(err))
     } finally {

@@ -1,13 +1,14 @@
+/* TradingView-style stats bar */
 .bar {
   display: flex;
   align-items: center;
-  gap: 0;
-  padding: 10px 16px;
+  padding: 8px 16px;
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   flex-wrap: wrap;
   gap: 2px 0;
+  overflow-x: auto;
   transition: opacity var(--transition);
 }
 
@@ -15,11 +16,14 @@
   opacity: 0.55;
 }
 
-.stat {
+/* ── Stat card ──────────────────────────────────────────────────── */
+.card {
   display: flex;
   flex-direction: column;
   gap: 2px;
   padding: 4px 20px 4px 0;
+  min-width: 80px;
+  flex-shrink: 0;
 }
 
 .label {
@@ -37,10 +41,25 @@
   line-height: 1.2;
 }
 
+/* ── Divider ────────────────────────────────────────────────────── */
 .divider {
   width: 1px;
   height: 32px;
   background: var(--border);
-  margin: 0 20px 0 4px;
+  margin: 0 16px 0 0;
   flex-shrink: 0;
 }
+
+/* ── Source-colored labels ──────────────────────────────────────── */
+.funpayLabel { color: #22c55e; }
+.g2gLabel    { color: #a78bfa; }
+.spreadLabel { color: var(--yellow); }
+
+.funpayValue { color: #22c55e; font-weight: 600; }
+.g2gValue    { color: #a78bfa; font-weight: 600; }
+
+/* Best price — accent green */
+.bestValue { color: var(--accent); }
+
+/* Spread — yellow (positive = g2g more expensive = funpay is better) */
+.spreadValue { color: var(--yellow); }
