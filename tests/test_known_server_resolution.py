@@ -38,7 +38,11 @@ def _extract_aliases_from_migrations() -> dict[str, int]:
                 target_name = node.target.id
                 value_node = node.value
 
-            if target_name == "_ALIASES" and value_node is not None:
+            if (
+                target_name == "_ALIASES"
+                and value_node is not None
+                and isinstance(value_node, (ast.List, ast.Tuple))
+            ):
                 aliases = ast.literal_eval(value_node)
                 for row in aliases:
                     alias = row[0]

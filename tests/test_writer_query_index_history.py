@@ -45,3 +45,22 @@ async def test_query_index_history_no_array_dimension_error(monkeypatch):
     monkeypatch.setattr(writer, "get_pool", fake_get_pool)
     out = await writer.query_index_history("(EU) Anniversary", "all", 24, 200)
     assert out == [] and calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_query_index_history_bucket_column_resolves(monkeypatch):
+    captured = {"sql": ""}
+
+    class FakePool:
+        async def fetch(self, query, *params):
+            captured["sql"] = query
+            return []
+
+    async def fake_get_pool():
+        return FakePool()
+
+    monkeypatch.setattr(writer, "get_pool", fake_get_pool)
+    await writer.query_index_history("(EU) Anniversary", "all", 24, 200)
+    sql = captured["sql"]
+    assert "WITH filtered AS" in sql and "FROM grouped g" in sql
+    assert " = bucket" not in sql and "f2.bucket = g.bucket" in sql

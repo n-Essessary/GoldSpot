@@ -314,35 +314,53 @@ async def query_index_history(
     try:
         rows = await pool.fetch(
             f"""
+            WITH filtered AS (
+                SELECT
+                    ts,
+                    index_price,
+                    vwap,
+                    best_ask,
+                    offer_count,
+                    COALESCE(sources, ARRAY[]::text[]) AS sources,
+                    (
+                        date_trunc('minute', ts)
+                        - (EXTRACT(MINUTE FROM ts)::int % {bucket_minutes}) * INTERVAL '1 minute'
+                    ) AS bucket
+                FROM price_index_snapshots
+                WHERE {where}
+            ),
+            grouped AS (
+                SELECT
+                    bucket,
+                    (array_agg(index_price ORDER BY ts))[1]      AS open,
+                    MAX(index_price)                             AS high,
+                    MIN(index_price)                             AS low,
+                    (array_agg(index_price ORDER BY ts DESC))[1] AS close,
+                    AVG(index_price)                             AS avg_price,
+                    AVG(vwap)                                    AS vwap,
+                    MIN(best_ask)                                AS best_ask,
+                    SUM(offer_count)                             AS offer_count
+                FROM filtered
+                GROUP BY bucket
+            )
             SELECT
-                date_trunc('minute', ts)
-                    - (EXTRACT(MINUTE FROM ts)::int % {bucket_minutes})
-                    * INTERVAL '1 minute'                        AS bucket,
-                (array_agg(index_price ORDER BY ts))[1]          AS open,
-                MAX(index_price)                                 AS high,
-                MIN(index_price)                                 AS low,
-                (array_agg(index_price ORDER BY ts DESC))[1]     AS close,
-                AVG(index_price)                                 AS avg_price,
-                AVG(vwap)                                        AS vwap,
-                MIN(best_ask)                                    AS best_ask,
-                SUM(offer_count)                                 AS offer_count,
+                g.bucket,
+                g.open,
+                g.high,
+                g.low,
+                g.close,
+                g.avg_price,
+                g.vwap,
+                g.best_ask,
+                g.offer_count,
                 ARRAY(
                     SELECT DISTINCT s
-                    FROM price_index_snapshots p2
-                    CROSS JOIN LATERAL unnest(COALESCE(p2.sources, ARRAY[]::text[])) AS s
-                    WHERE p2.server = $1
-                      AND p2.ts > NOW() - $2::INTERVAL
-                      AND p2.faction = $3
-                      AND (
-                        date_trunc('minute', p2.ts)
-                            - (EXTRACT(MINUTE FROM p2.ts)::int % {bucket_minutes})
-                            * INTERVAL '1 minute'
-                      ) = bucket
-                )                                                AS sources
-            FROM price_index_snapshots
-            WHERE {where}
-            GROUP BY bucket
-            ORDER BY bucket ASC
+                    FROM filtered f2
+                    CROSS JOIN LATERAL unnest(f2.sources) AS s
+                    WHERE f2.bucket = g.bucket
+                )                                            AS sources
+            FROM grouped g
+            ORDER BY g.bucket ASC
             """,
             *params,
         )
