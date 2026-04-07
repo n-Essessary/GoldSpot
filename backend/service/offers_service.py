@@ -76,6 +76,7 @@ _VERSION_ORDER: dict[str, int] = {
     "Season of Discovery": 1,
     "Classic Era":         2,
     "Classic":             3,
+    "Hardcore":            4,
 }
 
 
@@ -639,6 +640,17 @@ def get_servers() -> list[ServerGroup]:
         )
         if cached is not None:
             group_min_price[ds] = cached.best_ask
+
+    # Remove AU-specific realms from any non-AU server group.
+    # Penance and Shadowstrike are AU Season of Discovery realms; G2G API sometimes
+    # files them under EU/US region buckets, producing phantom realm entries.
+    _AU_ONLY_REALMS: set[str] = {"penance", "shadowstrike"}
+    for ds in group_realms:
+        if not ds.lower().startswith("(au)"):
+            group_realms[ds] = {
+                r for r in group_realms[ds]
+                if r.lower() not in _AU_ONLY_REALMS
+            }
 
     sorted_groups = sorted(
         group_min_price,

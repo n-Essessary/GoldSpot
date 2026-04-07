@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from parser.g2g_parser import G2GOffer, _dedupe, _parse_title, _to_offer
+from parser.g2g_parser import G2GOffer, _build_offer_url, _dedupe, _parse_title, _to_offer
 from service.offers_service import _normalize_g2g_offer
 
 
@@ -87,7 +87,79 @@ def test_to_offer_skip_qty_check(make_offer):
     assert _to_offer(raw, make_offer().updated_at, skip_qty_check=True) is not None
 
 
+def test_normalize_g2g_offer_hardcore(make_offer):
+    offer = make_offer(source="g2g", display_server="(EU) Hardcore", server="(eu) hardcore")
+    normalized = _normalize_g2g_offer(offer)
+    assert normalized.display_server == "(EU) Hardcore"
+
+
 def test_dedupe_removes_exact_duplicate_offer_ids(make_offer):
     a = make_offer(id="dup", source="g2g")
     b = make_offer(id="dup", source="g2g", seller="x")
     assert len(_dedupe([a, b])) == 1
+
+
+# ── Bug 1: sort=lowest_price in buy URLs ──────────────────────────────────────
+
+def test_build_offer_url_group_ends_with_sort_param():
+    """Group buy URL must end with &sort=lowest_price."""
+    attrs = [{"collection_id": "lgc_col", "dataset_id": "lgc_dat"}]
+    url = _build_offer_url("offer123", attrs, "region-abc")
+    assert url.endswith("&sort=lowest_price"), f"URL did not end with sort param: {url}"
+    assert "fa=" in url
+    assert "region_id=region-abc" in url
+
+
+def test_build_offer_url_fallback_uses_offer_id():
+    """Fallback URL (no offer_attributes) returns /offer/{offer_id}."""
+    url = _build_offer_url("offer123", [], "region-abc")
+    assert "/offer/offer123" in url
+
+
+# ── Bug 2A: Hardcore in _VERSION_PATTERNS ────────────────────────────────────
+
+def test_parse_title_hardcore():
+    """Soulseeker [EU - Hardcore] must parse version='Hardcore'."""
+    server, region, version, faction = _parse_title("Soulseeker [EU - Hardcore] - Alliance")
+    assert server  == "Soulseeker"
+    assert region  == "EU"
+    assert version == "Hardcore"
+    assert faction == "Alliance"
+
+
+def test_parse_title_hardcore_horde():
+    server, region, version, faction = _parse_title("Soulseeker [EU - Hardcore] - Horde")
+    assert version == "Hardcore"
+    assert faction == "Horde"
+
+
+# ── Bug 2B: AU realm region override ─────────────────────────────────────────
+
+def test_parse_title_penance_overrides_to_au():
+    """Penance must always return region=AU regardless of bracket region."""
+    server, region, version, faction = _parse_title("Penance [US - Seasonal] - Horde")
+    assert server  == "Penance"
+    assert region  == "AU"
+    assert version == "Season of Discovery"
+
+
+def test_parse_title_penance_ru_overrides_to_au():
+    """Penance with RU bracket must still return AU."""
+    server, region, version, faction = _parse_title("Penance [RU - Seasonal] - Alliance")
+    assert region  == "AU"
+    assert version == "Season of Discovery"
+    assert faction == "Alliance"
+
+
+def test_parse_title_shadowstrike_overrides_to_au():
+    """Shadowstrike must always return region=AU."""
+    server, region, version, faction = _parse_title("Shadowstrike [RU - Seasonal] - Alliance")
+    assert server  == "Shadowstrike"
+    assert region  == "AU"
+    assert version == "Season of Discovery"
+
+
+def test_parse_title_shadowstrike_us_overrides_to_au():
+    server, region, version, faction = _parse_title("Shadowstrike [US - Seasonal] - Horde")
+    assert region  == "AU"
+    assert version == "Season of Discovery"

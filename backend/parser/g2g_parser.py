@@ -18,6 +18,7 @@ from urllib.parse import quote
 import httpx
 
 from api.schemas import Offer
+from utils.version_utils import REALM_REGION_OVERRIDE
 from utils.version_utils import _canonicalize_version
 
 logger = logging.getLogger(__name__)
@@ -123,7 +124,7 @@ def _build_offer_url(
             fa = quote(f"{col_id}:{dat_id}", safe="")
             return (
                 f"https://www.g2g.com/categories/{game_slug}/offer/group"
-                f"?fa={fa}&region_id={region_id}"
+                f"?fa={fa}&region_id={region_id}&sort=lowest_price"
             )
     if offer_id:
         return f"https://www.g2g.com/offer/{offer_id}"
@@ -148,6 +149,7 @@ _FACTION_END_RE    = re.compile(r"-\s*(Alliance|Horde)\s*$", re.IGNORECASE)
 _VERSION_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("Season of Discovery", re.compile(r"season\s+of\s+discovery|\bseasonal\b", re.I)),
     ("Anniversary",         re.compile(r"anniversary",                           re.I)),
+    ("Hardcore",            re.compile(r"\bhardcore\b",                          re.I)),
     ("Classic Era",         re.compile(r"classic\s+era",                         re.I)),
     ("Classic",             re.compile(r"\bclassic\b",                           re.I)),
 ]
@@ -195,6 +197,24 @@ def _parse_title(title: str) -> tuple[str, str, str, str]:
     t = (title or "").strip()
     if not t:
         return "", "", "", "Horde"
+
+    # ── Pre-check: realm-specific region/version override ─────────────────────
+    # Some AU realms are misfiled by G2G under EU/US region buckets.
+    # This check runs BEFORE the regex so the override always wins.
+    if "[" in t:
+        early_server = t[:t.index("[")].strip()
+        _override = REALM_REGION_OVERRIDE.get(early_server.lower())
+        if _override:
+            correct_region, correct_version = _override
+            # Extract faction from title suffix
+            _fm = _FACTION_END_RE.search(t)
+            if _fm:
+                _faction = _fm.group(1).capitalize()
+            elif "alliance" in t.lower():
+                _faction = "Alliance"
+            else:
+                _faction = "Horde"
+            return early_server, correct_region, correct_version, _faction
 
     # ── Уровень 1: строгий regex ──────────────────────────────────────────────
     m = _TITLE_RE.match(t)

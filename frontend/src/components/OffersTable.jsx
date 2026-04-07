@@ -41,11 +41,38 @@ function formatTime(iso) {
 }
 
 /**
- * Top-5 highlight set by global cheapest price.
- * Returns a Set of offer IDs. `sorted` must already be sorted ASC by price_per_1k.
+ * Cross-platform top-5 highlight set with per-source guarantee.
+ *
+ * Algorithm:
+ *   1. Include the 2 cheapest offers PER SOURCE (guaranteed cross-platform representation).
+ *   2. Fill any remaining slots up to 5 from the globally cheapest offers.
+ *
+ * This ensures FunPay always appears highlighted when it has offers, even when
+ * all G2G prices are lower than all FunPay prices.
+ *
+ * `sorted` must be sorted ASC by price_per_1k.
  */
 export function getTop5Set(sorted) {
-  return new Set(sorted.slice(0, 5).map(o => o.id))
+  const result = new Set()
+
+  // Step 1: guarantee top-2 per source
+  const countBySource = {}
+  for (const o of sorted) {
+    const src = o.source
+    if (!countBySource[src]) countBySource[src] = 0
+    if (countBySource[src] < 2) {
+      result.add(o.id)
+      countBySource[src]++
+    }
+  }
+
+  // Step 2: fill remaining slots to reach 5 from global cheapest
+  for (const o of sorted) {
+    if (result.size >= 5) break
+    result.add(o.id)
+  }
+
+  return result
 }
 
 /**

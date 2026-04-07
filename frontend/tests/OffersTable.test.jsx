@@ -1,7 +1,7 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { OffersTable, formatPrice } from '../src/components/OffersTable'
+import { OffersTable, formatPrice, getTop5Set } from '../src/components/OffersTable'
 
 
 function mkOffer(overrides = {}) {
@@ -60,5 +60,74 @@ describe('OffersTable', () => {
     const links = screen.getAllByRole('link', { name: /Купить у/i })
     expect(links[0]).toHaveAttribute('href', 'https://buy')
     expect(screen.getByText('—')).toBeInTheDocument()
+  })
+})
+
+// ── Bug 3: getTop5Set per-source guarantee ────────────────────────────────────
+describe('getTop5Set', () => {
+  it('includes cheapest FunPay even when G2G has all lower prices', () => {
+    const offers = [
+      ...Array(8).fill(null).map((_, i) => ({
+        id: `g2g_${i}`,
+        source: 'g2g',
+        price_per_1k: 10 + i,
+        amount_gold: 1000,
+        faction: 'Horde',
+        seller: 'seller',
+        server_name: 'Realm',
+        offer_url: null,
+        updated_at: null,
+      })),
+      {
+        id: 'fp_1',
+        source: 'funpay',
+        price_per_1k: 50,
+        amount_gold: 1000,
+        faction: 'Horde',
+        seller: 'seller',
+        server_name: 'Realm',
+        offer_url: null,
+        updated_at: null,
+      },
+      {
+        id: 'fp_2',
+        source: 'funpay',
+        price_per_1k: 52,
+        amount_gold: 1000,
+        faction: 'Horde',
+        seller: 'seller',
+        server_name: 'Realm',
+        offer_url: null,
+        updated_at: null,
+      },
+    ]
+    const sorted = [...offers].sort((a, b) => a.price_per_1k - b.price_per_1k)
+    const top5 = getTop5Set(sorted)
+    expect(top5.has('fp_1')).toBe(true)
+    expect(top5.has('fp_2')).toBe(true)
+  })
+
+  it('always includes cheapest overall (rank 1)', () => {
+    const offers = [
+      { id: 'a', source: 'g2g', price_per_1k: 5 },
+      { id: 'b', source: 'funpay', price_per_1k: 8 },
+    ]
+    const top5 = getTop5Set(offers)
+    expect(top5.has('a')).toBe(true)
+  })
+
+  it('returns at most 5 ids', () => {
+    const offers = Array(10).fill(null).map((_, i) => ({
+      id: `o${i}`,
+      source: i % 2 === 0 ? 'g2g' : 'funpay',
+      price_per_1k: i + 1,
+    }))
+    const top5 = getTop5Set(offers)
+    expect(top5.size).toBeLessThanOrEqual(5)
+  })
+
+  it('handles empty input', () => {
+    const top5 = getTop5Set([])
+    expect(top5.size).toBe(0)
   })
 })
