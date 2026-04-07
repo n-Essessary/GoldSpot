@@ -250,14 +250,13 @@ def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
         display_server=display_server,
         faction=faction,
         # ── Raw price (Task 2) ────────────────────────────────────────────────
-        # FunPay shows price per lot (e.g. "1000 gold for $X").
-        # raw_price = lot_price (price for amount_gold gold, in USD)
-        # raw_price_unit = 'per_lot'
-        # lot_size = amount_gold
-        # price_per_1k is derived: (lot_price / amount_gold) * 1000
+        # FunPay shows price per 1 gold (unit price).
+        # raw_price = lot_price (price per 1 gold, in USD)
+        # raw_price_unit = 'per_unit', lot_size = 1
+        # price_per_1k = raw_price * 1000
         raw_price=lot_price,
-        raw_price_unit="per_lot",
-        lot_size=amount_gold,
+        raw_price_unit="per_unit",
+        lot_size=1,
         amount_gold=amount_gold,
         seller=seller,
         offer_url=offer_url,

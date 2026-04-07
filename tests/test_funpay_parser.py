@@ -69,3 +69,18 @@ def test_parse_item_rejects_near_zero_price_per_1k():
     item = BeautifulSoup(html, "html.parser").select_one(".tc-item")
     with pytest.raises(ValueError):
         _parse_item(item, datetime.now(timezone.utc))  # type: ignore[arg-type]
+
+
+def test_parse_item_correct_price_per_1k():
+    html = """
+    <a class="tc-item" href="/x?id=1" data-online="1">
+      <span class="tc-server">(EU) Classic</span>
+      <span class="tc-side">Horde</span>
+      <span class="tc-amount">83</span>
+      <span class="tc-price">0.0139</span>
+      <span class="tc-seller">s</span>
+    </a>
+    """
+    item = BeautifulSoup(html, "html.parser").select_one(".tc-item")
+    offer = _parse_item(item, datetime.now(timezone.utc))  # type: ignore[arg-type]
+    assert offer.price_per_1k == 13.9
