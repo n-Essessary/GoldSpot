@@ -12,6 +12,20 @@ Architecture:
 Task 2: price_per_1k is NEVER stored; always derived from raw_price at read-time.
 Task 3: server_resolver maps raw titles → canonical server_id.
 Task 4: index computed per individual server (not per group).
+Task 5: normalize_pipeline handles validation, canonicalization, price validation,
+        price-assisted rerouting, and deduplication (source, offer_id).
+
+Normalization flow (per parse cycle):
+  raw offers
+    → [phase 0] _normalize_*_offer()   — display_server string cleanup
+    → [phase 1] normalize_offer_batch() — validate / resolve / canonicalize /
+                                           price-validate / dedup
+    → cached in _cache[source]
+    → quarantine items added to _quarantine ring buffer
+
+Quarantine:
+  Offers that fail validation (broken title, unknown faction, etc.) are stored
+  in a bounded ring buffer (_quarantine) visible at GET /admin/quarantine.
 """
 from __future__ import annotations
 
@@ -34,6 +48,12 @@ _running:       dict[str, bool]               = {"funpay": False, "g2g": False}
 _cache_version: dict[str, int]               = {"funpay": 0, "g2g": 0}
 _last_error:    dict[str, Optional[str]]      = {"funpay": None, "g2g": None}
 _cache_initialized: dict[str, bool]          = {"funpay": False, "g2g": False}
+
+# ── Quarantine ring buffer ────────────────────────────────────────────────────
+# Offers that failed the normalize pipeline are logged here for admin inspection.
+# Bounded to _QUARANTINE_MAX entries (oldest dropped first on overflow).
+_quarantine:     list[dict] = []
+_QUARANTINE_MAX: int        = 500
 
 FUNPAY_INTERVAL = 60
 G2G_INTERVAL    = 30
@@ -90,6 +110,37 @@ _index_cache: dict[str, IndexPrice] = {}
 
 def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).lower()
+
+
+# ── Quarantine helpers ────────────────────────────────────────────────────────
+
+def _add_to_quarantine(items: list) -> None:
+    """
+    Append QuarantinedOffer items to the ring buffer.
+    Drops the oldest entries when the buffer exceeds _QUARANTINE_MAX.
+    """
+    if not items:
+        return
+    _quarantine.extend(
+        {
+            "raw_id":    q.raw_id,
+            "source":    q.source,
+            "reason":    q.reason,
+            "raw_title": q.raw_title,
+            "price":     q.price,
+            "details":   q.details,
+            "ts":        q.ts,
+        }
+        for q in items
+    )
+    overflow = len(_quarantine) - _QUARANTINE_MAX
+    if overflow > 0:
+        del _quarantine[:overflow]
+
+
+def get_quarantine() -> list[dict]:
+    """Return quarantine log (newest-first) for /admin/quarantine endpoint."""
+    return list(reversed(_quarantine))
 
 
 def _canonicalize_version(version: str) -> str:
@@ -322,8 +373,14 @@ async def _do_snapshot_all_servers() -> None:
         write_index_snapshot,
         write_price_snapshot,
     )
+    from service.price_profiles import update_profiles
+
     ts = datetime.now(timezone.utc)
     all_offers = get_all_offers()
+
+    # Refresh price profiles from latest offer cache so normalize_pipeline
+    # can use them for price validation on the next parse cycle.
+    update_profiles(all_offers)
 
     # ── 1. Group-level index (legacy OHLC path) ───────────────────────────────
     groups: dict[tuple[str, str], list[Offer]] = {}
@@ -400,120 +457,48 @@ async def _do_snapshot_all_servers() -> None:
             await asyncio.gather(*snap_tasks[i:i + batch_size], return_exceptions=True)
 
 
-# ── Server resolver integration ───────────────────────────────────────────────
-
-def _collect_resolve_keys(offers: list[Offer]) -> list[tuple[str, str]]:
-    """Build (alias, source) pairs for batch alias lookup (deduped order preserved)."""
-    seen: set[tuple[str, str]] = set()
-    out: list[tuple[str, str]] = []
-    for offer in offers:
-        if offer.server_id is not None:
-            continue
-        if offer.source == "g2g" and offer.server_name:
-            m = re.match(
-                r"^\((?P<region>[A-Z]{2,})\)\s*(?P<version>.+)$",
-                offer.display_server or "",
-            )
-            if m:
-                region = m.group("region")
-                version = m.group("version")
-                for faction in (offer.faction, "Alliance", "Horde"):
-                    raw_key = f"{offer.server_name} [{region} - {version}] - {faction}"
-                    t = (raw_key, offer.source)
-                    if t not in seen:
-                        seen.add(t)
-                        out.append(t)
-        elif offer.source == "funpay" and offer.server_name:
-            m = re.match(
-                r"^\((?P<region>[A-Z]{2,})\)\s*(?P<version>.+)$",
-                offer.display_server or "",
-            )
-            if m:
-                region = m.group("region")
-                version = m.group("version")
-                raw_key = f"({region}) {version} - {offer.server_name}"
-                t = (raw_key, offer.source)
-                if t not in seen:
-                    seen.add(t)
-                    out.append(t)
-    return out
-
-
-async def _resolve_server_ids(offers: list[Offer]) -> list[Offer]:
-    """
-    For each offer that doesn't have server_id set, try to resolve via
-    server_resolver. Updates offer.server_id in-place.
-
-    If DB pool is unavailable, returns offers unchanged (graceful degradation).
-    """
-    from db.writer import get_pool
-    pool = await get_pool()
-    if pool is None:
-        return offers
-
-    from db.server_resolver import resolve_server, resolve_server_batch
-
-    batch_keys = _collect_resolve_keys(offers)
-    alias_map = await resolve_server_batch(pool, batch_keys)
-
-    for offer in offers:
-        if offer.server_id is not None:
-            continue
-        if offer.source == "g2g" and offer.server_name:
-            m = re.match(
-                r"^\((?P<region>[A-Z]{2,})\)\s*(?P<version>.+)$",
-                offer.display_server or "",
-            )
-            if m:
-                region = m.group("region")
-                version = m.group("version")
-                for faction in (offer.faction, "Alliance", "Horde"):
-                    raw_key = f"{offer.server_name} [{region} - {version}] - {faction}"
-                    lk = raw_key.lower().strip()
-                    sid = alias_map.get(lk)
-                    if sid is None:
-                        sid = await resolve_server(raw_key, offer.source, pool)
-                    if sid is not None:
-                        offer.server_id = sid
-                        break
-        elif offer.source == "funpay":
-            if offer.server_name:
-                m = re.match(
-                    r"^\((?P<region>[A-Z]{2,})\)\s*(?P<version>.+)$",
-                    offer.display_server or "",
-                )
-                if m:
-                    region = m.group("region")
-                    version = m.group("version")
-                    raw_key = f"({region}) {version} - {offer.server_name}"
-                    lk = raw_key.lower().strip()
-                    sid = alias_map.get(lk)
-                    if sid is None:
-                        sid = await resolve_server(raw_key, offer.source, pool)
-                    if sid is not None:
-                        offer.server_id = sid
-
-    return offers
+# ── (Server resolver integration moved to service/normalize_pipeline.py) ──────
+# _resolve_server_ids() and _collect_resolve_keys() are superseded by
+# normalize_offer_batch() which handles resolution, canonicalization,
+# price validation and deduplication in one deterministic pipeline.
 
 
 # ── Background loops ──────────────────────────────────────────────────────────
 
 async def _run_funpay_loop() -> None:
     from parser.funpay_parser import fetch_offers as fp_fetch
+    from service.normalize_pipeline import normalize_offer_batch
 
     while True:
         _running["funpay"] = True
         try:
-            offers = await fp_fetch()
-            if offers:
-                offers = [_normalize_funpay_offer(o) for o in offers]
-                offers = await _resolve_server_ids(offers)
+            raw_offers = await fp_fetch()
+            if raw_offers:
+                # Phase 0: normalize display_server string format
+                raw_offers = [_normalize_funpay_offer(o) for o in raw_offers]
+
+                # Phase 1: full normalization pipeline
+                from db.writer import get_pool
+                pool = await get_pool()
+                offers, quarantined = await normalize_offer_batch(raw_offers, pool)
+
+                _add_to_quarantine(quarantined)
+                if quarantined:
+                    logger.info(
+                        "FunPay quarantined %d offers (reasons: %s)",
+                        len(quarantined),
+                        ", ".join({q.reason for q in quarantined}),
+                    )
+
                 _cache["funpay"] = offers
                 _cache_initialized["funpay"] = True
                 _cache_version["funpay"] += 1
                 _last_update["funpay"] = datetime.now(timezone.utc)
                 _last_error["funpay"] = None
-                logger.info("FunPay updated: %d offers", len(offers))
+                logger.info(
+                    "FunPay updated: %d offers (%d quarantined)",
+                    len(offers), len(quarantined),
+                )
                 asyncio.create_task(_snapshot_all_servers())
             elif _cache_initialized["funpay"]:
                 _last_error["funpay"] = "empty_result"
@@ -539,22 +524,40 @@ async def _run_funpay_loop() -> None:
 
 async def _run_g2g_loop() -> None:
     from parser.g2g_parser import fetch_offers as g2g_fetch
+    from service.normalize_pipeline import normalize_offer_batch
 
     while True:
         _running["g2g"] = True
-        t0 = asyncio.get_running_loop().time()   # get_event_loop() is deprecated in 3.10+
+        t0 = asyncio.get_running_loop().time()
         try:
-            offers = await g2g_fetch()
-            if offers:
-                offers = [_normalize_g2g_offer(o) for o in offers]
-                offers = await _resolve_server_ids(offers)
+            raw_offers = await g2g_fetch()
+            if raw_offers:
+                # Phase 0: normalize display_server string format
+                raw_offers = [_normalize_g2g_offer(o) for o in raw_offers]
+
+                # Phase 1: full normalization pipeline
+                from db.writer import get_pool
+                pool = await get_pool()
+                offers, quarantined = await normalize_offer_batch(raw_offers, pool)
+
+                _add_to_quarantine(quarantined)
+                if quarantined:
+                    logger.info(
+                        "G2G quarantined %d offers (reasons: %s)",
+                        len(quarantined),
+                        ", ".join({q.reason for q in quarantined}),
+                    )
+
                 _cache["g2g"] = offers
                 _cache_initialized["g2g"] = True
                 _cache_version["g2g"] += 1
                 _last_update["g2g"] = datetime.now(timezone.utc)
                 _last_error["g2g"] = None
                 elapsed = asyncio.get_running_loop().time() - t0
-                logger.info("G2G updated: %d offers in %.1fs", len(offers), elapsed)
+                logger.info(
+                    "G2G updated: %d offers (%d quarantined) in %.1fs",
+                    len(offers), len(quarantined), elapsed,
+                )
                 asyncio.create_task(_snapshot_all_servers())
             elif _cache_initialized["g2g"]:
                 _last_error["g2g"] = "empty_result"

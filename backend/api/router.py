@@ -36,6 +36,7 @@ from service.offers_service import (
     get_offers,
     get_parser_status,
     get_price_history,
+    get_quarantine,
     get_servers,
 )
 
@@ -310,6 +311,40 @@ async def get_unresolved_servers():
         "count": len(items),
         "unresolved": items,
     }
+
+
+@router.get("/admin/quarantine", dependencies=[Depends(require_admin_key)])
+async def get_quarantine_handler():
+    """
+    Admin endpoint: offers rejected by the normalization pipeline.
+
+    Returns up to 500 most-recently quarantined offers (newest first).
+    Each entry contains:
+      raw_id    — offer ID as produced by the parser
+      source    — "funpay" | "g2g"
+      reason    — rejection reason, e.g. "empty_server_title",
+                  "unknown_faction:...", "zero_price", "pipeline_exception"
+      raw_title — display_server as received from parser
+      price     — price_per_1k at the time of rejection
+      ts        — Unix timestamp when the offer was quarantined
+
+    Use this alongside /admin/unresolved-servers to diagnose parser issues
+    and missing server aliases.
+    """
+    items = get_quarantine()
+    return {"count": len(items), "quarantined": items}
+
+
+@router.get("/admin/price-profiles", dependencies=[Depends(require_admin_key)])
+async def get_price_profiles_handler():
+    """
+    Admin diagnostic: current in-memory price profiles per canonical server.
+
+    Returns summary stats (server count, total profiles, staleness).
+    Used to verify that price validation is active and profiles are populated.
+    """
+    from service.price_profiles import get_stats
+    return get_stats()
 
 
 @router.post("/admin/register-alias", dependencies=[Depends(require_admin_key)])

@@ -15,6 +15,11 @@ Unresolved titles are logged as WARNING and may be reviewed via:
 Thread-safety: in-process cache is populated on first call per process.
 Cache is intentionally short-lived (60 s) to pick up newly seeded aliases
 without restarting the server.
+
+Server data cache (added for normalize_pipeline):
+  _server_data_cache maps server_id → {"id", "name", "region", "version"}.
+  Loaded alongside alias cache. Used by normalize_pipeline to canonicalize
+  offer fields after resolution — version always comes from this registry.
 """
 from __future__ import annotations
 
@@ -30,6 +35,14 @@ logger = logging.getLogger(__name__)
 _alias_cache:     dict[str, int] = {}
 _cache_loaded_at: float = 0.0
 _CACHE_TTL        = 60.0   # seconds
+
+# ── Server data cache (id → canonical fields) ─────────────────────────────────
+# Populated alongside alias cache. Gives O(1) lookup of canonical
+# (name, region, version) for a resolved server_id without extra DB calls.
+_server_data_cache: dict[int, dict] = {}
+# {(name_lower, region_upper): [{"id", "name", "region", "version"}, ...]}
+# Used by find_server_versions() for price-rerouting lookups.
+_server_versions_index: dict[tuple[str, str], list[dict]] = {}
 
 # Batch alias lookup cache: per-entry TTL (no global flush — safe under concurrent batches)
 _BATCH_MISS = object()
@@ -99,15 +112,43 @@ def _normalise_region(raw: str) -> str:
 
 
 async def _load_alias_cache(pool) -> None:
-    """Reload alias cache from DB into memory."""
+    """Reload alias cache and server data cache from DB into memory."""
     global _alias_cache, _cache_loaded_at
+    global _server_data_cache, _server_versions_index
     try:
-        rows = await pool.fetch(
+        # ── Alias cache ───────────────────────────────────────────────────────
+        alias_rows = await pool.fetch(
             "SELECT alias, server_id FROM server_aliases"
         )
-        _alias_cache = {row["alias"].lower(): row["server_id"] for row in rows}
+        _alias_cache = {row["alias"].lower(): row["server_id"] for row in alias_rows}
+
+        # ── Server data cache ─────────────────────────────────────────────────
+        # Load all active servers so normalize_pipeline can overwrite version
+        # from canonical registry without extra DB round-trips.
+        server_rows = await pool.fetch(
+            "SELECT id, name, region, version FROM servers WHERE is_active = TRUE"
+        )
+        new_data: dict[int, dict] = {}
+        new_versions: dict[tuple[str, str], list[dict]] = {}
+        for row in server_rows:
+            entry = {
+                "id":      row["id"],
+                "name":    row["name"],
+                "region":  row["region"],
+                "version": row["version"],
+            }
+            new_data[row["id"]] = entry
+            key = (row["name"].lower(), row["region"].upper())
+            new_versions.setdefault(key, []).append(entry)
+
+        _server_data_cache     = new_data
+        _server_versions_index = new_versions
+
         _cache_loaded_at = time.monotonic()
-        logger.debug("server_resolver: loaded %d aliases into cache", len(_alias_cache))
+        logger.debug(
+            "server_resolver: loaded %d aliases, %d servers into cache",
+            len(_alias_cache), len(new_data),
+        )
     except Exception:
         logger.exception("server_resolver: failed to load alias cache")
 
@@ -173,6 +214,67 @@ async def resolve_server_batch(
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+def get_server_data(server_id: int) -> Optional[dict]:
+    """
+    Return canonical data for a resolved server_id.
+
+    Synchronous — reads in-process cache populated by _load_alias_cache().
+    Returns {"id", "name", "region", "version"} or None if not cached.
+
+    Used by normalize_pipeline to canonicalize offer fields after resolution.
+    Version comes from this registry, NEVER from the raw source title.
+    """
+    return _server_data_cache.get(server_id)
+
+
+async def find_server_versions(
+    name: str,
+    region: str,
+    pool,
+) -> list[dict]:
+    """
+    Return all active servers with the given name and region.
+
+    Each entry: {"id", "name", "region", "version"}.
+
+    Used by normalize_pipeline for price-assisted rerouting: when an offer's
+    price doesn't fit the resolved server's profile, we check whether it fits
+    another version (e.g. "Classic" vs "Anniversary") of the same realm.
+
+    Tries in-process cache first; falls back to DB on cache miss.
+    """
+    key = (name.lower(), region.upper())
+    cached = _server_versions_index.get(key)
+    if cached is not None:
+        return cached
+
+    # Cache miss: query DB directly (rare — only on cold start or new servers)
+    try:
+        rows = await pool.fetch(
+            """
+            SELECT id, name, region, version
+            FROM servers
+            WHERE LOWER(name) = LOWER($1)
+              AND region = $2
+              AND is_active = TRUE
+            """,
+            name, region.upper(),
+        )
+        result = [
+            {"id": r["id"], "name": r["name"], "region": r["region"], "version": r["version"]}
+            for r in rows
+        ]
+        # Store in index for future lookups
+        if result:
+            _server_versions_index[key] = result
+        return result
+    except Exception:
+        logger.exception(
+            "server_resolver: find_server_versions failed name=%r region=%r", name, region
+        )
+        return []
+
 
 async def resolve_server(
     raw_title: str,
