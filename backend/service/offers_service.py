@@ -46,6 +46,14 @@ from utils.version_utils import _VERSION_ALIASES, _canonicalize_version
 # only for _version_rank() ordering — no string manipulation needed in get_servers().
 _HARDCORE_SUFFIX = " · Hardcore"
 
+# ── Valid sidebar group key pattern ───────────────────────────────────────────
+# display_server MUST start with "(REGION) " to be a canonical group key.
+# Bare server names like "Spineshatter", "spineshatter", "Maladath" are NOT
+# valid keys — they appear when _apply_canonical was not called (cold cache)
+# or when a parser set display_server to the realm name instead of the group.
+# This regex gates get_servers() to prevent polluting the sidebar.
+_GROUP_RE = re.compile(r"^\([A-Z]{2,}\)\s+\S", re.ASCII)
+
 logger = logging.getLogger(__name__)
 
 # ── Per-source state ──────────────────────────────────────────────────────────
@@ -159,10 +167,32 @@ def _detect_version(text: str) -> str:
 
 
 def _normalize_funpay_offer(offer: Offer) -> Offer:
-    """Normalise FunPay offer: set display_server to '(EU) Version' format."""
+    """Normalise FunPay offer: set display_server to '(REGION) Version' format.
+
+    FunPay .tc-server text arrives as one of:
+      "(EU) Anniversary - Spineshatter"  → group + realm
+      "(EU) Anniversary"                 → group only
+      "Spineshatter"                     → bare realm name (broken / OCE format)
+
+    The bare-name case is explicitly cleared at the end so that
+    _build_alias_key returns None and the offer is routed to quarantine
+    (reason="unresolved_server") rather than creating a fake top-level
+    sidebar group named after the server.
+    """
     raw = (offer.display_server or "").strip()
     m = re.match(r"^\((?P<region>[A-Za-z]{2,})\)\s*(?P<body>.*)$", raw)
     if not m:
+        # display_server has no "(REGION)" prefix — bare server name or unknown
+        # format. Clear it so _build_alias_key returns None → quarantine.
+        # The _GROUP_RE guard in get_servers() is the last line of defence, but
+        # clearing here prevents the unresolved offer from reaching the cache.
+        if offer.display_server:
+            logger.debug(
+                "FunPay: display_server=%r has no (REGION) prefix — clearing "
+                "to prevent bare-name sidebar group",
+                offer.display_server,
+            )
+            offer.display_server = ""
         return offer
 
     region  = m.group("region").upper()
@@ -180,6 +210,19 @@ def _normalize_funpay_offer(offer: Offer) -> Offer:
     offer.display_server = f"({region}) {version}"
     if realm:
         offer.server_name = realm
+
+    # Guard: display_server must not equal server_name after normalisation.
+    # If they're equal, something went wrong upstream (FunPay sent just a realm
+    # name that happened to start with "(REGION)"). Clear display_server so the
+    # offer quarantines rather than creating a single-realm group.
+    if offer.display_server and offer.server_name:
+        if offer.display_server == offer.server_name:
+            logger.warning(
+                "FunPay: display_server=%r equals server_name — clearing",
+                offer.display_server,
+            )
+            offer.display_server = ""
+
     return offer
 
 
@@ -193,6 +236,15 @@ def _normalize_g2g_offer(offer: Offer) -> Offer:
 
     Kept for backward compatibility with any legacy cached offers that may still
     carry a "(Region) Version" display_server from a previous parser version.
+
+    Guard (model_validator fallback):
+    Offer.model_validator sets display_server = server.lower() when display_server
+    is empty. For G2G, server = server_name.lower() (e.g. "spineshatter"). If
+    _apply_canonical is later skipped (cold server_data_cache), the offer reaches
+    get_servers() with display_server = "spineshatter" — a bare realm name rather
+    than a canonical group key like "(EU) Anniversary". Clearing it here ensures
+    the offer is always either canonicalised by _apply_canonical or filtered by
+    the _GROUP_RE guard in get_servers().
     """
     ds = offer.display_server or ""
     m = re.match(r"^\((?P<region>[A-Za-z]{2,})\)\s*(?P<version>.+)$", ds)
@@ -201,6 +253,17 @@ def _normalize_g2g_offer(offer: Offer) -> Offer:
         version = _canonicalize_version(m.group("version").strip())
         offer.display_server = f"({region}) {version}"
         offer.server         = offer.display_server.lower()
+        return offer
+
+    # Guard: if display_server equals the server_name (bare realm, from the
+    # model_validator fallback "display_server = server.lower()"), clear it.
+    # _apply_canonical will set the correct "(REGION) Version" group key.
+    # Without this, cold-cache cycles leave offers with display_server="spineshatter"
+    # that pollute the sidebar with single-realm top-level groups.
+    if offer.display_server and offer.server_name:
+        if offer.display_server.lower() == offer.server_name.lower():
+            offer.display_server = ""
+
     return offer
 
 
@@ -699,7 +762,11 @@ def get_servers() -> list[ServerGroup]:
 
     for offer in get_all_offers():
         ds = offer.display_server
-        if not ds or offer.price_per_1k <= 0:
+        # Guard: only accept canonical group keys in "(REGION) Version" format.
+        # Bare server names (e.g. "spineshatter", "Maladath") reach here when
+        # _apply_canonical was skipped on a cold cache cycle. Filtering them here
+        # prevents single-realm top-level groups from polluting the sidebar.
+        if not ds or not _GROUP_RE.match(ds) or offer.price_per_1k <= 0:
             continue
         group_realms.setdefault(ds, set())
         if offer.server_name:
