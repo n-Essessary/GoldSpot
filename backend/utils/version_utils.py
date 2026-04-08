@@ -1,9 +1,22 @@
 from __future__ import annotations
 
-# Realms whose region in the G2G API response does not match their actual region.
-# G2G places certain AU realms under EU/US region buckets; this table corrects that.
-# Key: realm name (lowercase). Value: (correct_region, correct_version)
+# ── DEPRECATED: REALM_REGION_OVERRIDE ────────────────────────────────────────
+# Previously used in g2g_parser._parse_title() to correct AU realms misfiled
+# by G2G under EU/US region buckets.
+#
+# SUPERSEDED by canonical server registry (migration 010 + db/canonical_servers.py):
+#   • Penance    → canonical region "AU" in servers table
+#   • Shadowstrike → canonical region "AU" in servers table
+#   • Maladath   → canonical region "AU" in servers table
+#
+# Region overrides now happen in normalize_pipeline._apply_canonical() by
+# reading the canonical servers table. The raw source region is ignored.
+# Wrong-region events are logged as "wrong_region_overridden" (informational).
+#
+# This dict is retained here only for reference and backward compatibility.
+# DO NOT import or use in parsers — parsers must not make region decisions.
 REALM_REGION_OVERRIDE: dict[str, tuple[str, str]] = {
+    # DEPRECATED — kept for historical reference only
     "penance":      ("AU", "Season of Discovery"),
     "shadowstrike": ("AU", "Season of Discovery"),
 }

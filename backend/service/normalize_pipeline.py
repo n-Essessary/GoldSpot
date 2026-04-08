@@ -4,27 +4,45 @@ service/normalize_pipeline.py — Deterministic offer normalization pipeline.
 Pipeline for every raw offer coming out of a parser:
 
     RAW OFFER → [1. validate] → [2. resolve] → [3. canonicalize]
-              → [4. price validate / reroute] → [5. dedup] → NORMALIZED OFFER
-                                                             or QUARANTINE
+              → [4. is_active check] → [5. price validate / reroute]
+              → [6. dedup] → NORMALIZED OFFER or QUARANTINE
 
 Guarantees:
   1. Deterministic: same input + same DB state → same output, always.
-  2. Version is taken from the canonical server registry (servers table),
-     NEVER from the raw source title. If resolution fails, display_server
-     keeps its parser-derived value (no silent corruption).
+  2. Version, region, and realm_type come from the canonical server registry
+     (servers table), NEVER from the raw source title.
   3. Missing faction defaults to "Horde". Unknown faction is quarantined.
   4. Broken title (empty server, pipeline exception) → quarantine.
-  5. Price validation is advisory only — never creates new server records.
+  5. Unresolvable server → quarantine with reason="unresolved_server".
+     No implicit fallbacks, no guessing, no default assignments.
+  6. Inactive server (is_active=False, e.g. Season of Mastery) → quarantine
+     with reason="deprecated_version".
+  7. Source region override: if the raw offer's region (from display_server)
+     differs from the canonical region, the canonical wins and the event is
+     logged with reason="wrong_region_overridden" (informational, not quarantine).
+  8. Alias conflicts (two server_ids for same alias) → quarantine with
+     reason="alias_conflict". Not auto-resolved.
+  9. Price validation is advisory only — never creates new server records.
      If an offer's price doesn't fit the resolved server's profile, we attempt
      to reroute to the same server_name + region with a different version.
      If no better match → offer is kept with the original resolution.
-  6. Dedup by (source, offer_id) within each batch.
+ 10. Dedup by (source, offer_id) within each batch.
 
 What this pipeline does NOT touch:
   • raw_price, raw_price_unit, lot_size, price_per_1k (parser contract)
   • Parser output beyond display_server / server_name / faction defaults
   • /offers response contract (OfferRow / OffersResponse)
   • Frontend-facing field names
+
+Quarantine reasons (canonical set):
+  "empty_server_title"    — server_name and display_server both empty
+  "unknown_faction:…"     — unrecognised faction string
+  "zero_price"            — price_per_1k ≤ 0
+  "unresolved_server"     — no canonical server found for the alias
+  "deprecated_version"    — server is_active=False (e.g. Season of Mastery)
+  "alias_conflict"        — alias maps to multiple canonical servers
+  "pipeline_exception"    — unexpected exception during processing
+  (informational, not quarantine): "wrong_region_overridden"
 """
 from __future__ import annotations
 
@@ -111,26 +129,63 @@ def _validate_and_default(offer: "Offer") -> tuple[Optional["Offer"], Optional[s
 
 # ── Step 3: Canonicalization ──────────────────────────────────────────────────
 
+_DISPLAY_REGION_RE = re.compile(r"^\(([A-Z]{2,})\)", re.IGNORECASE)
+
+
 def _apply_canonical(offer: "Offer", server_data: dict) -> None:
     """
     Overwrite offer fields with canonical values from the servers table.
 
-    server_data: {"id": int, "name": str, "region": str, "version": str}
+    server_data: {
+      "id": int, "name": str, "region": str, "version": str,
+      "realm_type": str, "is_active": bool
+    }
 
-    After this call the offer's display_server, server, and server_name
-    are authoritative and sourced from the canonical registry.
-    Mutates offer in-place (consistent with existing normalize helpers).
+    Canonical assignment rules (enforced here):
+      • region  — always from canonical, never from source
+      • version — always from canonical, never from source title
+      • realm_type — always from canonical ("Normal" | "Hardcore")
+      • display_server — derived: "(REGION) VERSION" + " · Hardcore" for HC realms
+
+    If the source region (extracted from the current display_server) differs
+    from the canonical region, the canonical wins and a "wrong_region_overridden"
+    event is logged (informational — offer is NOT quarantined).
+
+    Mutates offer in-place.
     """
-    canonical_region  = server_data["region"]
-    canonical_version = server_data["version"]
-    canonical_name    = server_data["name"]
+    canonical_region    = server_data["region"]
+    canonical_version   = server_data["version"]
+    canonical_name      = server_data["name"]
+    canonical_realm_type= server_data.get("realm_type", "Normal")
 
-    new_display = f"({canonical_region}) {canonical_version}"
+    # ── Region override detection (informational) ─────────────────────────────
+    source_region: str = ""
+    ds = (offer.display_server or "").strip()
+    m = _DISPLAY_REGION_RE.match(ds)
+    if m:
+        source_region = m.group(1).upper()
+
+    if source_region and source_region != canonical_region:
+        logger.info(
+            "normalize: wrong_region_overridden  offer_id=%s  "
+            "source_region=%r  canonical_region=%r  server=%r",
+            offer.id, source_region, canonical_region, canonical_name,
+        )
+
+    # ── Build display_server ──────────────────────────────────────────────────
+    # Format: "(REGION) VERSION" for Normal realms
+    #         "(REGION) VERSION · Hardcore" for Hardcore realms
+    base_display = f"({canonical_region}) {canonical_version}"
+    if canonical_realm_type == "Hardcore":
+        new_display = f"{base_display} · Hardcore"
+    else:
+        new_display = base_display
 
     offer.display_server = new_display
-    offer.server         = new_display.lower()    # Offer.server is always lowercase
+    offer.server         = new_display.lower()   # Offer.server is always lowercase
     offer.server_name    = canonical_name
     offer.server_id      = server_data["id"]
+    offer.realm_type     = canonical_realm_type
 
 
 # ── Step 4: Price validation & rerouting ─────────────────────────────────────
@@ -204,27 +259,43 @@ def _build_alias_key(offer: "Offer") -> Optional[str]:
     """
     Construct the raw alias string used for server_aliases lookup.
 
-    Format mirrors what is seeded into server_aliases by the admin / migration:
-      G2G:    "Spineshatter [EU - Anniversary] - Horde"
-      FunPay: "(EU) Anniversary - Spineshatter"
+    G2G:    The raw title from the G2G API IS the alias format.
+            Example: "Spineshatter [EU - Anniversary] - Horde"
+            We use offer.raw_title directly (set by g2g_parser._to_offer()).
+            This is accurate and eliminates version-guessing in the parser.
 
-    Returns None if display_server cannot be parsed (offer will fall through
-    to fuzzy resolve in server_resolver).
+    FunPay: Alias format is "(EU) Version - ServerName".
+            Reconstructed from display_server (already normalised by
+            _normalize_funpay_offer) + server_name.
+
+    Returns None if the key cannot be constructed (offer passes to fuzzy
+    resolve in server_resolver, or is quarantined as unresolved_server).
     """
-    ds = (offer.display_server or "").strip()
-    m = _DISPLAY_RE.match(ds.upper()) or _DISPLAY_RE.match(ds)
-    if not m:
+    # ── G2G: use raw title directly ───────────────────────────────────────────
+    if offer.source == "g2g":
+        if offer.raw_title:
+            return offer.raw_title  # exact alias format as seeded in DB
+        # Fallback for legacy offers in-flight without raw_title:
+        # reconstruct from parsed fields if display_server has "(Region) Version" format.
+        ds = (offer.display_server or "").strip()
+        m = _DISPLAY_RE.match(ds.upper()) or _DISPLAY_RE.match(ds)
+        if m and offer.server_name:
+            region  = m.group("region").upper()
+            version = ds[m.start("version"):].strip()
+            return f"{offer.server_name} [{region} - {version}] - {offer.faction}"
         return None
 
-    region  = m.group("region").upper()
-    # Preserve original casing of version from display_server (e.g. "Anniversary")
-    version = ds[m.start("version"):].strip()
-
-    if offer.source == "g2g" and offer.server_name:
-        return f"{offer.server_name} [{region} - {version}] - {offer.faction}"
-
-    if offer.source == "funpay" and offer.server_name:
-        return f"({region}) {version} - {offer.server_name}"
+    # ── FunPay: reconstruct from display_server + server_name ─────────────────
+    if offer.source == "funpay":
+        ds = (offer.display_server or "").strip()
+        m = _DISPLAY_RE.match(ds.upper()) or _DISPLAY_RE.match(ds)
+        if not m:
+            return None
+        region  = m.group("region").upper()
+        version = ds[m.start("version"):].strip()
+        if offer.server_name:
+            return f"({region}) {version} - {offer.server_name}"
+        return None
 
     return None
 
@@ -300,7 +371,10 @@ async def normalize_offer_batch(
                     raw_id=offer_id_for_log,
                     source=getattr(offer, "source", "unknown"),
                     reason=quarantine_reason,
-                    raw_title=getattr(offer, "display_server", ""),
+                    raw_title=(
+                        getattr(offer, "raw_title", "")
+                        or getattr(offer, "display_server", "")
+                    ),
                     price=getattr(offer, "price_per_1k", 0.0),
                 ))
                 continue
@@ -319,24 +393,58 @@ async def normalize_offer_batch(
                     if server_id is not None:
                         offer.server_id = server_id
 
-            # ── Step 3: canonicalize from registry ────────────────────────────
-            # Version, region, name come from canonical servers table — NEVER
-            # from the raw source title. Priority: registry > FunPay > G2G.
-            if offer.server_id is not None:
-                server_data = get_server_data(offer.server_id)
-                if server_data is not None:
-                    _apply_canonical(offer, server_data)
+            # ── Strict: unresolved server → quarantine ────────────────────────
+            # Per spec: "No implicit fallbacks — if canonical server cannot be
+            # resolved, send to quarantine. Do NOT guess, assign defaults, or
+            # create new canonical entries."
+            if offer.server_id is None:
+                quarantined.append(QuarantinedOffer(
+                    raw_id=offer_id_for_log,
+                    source=getattr(offer, "source", "unknown"),
+                    reason="unresolved_server",
+                    raw_title=getattr(offer, "raw_title", "") or getattr(offer, "display_server", ""),
+                    price=getattr(offer, "price_per_1k", 0.0),
+                    details=(
+                        f"server_name={offer.server_name!r} "
+                        f"display_server={offer.display_server!r}"
+                    ),
+                ))
+                continue
 
-            # ── Step 4: price validation + optional rerouting ─────────────────
+            # ── Step 3: canonicalize from registry ────────────────────────────
+            # Version, region, realm_type, name — ALWAYS from canonical servers
+            # table, NEVER from the raw source title.
+            server_data = get_server_data(offer.server_id)
+            if server_data is not None:
+                _apply_canonical(offer, server_data)
+
+            # ── Step 4: is_active check → quarantine deprecated versions ───────
+            # Inactive servers (e.g. Season of Mastery) are resolved and
+            # canonicalised (so the quarantine log shows the correct name) but
+            # then quarantined so they never reach the live cache.
+            if server_data is not None and not server_data.get("is_active", True):
+                quarantined.append(QuarantinedOffer(
+                    raw_id=offer_id_for_log,
+                    source=getattr(offer, "source", "unknown"),
+                    reason="deprecated_version",
+                    raw_title=getattr(offer, "raw_title", "") or getattr(offer, "display_server", ""),
+                    price=getattr(offer, "price_per_1k", 0.0),
+                    details=(
+                        f"server={offer.server_name!r} "
+                        f"version={server_data.get('version')!r}"
+                    ),
+                ))
+                continue
+
+            # ── Step 5: price validation + optional rerouting ─────────────────
             # Only runs if server_id resolved — otherwise no profile to compare.
             # Price never creates servers; it only selects among existing ones.
-            if offer.server_id is not None:
-                profile = get_profile(offer.server_id, "All")
-                if not _price_fits_profile(offer.price_per_1k, profile):
-                    await _try_reroute(offer, pool)
-                    # If reroute fails, offer keeps its original server — not quarantined.
+            profile = get_profile(offer.server_id, "All")
+            if not _price_fits_profile(offer.price_per_1k, profile):
+                await _try_reroute(offer, pool)
+                # If reroute fails, offer keeps its original server — not quarantined.
 
-            # ── Step 5: dedup by (source, offer_id) ──────────────────────────
+            # ── Step 6: dedup by (source, offer_id) ──────────────────────────
             dedup_key = f"{offer.source}:{offer.id}"
             if dedup_key in seen_ids:
                 logger.debug(
@@ -356,7 +464,10 @@ async def normalize_offer_batch(
                 raw_id=offer_id_for_log,
                 source=getattr(offer, "source", "unknown"),
                 reason="pipeline_exception",
-                raw_title=getattr(offer, "display_server", ""),
+                raw_title=(
+                    getattr(offer, "raw_title", "")
+                    or getattr(offer, "display_server", "")
+                ),
                 price=getattr(offer, "price_per_1k", 0.0),
             ))
 

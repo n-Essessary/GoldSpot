@@ -46,3 +46,21 @@ async def test_conflicting_raw_versions_resolve_to_canonical_registry(make_offer
     )
     normalized, quarantined = await np.normalize_offer_batch([offer], pool=None)
     assert not quarantined and normalized[0].display_server == "(EU) Season of Discovery"
+
+
+@pytest.mark.asyncio
+async def test_alias_conflicts_are_excluded_from_cache(caplog):
+    class FakePool:
+        async def fetch(self, query):
+            if "FROM server_aliases" in query:
+                return [
+                    {"alias": "Firemaw [EU - Anniversary] - Horde", "server_id": 1},
+                    {"alias": "Firemaw [EU - Anniversary] - Horde", "server_id": 2},
+                ]
+            return [
+                {"id": 1, "name": "Firemaw", "region": "EU", "version": "Anniversary", "realm_type": "Normal", "is_active": True},
+                {"id": 2, "name": "Firemaw", "region": "EU", "version": "Classic Era", "realm_type": "Normal", "is_active": True},
+            ]
+
+    await sr._load_alias_cache(FakePool())
+    assert "firemaw [eu - anniversary] - horde" not in sr._alias_cache

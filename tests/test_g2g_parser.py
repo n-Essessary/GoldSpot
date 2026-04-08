@@ -4,7 +4,6 @@ import asyncio
 import pytest
 
 from parser.g2g_parser import G2GClient, G2GOffer, G2GRegion, _build_offer_url, _dedupe, _parse_title, _to_offer, fetch_g2g_game
-from service.offers_service import _normalize_g2g_offer
 
 
 @pytest.mark.parametrize(
@@ -41,7 +40,7 @@ def test_parse_title_none_safe():
     assert isinstance(out, tuple) and len(out) == 4
 
 
-def test_parse_title_seasonal_normalizes_after_service_step(make_offer):
+def test_to_offer_keeps_raw_title_for_canonical_resolution(make_offer):
     raw = G2GOffer(
         offer_id="a",
         title="Lava Lash [EU - Seasonal] - Horde",
@@ -57,8 +56,8 @@ def test_parse_title_seasonal_normalizes_after_service_step(make_offer):
     )
     offer = _to_offer(raw, make_offer().updated_at)
     assert offer is not None
-    normalized = _normalize_g2g_offer(offer)
-    assert normalized.display_server == "(EU) Season of Discovery"
+    assert offer.display_server == "lava lash"
+    assert offer.raw_title == "Lava Lash [EU - Seasonal] - Horde"
 
 
 def test_to_offer_price_zero_returns_none(make_offer):
@@ -71,15 +70,16 @@ def test_to_offer_available_qty_zero_returns_none(make_offer):
     assert _to_offer(raw, make_offer().updated_at) is None
 
 
-def test_to_offer_unrecognized_title_returns_none(make_offer):
+def test_to_offer_unrecognized_title_kept_for_quarantine_stage(make_offer):
     raw = G2GOffer("a", "Unrecognized title", "x", "eu", "r", 0.003, 1, 10, "s", "b", "svc")
-    assert _to_offer(raw, make_offer().updated_at) is None
+    offer = _to_offer(raw, make_offer().updated_at)
+    assert offer is not None and offer.raw_title == "Unrecognized title"
 
 
 def test_to_offer_seasonal_version_canonicalized(make_offer):
     raw = G2GOffer("a", "Lava Lash [EU - Seasonal] - Horde", "Lava Lash", "eu", "r", 0.003, 1, 10, "s", "b", "svc")
     offer = _to_offer(raw, make_offer().updated_at)
-    assert offer is not None and offer.display_server == "(EU) Season of Discovery"
+    assert offer is not None and offer.display_server == "lava lash"
 
 
 def test_to_offer_skip_qty_check(make_offer):
@@ -88,10 +88,10 @@ def test_to_offer_skip_qty_check(make_offer):
     assert _to_offer(raw, make_offer().updated_at, skip_qty_check=True) is not None
 
 
-def test_normalize_g2g_offer_hardcore(make_offer):
-    offer = make_offer(source="g2g", display_server="(EU) Hardcore", server="(eu) hardcore")
-    normalized = _normalize_g2g_offer(offer)
-    assert normalized.display_server == "(EU) Hardcore"
+def test_to_offer_sets_non_empty_temp_server_slug(make_offer):
+    raw = G2GOffer("a", "Soulseeker [EU - Hardcore] - Horde", "Soulseeker", "eu", "r", 0.003, 1, 10, "s", "b", "svc")
+    offer = _to_offer(raw, make_offer().updated_at)
+    assert offer is not None and offer.server
 
 
 def test_dedupe_removes_exact_duplicate_offer_ids(make_offer):
@@ -315,33 +315,30 @@ def test_parse_title_hardcore_horde():
     assert faction == "Horde"
 
 
-# ── Bug 2B: AU realm region override ─────────────────────────────────────────
+# ── Source-region parser behavior (no hardcoded realm overrides) ─────────────
 
-def test_parse_title_penance_overrides_to_au():
-    """Penance must always return region=AU regardless of bracket region."""
+def test_parse_title_penance_keeps_source_region_us():
     server, region, version, faction = _parse_title("Penance [US - Seasonal] - Horde")
     assert server  == "Penance"
-    assert region  == "AU"
-    assert version == "Season of Discovery"
+    assert region  == "US"
+    assert version == "Seasonal"
 
 
-def test_parse_title_penance_ru_overrides_to_au():
-    """Penance with RU bracket must still return AU."""
+def test_parse_title_penance_keeps_source_region_ru():
     server, region, version, faction = _parse_title("Penance [RU - Seasonal] - Alliance")
-    assert region  == "AU"
-    assert version == "Season of Discovery"
+    assert region  == "RU"
+    assert version == "Seasonal"
     assert faction == "Alliance"
 
 
-def test_parse_title_shadowstrike_overrides_to_au():
-    """Shadowstrike must always return region=AU."""
+def test_parse_title_shadowstrike_keeps_source_region_ru():
     server, region, version, faction = _parse_title("Shadowstrike [RU - Seasonal] - Alliance")
     assert server  == "Shadowstrike"
-    assert region  == "AU"
-    assert version == "Season of Discovery"
+    assert region  == "RU"
+    assert version == "Seasonal"
 
 
-def test_parse_title_shadowstrike_us_overrides_to_au():
+def test_parse_title_shadowstrike_keeps_source_region_us():
     server, region, version, faction = _parse_title("Shadowstrike [US - Seasonal] - Horde")
-    assert region  == "AU"
-    assert version == "Season of Discovery"
+    assert region  == "US"
+    assert version == "Seasonal"

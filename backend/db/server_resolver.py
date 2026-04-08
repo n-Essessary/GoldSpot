@@ -112,42 +112,84 @@ def _normalise_region(raw: str) -> str:
 
 
 async def _load_alias_cache(pool) -> None:
-    """Reload alias cache and server data cache from DB into memory."""
+    """Reload alias cache and server data cache from DB into memory.
+
+    Alias conflict detection:
+      Each alias MUST map to exactly one server. If the DB contains a duplicate
+      (two server_aliases rows pointing different server_ids for the same alias
+      text), both are logged as reason="alias_conflict" and the alias is omitted
+      from the in-process cache so it cannot silently resolve to the wrong server.
+      This is a configuration error requiring manual review.
+    """
     global _alias_cache, _cache_loaded_at
     global _server_data_cache, _server_versions_index
     try:
-        # ── Alias cache ───────────────────────────────────────────────────────
+        # ── Alias cache (with conflict detection) ─────────────────────────────
         alias_rows = await pool.fetch(
             "SELECT alias, server_id FROM server_aliases"
         )
-        _alias_cache = {row["alias"].lower(): row["server_id"] for row in alias_rows}
+
+        # Build with conflict detection: alias (lower) → server_id
+        new_alias_cache: dict[str, int] = {}
+        conflicted_aliases: set[str] = set()
+
+        for row in alias_rows:
+            lo = row["alias"].lower()
+            sid = row["server_id"]
+            if lo in new_alias_cache:
+                if new_alias_cache[lo] != sid:
+                    # Two different server_ids for the same alias text → conflict
+                    logger.warning(
+                        "server_resolver: alias_conflict alias=%r "
+                        "server_id_a=%d server_id_b=%d — alias excluded from cache",
+                        row["alias"], new_alias_cache[lo], sid,
+                    )
+                    conflicted_aliases.add(lo)
+            else:
+                new_alias_cache[lo] = sid
+
+        # Remove conflicted aliases so they never silently resolve
+        for lo in conflicted_aliases:
+            del new_alias_cache[lo]
+
+        _alias_cache = new_alias_cache
 
         # ── Server data cache ─────────────────────────────────────────────────
-        # Load all active servers so normalize_pipeline can overwrite version
-        # from canonical registry without extra DB round-trips.
+        # Load ALL servers (active AND inactive) so normalize_pipeline can check
+        # is_active and quarantine deprecated-version offers correctly.
         server_rows = await pool.fetch(
-            "SELECT id, name, region, version FROM servers WHERE is_active = TRUE"
+            """
+            SELECT id, name, region, version, realm_type, is_active
+              FROM servers
+            """
         )
         new_data: dict[int, dict] = {}
         new_versions: dict[tuple[str, str], list[dict]] = {}
         for row in server_rows:
             entry = {
-                "id":      row["id"],
-                "name":    row["name"],
-                "region":  row["region"],
-                "version": row["version"],
+                "id":         row["id"],
+                "name":       row["name"],
+                "region":     row["region"],
+                "version":    row["version"],
+                "realm_type": row["realm_type"] if "realm_type" in row.keys() else "Normal",
+                "is_active":  row["is_active"],
             }
             new_data[row["id"]] = entry
-            key = (row["name"].lower(), row["region"].upper())
-            new_versions.setdefault(key, []).append(entry)
+            # Version index only includes active servers (used for price rerouting)
+            if row["is_active"]:
+                key = (row["name"].lower(), row["region"].upper())
+                new_versions.setdefault(key, []).append(entry)
 
         _server_data_cache     = new_data
         _server_versions_index = new_versions
 
         _cache_loaded_at = time.monotonic()
         logger.debug(
-            "server_resolver: loaded %d aliases, %d servers into cache",
-            len(_alias_cache), len(new_data),
+            "server_resolver: loaded %d aliases (%d conflicts excluded), "
+            "%d servers into cache",
+            len(_alias_cache),
+            len(conflicted_aliases),
+            len(new_data),
         )
     except Exception:
         logger.exception("server_resolver: failed to load alias cache")
@@ -373,7 +415,12 @@ async def _lookup_server(
     version: str,
     pool,
 ) -> Optional[int]:
-    """Query servers table for (name, region, version) → server_id."""
+    """Query servers table for (name, region, version) → server_id.
+
+    Intentionally returns BOTH active and inactive servers: normalize_pipeline
+    checks is_active separately and quarantines deprecated-version offers.
+    Resolving the server_id is always correct; the active check is policy.
+    """
     if not (name and region and version):
         return None
     try:
@@ -383,7 +430,6 @@ async def _lookup_server(
             WHERE LOWER(name)    = LOWER($1)
               AND region         = $2
               AND LOWER(version) = LOWER($3)
-              AND is_active      = TRUE
             """,
             name, region, version,
         )

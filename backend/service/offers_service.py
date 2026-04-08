@@ -40,6 +40,12 @@ from typing import Optional
 from api.schemas import Offer, PriceHistoryPoint, ServerGroup
 from utils.version_utils import _VERSION_ALIASES, _canonicalize_version
 
+# ── Hardcore display suffix ───────────────────────────────────────────────────
+# canonical display_server for Hardcore realms: "(EU) Anniversary · Hardcore"
+# This suffix is set by normalize_pipeline._apply_canonical() and used here
+# only for _version_rank() ordering — no string manipulation needed in get_servers().
+_HARDCORE_SUFFIX = " · Hardcore"
+
 logger = logging.getLogger(__name__)
 
 # ── Per-source state ──────────────────────────────────────────────────────────
@@ -72,11 +78,17 @@ _SNAP_WRITE_THRESHOLD = 0.005   # 0.5%
 _last_snap_price: dict[str, float] = {}
 
 _VERSION_ORDER: dict[str, int] = {
+    # Normal realms sorted by version
     "Anniversary":         0,
     "Season of Discovery": 1,
     "Classic Era":         2,
     "Classic":             3,
-    "Hardcore":            4,
+    # Hardcore variants come after their Normal counterpart
+    # (e.g. "(EU) Anniversary · Hardcore" sorts after "(EU) Anniversary")
+    "Anniversary · Hardcore":         10,
+    "Season of Discovery · Hardcore": 11,
+    "Classic Era · Hardcore":         12,
+    "Classic · Hardcore":             13,
 }
 
 
@@ -172,7 +184,16 @@ def _normalize_funpay_offer(offer: Offer) -> Offer:
 
 
 def _normalize_g2g_offer(offer: Offer) -> Offer:
-    """Canonicalise display_server of G2G offer via _VERSION_ALIASES."""
+    """Pre-normalize G2G offer display_server string before canonical pipeline.
+
+    With the new parser design (g2g_parser._to_offer sets display_server=""),
+    this function is effectively a no-op for current offers: the regex won't
+    match an empty string. Canonical values (region, version, realm_type) are
+    assigned exclusively by normalize_pipeline._apply_canonical() after DB lookup.
+
+    Kept for backward compatibility with any legacy cached offers that may still
+    carry a "(Region) Version" display_server from a previous parser version.
+    """
     ds = offer.display_server or ""
     m = re.match(r"^\((?P<region>[A-Za-z]{2,})\)\s*(?P<version>.+)$", ds)
     if m:
@@ -184,10 +205,16 @@ def _normalize_g2g_offer(offer: Offer) -> Offer:
 
 
 def _version_rank(display_server: str) -> int:
-    ds = display_server.strip()
-    for ver, rank in _VERSION_ORDER.items():
-        if ver.lower() in ds.lower():
-            return rank
+    """Return sort rank for display_server string.
+
+    Hardcore variants (containing " · Hardcore") are matched first because their
+    key strings are longer and more specific (e.g. "Anniversary · Hardcore" before
+    "Anniversary"). We sort the keys longest-first to ensure correct precedence.
+    """
+    ds = display_server.strip().lower()
+    for ver in sorted(_VERSION_ORDER, key=len, reverse=True):
+        if ver.lower() in ds:
+            return _VERSION_ORDER[ver]
     return 99
 
 
@@ -654,9 +681,18 @@ def get_servers() -> list[ServerGroup]:
     """
     Hierarchical server group list for the sidebar.
 
+    Grouping: by display_server (set by normalize_pipeline._apply_canonical()).
+      Normal realms:   "(EU) Anniversary"
+      Hardcore realms: "(EU) Anniversary · Hardcore"  ← separate group
+
     min_price = best_ask from _index_cache (realistic buy price).
     Falls back to simple min across offers if cache not yet populated.
-    Sorted by: version (Anniversary=0 … Classic=3), then min_price ASC.
+
+    Sorting: version rank (Anniversary first) then min_price ASC.
+    Hardcore groups appear after their Normal counterparts (see _VERSION_ORDER).
+
+    Note: Penance and Shadowstrike region correction (EU→AU) is now handled
+    at normalization time by _apply_canonical() — no post-hoc filtering needed.
     """
     group_min_price: dict[str, float]    = {}
     group_realms:    dict[str, set[str]] = {}
@@ -672,7 +708,7 @@ def get_servers() -> list[ServerGroup]:
         if cur is None or offer.price_per_1k < cur:
             group_min_price[ds] = offer.price_per_1k
 
-    # Override fallback with cached best_ask
+    # Override fallback min_price with cached best_ask (more reliable)
     for ds in group_min_price:
         cached = (
             _index_cache.get(f"{ds}::All")
@@ -681,17 +717,6 @@ def get_servers() -> list[ServerGroup]:
         )
         if cached is not None:
             group_min_price[ds] = cached.best_ask
-
-    # Remove AU-specific realms from any non-AU server group.
-    # Penance and Shadowstrike are AU Season of Discovery realms; G2G API sometimes
-    # files them under EU/US region buckets, producing phantom realm entries.
-    _AU_ONLY_REALMS: set[str] = {"penance", "shadowstrike"}
-    for ds in group_realms:
-        if not ds.lower().startswith("(au)"):
-            group_realms[ds] = {
-                r for r in group_realms[ds]
-                if r.lower() not in _AU_ONLY_REALMS
-            }
 
     sorted_groups = sorted(
         group_min_price,

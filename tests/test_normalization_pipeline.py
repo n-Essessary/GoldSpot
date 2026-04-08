@@ -30,3 +30,22 @@ async def test_canonical_version_overrides_raw_title(make_offer, monkeypatch):
     )
     normalized, quarantined = await np.normalize_offer_batch([offer], None)
     assert not quarantined and normalized[0].display_server == "(EU) Season of Discovery"
+
+
+@pytest.mark.asyncio
+async def test_inactive_server_goes_to_quarantine(make_offer, monkeypatch):
+    offer = make_offer(server_id=22, display_server="(EU) Anniversary", server="(eu) anniversary")
+    monkeypatch.setattr(
+        sr,
+        "get_server_data",
+        lambda _sid: {
+            "id": 22,
+            "name": "Jom Gabbar",
+            "region": "US",
+            "version": "Season of Mastery",
+            "realm_type": "Normal",
+            "is_active": False,
+        },
+    )
+    normalized, quarantined = await np.normalize_offer_batch([offer], None)
+    assert normalized == [] and quarantined and quarantined[0].reason == "deprecated_version"

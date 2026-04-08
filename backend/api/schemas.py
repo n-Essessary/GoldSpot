@@ -39,6 +39,13 @@ class Offer(BaseModel):
       Legacy parsers may set price_per_1k directly (raw_price stays 0).
       model_validator then back-fills raw_price = price_per_1k / 1000
       so DB writers always have a raw value to store.
+
+    Canonical server fields (set by normalize_pipeline after resolution):
+      server_id   — FK to servers.id; None until resolved
+      realm_type  — "Normal" | "Hardcore"; always from canonical registry
+      raw_title   — original source title (G2G only); used as alias lookup key
+                    so the parser never needs to guess version from the title.
+                    Not exposed in the API (not in OfferRow).
     """
     id: str
     # TODO(I6): keep strict source enum for all parsers; expand only with explicit new source rollout.
@@ -47,6 +54,17 @@ class Offer(BaseModel):
     display_server: str = ""    # group: "(EU) Anniversary"; set by parser
     server_name: str = ""       # realm inside group: "Spineshatter" (G2G)
     server_id: Optional[int] = None  # FK → servers.id; None during migration
+
+    # ── Canonical realm type (from server registry) ───────────────────────────
+    # "Normal" for all standard realms; "Hardcore" for permadeath realms.
+    # Hardcore is NOT a version — it is a property of the realm alongside version.
+    realm_type: str = "Normal"
+
+    # ── Raw source title (G2G only) ───────────────────────────────────────────
+    # Stored verbatim from the G2G API response for use as alias lookup key.
+    # Parsers MUST NOT guess version from this; canonical registry owns that.
+    # Not included in OfferRow / OffersResponse (internal pipeline field only).
+    raw_title: str = ""
 
     faction: str
 

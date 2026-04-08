@@ -89,8 +89,8 @@ def test_get_servers_single_source_only_funpay(make_offer):
 
 # ── Bug 2D: AU-only realms filtered from non-AU groups ────────────────────────
 
-def test_get_servers_penance_not_in_ru_sod(make_offer):
-    """Penance must not appear in (RU) Season of Discovery realm list."""
+def test_get_servers_keeps_realm_in_source_group_ru(make_offer):
+    """Without parser-side overrides, realm stays in source display_server group."""
     osvc._cache["g2g"] = [
         make_offer(
             id="p1",
@@ -105,18 +105,14 @@ def test_get_servers_penance_not_in_ru_sod(make_offer):
 
     servers = osvc.get_servers()
     ru_sod = next((s for s in servers if s.display_server == "(RU) Season of Discovery"), None)
-    # If the group exists, Penance must not be in its realms list
-    if ru_sod is not None:
-        assert "Penance" not in ru_sod.realms, (
-            "Penance (AU realm) must not appear under (RU) Season of Discovery"
-        )
+    assert ru_sod is not None and "Penance" in ru_sod.realms
 
     # Clean up
     osvc._cache["g2g"] = []
 
 
-def test_get_servers_penance_only_in_au_group(make_offer):
-    """Penance stays in (AU) Season of Discovery realms."""
+def test_get_servers_penance_in_au_group_when_source_is_au(make_offer):
+    """Penance appears in AU group when offer display_server is AU."""
     osvc._cache["g2g"] = [
         make_offer(
             id="p2",

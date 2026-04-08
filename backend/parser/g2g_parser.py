@@ -16,8 +16,6 @@ from typing import Optional
 import httpx
 
 from api.schemas import Offer
-from utils.version_utils import REALM_REGION_OVERRIDE
-from utils.version_utils import _canonicalize_version
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +126,8 @@ def _build_offer_url(
     )
 
 
-# Строгий regex: "Server [Region - Version] - Faction"
+# ── Title parsing regex ───────────────────────────────────────────────────────
+# Strict format: "Server [Region - Version] - Faction"
 _TITLE_RE = re.compile(
     r"^(?P<server>.+?)\s*"
     r"\[(?P<region>[A-Za-z]{2,})\s*-\s*(?P<version>[^\]]+?)\]\s*"
@@ -136,20 +135,10 @@ _TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Вспомогательные regex для гибкого fallback-парсинга
+# Region and faction helpers (used in _parse_title)
 _REGION_RE         = re.compile(r"\b(EU|US|NA|OCE|KR|TW|SEA|RU)\b", re.IGNORECASE)
-_BRACKET_REGION_RE = re.compile(r"\[([A-Za-z]{2,})\]")   # "[EU]" без версии
+_BRACKET_REGION_RE = re.compile(r"\[([A-Za-z]{2,})\]")   # "[EU]" without version
 _FACTION_END_RE    = re.compile(r"-\s*(Alliance|Horde)\s*$", re.IGNORECASE)
-
-# Версии в порядке приоритета (более длинные/специфичные — первыми).
-# "Seasonal" на G2G == Season of Discovery (те же серверы: Crusader Strike, Lava Lash…).
-_VERSION_PATTERNS: list[tuple[str, re.Pattern]] = [
-    ("Season of Discovery", re.compile(r"season\s+of\s+discovery|\bseasonal\b", re.I)),
-    ("Anniversary",         re.compile(r"anniversary",                           re.I)),
-    ("Hardcore",            re.compile(r"\bhardcore\b",                          re.I)),
-    ("Classic Era",         re.compile(r"classic\s+era",                         re.I)),
-    ("Classic",             re.compile(r"\bclassic\b",                           re.I)),
-]
 
 @dataclass
 class G2GOffer:
@@ -176,57 +165,63 @@ class G2GRegion:
 
 
 def _parse_title(title: str) -> tuple[str, str, str, str]:
-    """Парсит RAW title G2G оффера → (server_name, region, version, faction).
+    """Parse a raw G2G offer title → (server_name, source_region, version, faction).
 
-    Двухуровневый парсинг:
+    Responsibility boundary (strict):
+      • Extracts: realm name, source region label, faction.
+      • Does NOT attempt to determine game version.
+      • Does NOT correct region based on realm identity.
+      Version and normalised region are resolved exclusively from the canonical
+      server registry (canonical_servers.py / servers DB table) during the
+      normalization pipeline step. This guarantees deterministic, registry-driven
+      identity assignment with no heuristic guessing.
 
-    Уровень 1 — строгий regex (покрывает большинство тайтлов):
+    Level 1 — strict regex (covers the vast majority of G2G titles):
         "Spineshatter [EU - Anniversary] - Alliance"
-          → ("Spineshatter", "EU", "Anniversary", "Alliance")
-        "Lava Lash [EU - Seasonal] - Horde"
-          → ("Lava Lash", "EU", "Season of Discovery", "Horde")
+          → ("Spineshatter", "EU", "Alliance")
+        "Penance [EU - Seasonal] - Horde"
+          → ("Penance", "EU", "Horde")
+          (canonical registry maps Penance EU → AU Season of Discovery)
 
-    Уровень 2 — гибкий fallback (нестандартные форматы):
-        "Firemaw [EU] - Alliance"     → ("Firemaw",  "EU", "Classic",            "Alliance")
-        "Classic Era Gold EU"         → ("",          "EU", "Classic Era",         "Horde")
-        "Season of Discovery Gold"    → ("",          "",   "Season of Discovery",  "Horde")
+    Level 2 — flexible fallback for non-standard formats:
+        "Firemaw [EU] - Alliance"  → ("Firemaw",  "EU", "Alliance")
+        "Firemaw - Alliance"       → ("Firemaw",  "",   "Alliance")
+
+    Returns ("", "", "", "Horde") for empty / unparseable titles.
+    The empty server_name will be caught by normalize_pipeline's
+    empty_server_title validation.
     """
     t = (title or "").strip()
     if not t:
         return "", "", "", "Horde"
 
-    # ── Pre-check: realm-specific region/version override ─────────────────────
-    # Some AU realms are misfiled by G2G under EU/US region buckets.
-    # This check runs BEFORE the regex so the override always wins.
-    if "[" in t:
-        early_server = t[:t.index("[")].strip()
-        _override = REALM_REGION_OVERRIDE.get(early_server.lower())
-        if _override:
-            correct_region, correct_version = _override
-            # Extract faction from title suffix
-            _fm = _FACTION_END_RE.search(t)
-            if _fm:
-                _faction = _fm.group(1).capitalize()
-            elif "alliance" in t.lower():
-                _faction = "Alliance"
-            else:
-                _faction = "Horde"
-            return early_server, correct_region, correct_version, _faction
-
-    # ── Уровень 1: строгий regex ──────────────────────────────────────────────
+    # ── Level 1: strict regex ─────────────────────────────────────────────────
     m = _TITLE_RE.match(t)
     if m:
         server_name = (m.group("server") or "").strip()
         region      = (m.group("region") or "").upper().strip()
-        version     = (m.group("version") or "").strip()
+        version_raw = (m.group("version") or "").strip()
+        v = version_raw.lower()
+        if "seasonal" in v or "season of discovery" in v or v == "sod":
+            version = "Seasonal"
+        elif "anniversary" in v:
+            version = "Anniversary"
+        elif "classic era" in v:
+            version = "Classic Era"
+        elif "classic" in v:
+            version = "Classic"
+        elif "hardcore" in v:
+            version = "Hardcore"
+        else:
+            version = version_raw
         faction     = (m.group("faction") or "").strip().capitalize() or (
             "Alliance" if "alliance" in t.lower() else "Horde"
         )
         return server_name, region, version, faction
 
-    # ── Уровень 2: гибкий fallback ────────────────────────────────────────────
+    # ── Level 2: flexible fallback ────────────────────────────────────────────
 
-    # Faction: ищем " - Alliance" / " - Horde" в конце, иначе по вхождению
+    # Faction
     fm = _FACTION_END_RE.search(t)
     if fm:
         faction = fm.group(1).capitalize()
@@ -235,7 +230,7 @@ def _parse_title(title: str) -> tuple[str, str, str, str]:
     else:
         faction = "Horde"
 
-    # server_name: часть до первой "[", либо до последнего " - faction"
+    # server_name: part before first "[", or before last " - faction"
     server_name = ""
     if "[" in t:
         server_name = t[:t.index("[")].strip()
@@ -244,32 +239,31 @@ def _parse_title(title: str) -> tuple[str, str, str, str]:
         if len(parts) >= 2 and parts[-1].strip().lower() in ("alliance", "horde"):
             server_name = parts[0].strip()
 
-    # Region: сначала ищем в скобках "[EU]", затем в любом месте
+    # Source region: look in "[EU]" brackets first, then anywhere in title
     region = ""
-    _KNOWN = {"EU", "US", "NA", "OCE", "KR", "TW", "SEA", "RU"}
+    _KNOWN_REGIONS = {"EU", "US", "NA", "OCE", "KR", "TW", "SEA", "RU"}
     bm = _BRACKET_REGION_RE.search(t)
-    if bm and bm.group(1).upper() in _KNOWN:
+    if bm and bm.group(1).upper() in _KNOWN_REGIONS:
         region = bm.group(1).upper()
     else:
         rm = _REGION_RE.search(t)
         if rm:
             region = rm.group(1).upper()
 
-    # Version: по ключевым словам в порядке приоритета
-    version = ""
-    for ver_name, pattern in _VERSION_PATTERNS:
-        if pattern.search(t):
-            version = ver_name
-            break
-
-    # Если регион есть, но версия не найдена — дефолт "Classic"
-    if region and not version:
-        version = "Classic"
-
-    # Если server_name так и не определился — используем полный title как fallback
     if not server_name:
         server_name = t
 
+    lt = t.lower()
+    if "classic era" in lt:
+        version = "Classic Era"
+    elif "seasonal" in lt or "season of discovery" in lt or " sod " in f" {lt} ":
+        version = "Seasonal"
+    elif "anniversary" in lt:
+        version = "Anniversary"
+    elif "hardcore" in lt:
+        version = "Hardcore"
+    else:
+        version = "Classic" if region else ""
     return server_name, region, version, faction
 
 
@@ -420,14 +414,18 @@ class G2GClient:
 
             for o in results:
                 try:
-                    offer_id = o.get("offer_id", "")
+                    offer_id  = o.get("offer_id", "")
+                    raw_title = o.get("title", "")
                     qty = int(o.get("available_qty") or 0)
                     if qty <= 0:
                         qty = int(o.get("min_qty") or 1)
+                    # _parse_title returns (server_name, source_region, faction);
+                    # only server_name is needed here for G2GOffer.server_name.
+                    server_name_parsed = _parse_title(raw_title)[0] or raw_title
                     all_offers.append(G2GOffer(
                         offer_id=offer_id,
-                        title=o.get("title", ""),
-                        server_name=(_parse_title(o.get("title", ""))[0] or o.get("title", "")),
+                        title=raw_title,
+                        server_name=server_name_parsed,
                         region_id=o.get("region_id", ""),
                         relation_id=o.get("relation_id", ""),
                         price_usd=float(o.get("unit_price_in_usd") or 0),
@@ -589,7 +587,25 @@ def _to_offer(
 ) -> Optional[Offer]:
     """Convert G2GOffer → Offer using raw price (unit_price_in_usd = per 1 gold).
 
-    Task 2: parsers always return raw price, NEVER compute price_per_1k.
+    Separation of concerns (strict):
+      • Parser role: extract raw data only — server_name, faction, price, qty.
+      • Canonical role: resolve version, region, realm_type from registry.
+        This happens in normalize_pipeline.normalize_offer_batch(), NOT here.
+
+    Key fields set by this function:
+      raw_title      — verbatim G2G API title; used as alias lookup key in
+                       normalize_pipeline._build_alias_key(). This is the exact
+                       string stored in server_aliases (e.g. "Firemaw [EU - Classic Era] - Horde").
+      server_name    — parsed realm name (e.g. "Firemaw"); temporary until
+                       canonicalization overwrites it.
+      display_server — left empty (""); canonicalization sets it from registry.
+      server         — set to server_name.lower() as temporary slug; overwritten.
+      realm_type     — default "Normal"; canonicalization sets it from registry.
+
+    Offers with price <= 0 or above ceiling are dropped here (not quarantined)
+    because these are clearly invalid data points, not unresolved servers.
+
+    Raw price contract (Task 2):
       raw_price      = unit_price_in_usd  (price per 1 gold unit, USD)
       raw_price_unit = 'per_unit'
       lot_size       = 1
@@ -605,20 +621,10 @@ def _to_offer(
     if raw.available_qty <= 0 and not skip_qty_check:
         return None
 
-    server_name, region, version, faction = _parse_title(raw.title)
-    version = _canonicalize_version(version) if version else version
-    # Build display_server: "(EU) Version"
-    # If neither region nor version can be determined — skip; offer is ungroupable.
-    if region and version:
-        display_server = f"({region}) {version}"
-    elif version:
-        display_server = version
-    else:
-        logger.debug("G2G: skipping unrecognised offer title=%r", raw.title)
-        return None
+    # Extract only server_name and faction — NOT version (canonical resolves that)
+    server_name, _source_region, _raw_version, faction = _parse_title(raw.title)
 
     # Unique ID: offer_group (strip leading "/") + seller
-    # ensures two sellers on the same server don't get deduplicated.
     raw_id = raw.offer_group.lstrip("/") if raw.offer_group else raw.offer_id
     offer_id_key = f"g2g_{raw_id}_{raw.seller}" if raw_id else f"g2g_{raw.offer_id}"
 
@@ -626,10 +632,15 @@ def _to_offer(
         return Offer(
             id=offer_id_key,
             source=SOURCE,
-            server=display_server,
-            display_server=display_server,
+            # Temporary slug — overwritten by _apply_canonical() in normalize_pipeline.
+            # Must be non-empty for Offer model validation to pass.
+            server=server_name.lower() if server_name else offer_id_key,
+            # display_server intentionally left empty; set by canonicalization.
+            display_server="",
             server_name=server_name,
             faction=faction,
+            # raw_title stored for alias lookup in normalize_pipeline._build_alias_key()
+            raw_title=raw.title,
             # ── Raw price (Task 2) ────────────────────────────────────────────
             raw_price=raw.price_usd,      # unit_price_in_usd: price per 1 gold
             raw_price_unit="per_unit",
