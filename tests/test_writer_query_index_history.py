@@ -62,5 +62,5 @@ async def test_query_index_history_bucket_column_resolves(monkeypatch):
     monkeypatch.setattr(writer, "get_pool", fake_get_pool)
     await writer.query_index_history("(EU) Anniversary", "all", 24, 200)
     sql = captured["sql"]
-    assert "WITH filtered AS" in sql and "FROM grouped g" in sql
-    assert " = bucket" not in sql and "f2.bucket = g.bucket" in sql
+    assert "WITH bucketed AS" in sql and "FROM bucketed b" in sql
+    assert " = bucket" not in sql and "p2.bucket = b.bucket" in sql

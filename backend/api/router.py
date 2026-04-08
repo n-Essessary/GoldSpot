@@ -256,14 +256,31 @@ async def get_price_index(
 async def get_index_price(
     server:  str,
     faction: str = Query("All"),
+    region:  str | None = Query(None, description="Region for per-server lookup (e.g. 'EU')"),
+    version: str | None = Query(None, description="Version for per-server lookup (e.g. 'Anniversary')"),
 ):
     """
     Current IndexPrice from in-memory cache (< 1ms).
-    Contains index_price, vwap, best_ask, price_min/max, offer_count, sources.
+
+    Two lookup modes:
+    1. Group (legacy): key = "{display_server}::{faction}"
+       e.g. /index/(EU) Anniversary?faction=All
+    2. Per-server (Task 4): key = "{server_name}::{region}::{version}::{faction}"
+       e.g. /index/Firemaw?region=EU&version=Anniversary&faction=Horde
     """
     from service.offers_service import _index_cache
-    key = f"{server}::{faction}"
-    idx = _index_cache.get(key)
+
+    # Try per-server key first if region+version supplied (Task 4)
+    idx = None
+    if region and version:
+        per_server_key = f"{server}::{region.upper()}::{version}::{faction}"
+        idx = _index_cache.get(per_server_key)
+
+    # Fallback to group-level key (legacy)
+    if idx is None:
+        key = f"{server}::{faction}"
+        idx = _index_cache.get(key)
+
     if idx is None:
         raise HTTPException(
             status_code=404,

@@ -18,7 +18,30 @@ const PERIODS = [
 
 const FACTIONS = ['All', 'Alliance', 'Horde']
 
-export function PriceChart({ serverSlug, refreshSignal }) {
+/**
+ * Parse region + version from a display_server group label.
+ * "(EU) Anniversary" → { region: "EU", version: "Anniversary" }
+ * "(EU) Season of Discovery" → { region: "EU", version: "Season of Discovery" }
+ * Returns null if the format isn't recognised.
+ */
+export function _parseGroupLabel(serverSlug) {
+  if (!serverSlug) return null
+  const m = serverSlug.match(/^\(([A-Za-z]{2,})\)\s*(.+)$/)
+  if (!m) return null
+  return { region: m[1].toUpperCase(), version: m[2].trim() }
+}
+
+/**
+ * PriceChart — TradingView lightweight-charts.
+ *
+ * Props:
+ *   serverSlug    — display_server group label, e.g. "(EU) Anniversary" (required)
+ *   refreshSignal — bumped on data updates to trigger re-fetch
+ *   realmName     — specific realm, e.g. "Firemaw" (optional, Task 4)
+ *                   When set → fetches per-server DB history
+ *                   When unset → fetches legacy group OHLC from price_index_snapshots
+ */
+export function PriceChart({ serverSlug, refreshSignal, realmName }) {
   const containerRef = useRef(null)
   const chartRef     = useRef(null)
   const seriesRef    = useRef({})
@@ -120,23 +143,65 @@ export function PriceChart({ serverSlug, refreshSignal }) {
     if (!serverSlug || serverSlug === 'all') return
     setLoading(true)
     try {
-      const params = new URLSearchParams({
-        server:     serverSlug,
-        faction:    faction.toLowerCase(),
-        last_hours: String(period.hours),
-        max_points: String(period.points),
-      })
-      const res = await fetch(`${API_BASE}/price-history/ohlc?${params}`)
-      if (!res.ok) return   // сетевая ошибка — не очищаем граф
+      let points = []
 
-      const data   = await res.json()
-      const points = data.points ?? []
+      const parsed = _parseGroupLabel(serverSlug)
+
+      if (realmName && parsed) {
+        // ── Task 4 mode: per-server history from DB ───────────────────────────
+        // GET /price-history?server={realm}&region={EU}&version={Anniversary}&faction={f}
+        const params = new URLSearchParams({
+          server:  realmName,
+          region:  parsed.region,
+          version: parsed.version,
+          faction: faction.toLowerCase(),
+          last:    String(Math.min(period.points, 200)),
+        })
+        const res = await fetch(`${API_BASE}/price-history?${params}`)
+        if (res.ok) {
+          const data = await res.json()
+          // per-server endpoint returns ServerHistoryResponse with points[]
+          const raw = data.points ?? []
+          const toTS = p => Math.floor(new Date(p.recorded_at).getTime() / 1000)
+          if (raw.length > 0) {
+            // index_price_per_1k is the display-friendly price
+            points = raw.map(p => ({
+              time:      toTS(p),
+              avg_price: p.index_price_per_1k,
+              vwap:      p.index_price_per_1k,   // no vwap in per-server history
+              best_ask:  p.index_price_per_1k,
+              sources:   [],
+            }))
+          }
+        }
+        // If DB empty or unavailable, fall through to OHLC below
+      }
+
+      if (points.length === 0) {
+        // ── Legacy mode (group OHLC) ──────────────────────────────────────────
+        const params = new URLSearchParams({
+          server:     serverSlug,
+          faction:    faction.toLowerCase(),
+          last_hours: String(period.hours),
+          max_points: String(period.points),
+        })
+        const res = await fetch(`${API_BASE}/price-history/ohlc?${params}`)
+        if (!res.ok) {
+          setLoading(false)
+          return
+        }
+        const data = await res.json()
+        points = data.points ?? []
+      }
 
       setEmpty(points.length === 0)
-      if (points.length === 0) return
+      if (points.length === 0) {
+        setLoading(false)
+        return
+      }
 
       // time приходит как ISO string из asyncpg
-      const toTS = p => Math.floor(new Date(p.time).getTime() / 1000)
+      const toTS = p => Math.floor(new Date(p.time ?? p.recorded_at).getTime() / 1000)
 
       seriesRef.current.index?.setData(
         points.map(p => ({ time: toTS(p), value: p.avg_price || p.close || 0 }))
@@ -158,7 +223,7 @@ export function PriceChart({ serverSlug, refreshSignal }) {
     } finally {
       setLoading(false)
     }
-  }, [serverSlug, faction, period])
+  }, [serverSlug, realmName, faction, period])
 
   useEffect(() => { loadData() }, [loadData, refreshSignal])
 

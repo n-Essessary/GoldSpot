@@ -9,13 +9,26 @@ REALM_REGION_OVERRIDE: dict[str, tuple[str, str]] = {
 }
 
 _VERSION_ALIASES: dict[str, str] = {
-    "seasonal": "Season of Discovery",
+    # Season of Discovery variants
+    "seasonal":            "Season of Discovery",
     "season of discovery": "Season of Discovery",
-    "sod": "Season of Discovery",
-    "hardcore": "Hardcore",
-    "anniversary": "Anniversary",
-    "classic era": "Classic Era",
-    "classic": "Classic",
+    "sod":                 "Season of Discovery",
+    # Anniversary variants (Task 3D)
+    "anniversary":         "Anniversary",
+    "classic anniversary": "Anniversary",
+    "anniversary gold":    "Anniversary",
+    # Hardcore
+    "hardcore":            "Hardcore",
+    # Classic Era variants (Task 3D: canonical = "Classic Era")
+    "classic era":         "Classic Era",
+    "vanilla":             "Classic Era",
+    "era":                 "Classic Era",
+    # Plain "Classic" (G2G uses this in title brackets for Era servers)
+    "classic":             "Classic",
+    # TBC Classic variants
+    "tbc classic":         "TBC Classic",
+    "tbc":                 "TBC Classic",
+    "burning crusade":     "TBC Classic",
 }
 
 

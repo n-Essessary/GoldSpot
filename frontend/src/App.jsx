@@ -145,6 +145,7 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
           <PriceChart
             refreshSignal={lastFetched}
             serverSlug={filters.server || 'all'}
+            realmName={filters.server_name ?? ''}
           />
 
           <main className={styles.main}>

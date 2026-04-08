@@ -13,8 +13,6 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import quote
-
 import httpx
 
 from api.schemas import Offer
@@ -106,29 +104,28 @@ _CATEGORY_SLUG = "wow-classic-era-vanilla-gold"
 
 def _build_offer_url(
     offer_id: str,
-    offer_attributes: list[dict],
     region_id: str,
+    seller: str,
     game_slug: str = _CATEGORY_SLUG,
 ) -> str:
     """
-    Строит рабочую ссылку на страницу группы офферов G2G для конкретного сервера+фракции.
+    Build direct buy URL for a seller-based G2G offer.
 
-    Приоритет: fa={col_id}:{dat_id} из offer_attributes[0] → прямая ссылка на
-    конкретный сервер. Двоеточие URL-энкодируется как %3A (требование G2G).
-    Fallback на /offer/{offer_id} только если offer_attributes пустой.
+    Format verified live against the G2G site (Task 2):
+      https://www.g2g.com/categories/wow-classic-era-vanilla-gold
+      /offer/{offer_id}?region_id={region_id}&seller={seller}
+
+    The old /offer/{offer_id} format (without query params) leads to dead pages.
+    The old /offer/group?fa=... format (group-display) is not applicable to
+    seller-fetched individual offers which have stable offer_ids.
     """
-    if offer_attributes:
-        col_id = offer_attributes[0].get("collection_id", "")
-        dat_id = offer_attributes[0].get("dataset_id", "")
-        if col_id and dat_id:
-            fa = quote(f"{col_id}:{dat_id}", safe="")
-            return (
-                f"https://www.g2g.com/categories/{game_slug}/offer/group"
-                f"?fa={fa}&region_id={region_id}&sort=lowest_price"
-            )
-    if offer_id:
-        return f"https://www.g2g.com/offer/{offer_id}"
-    return ""
+    if not offer_id:
+        return ""
+    return (
+        f"https://www.g2g.com/categories/{game_slug}"
+        f"/offer/{offer_id}"
+        f"?region_id={region_id}&seller={seller}"
+    )
 
 
 # Строгий regex: "Server [Region - Version] - Faction"
@@ -374,7 +371,7 @@ class G2GClient:
                 if len(results) < 48:
                     break
                 page += 1
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.2)  # Task 1 delay policy: 0.2s between region page requests
 
         logger.info("G2G discovered %d unique sellers", len(sellers))
         return sorted(sellers)
@@ -394,7 +391,7 @@ class G2GClient:
         """
         all_offers: list[G2GOffer] = []
         page = 1
-        max_pages = 5
+        max_pages = 10
 
         while page <= max_pages:
             try:
@@ -441,8 +438,8 @@ class G2GClient:
                         service_id=o.get("service_id", service_id),
                         offer_url=_build_offer_url(
                             offer_id=offer_id,
-                            offer_attributes=o.get("offer_attributes") or [],
                             region_id=o.get("region_id", ""),
+                            seller=(o.get("username") or "").strip(),
                         ),
                         offer_group=o.get("offer_group", ""),
                         raw=o,
@@ -509,14 +506,13 @@ async def fetch_g2g_game(
     sort: str = "lowest_price",
     country: str = "SG",
     max_regions: Optional[int] = None,
-    delay: float = 0.35,
 ) -> list[G2GOffer]:
     """
-    3-шаговый pipeline:
-      1) fetch_regions   — получить все region_id / relation_id
-      2) _discover_sellers — собрать уникальных продавцов из group entries
-      3) fetch_seller_offers (параллельно, батчами по 5) — индивидуальные офферы
-         is_group_display=false, stable offer_id, реальный available_qty
+    3-step seller-based pipeline (Task 1):
+      1) fetch_regions      — get all region_id / relation_id
+      2) fetch_all_sellers  — discover all sellers via full pagination of all regions
+      3) fetch_seller_offers (parallel, semaphore=5) — individual offers
+         is_group_display=false, stable offer_id, real available_qty
     """
     if game_key not in GAME_CONFIG:
         raise ValueError(f"Unknown game: {game_key}. Available: {list(GAME_CONFIG)}")
@@ -546,20 +542,23 @@ async def fetch_g2g_game(
 
         logger.info("G2G: fetching offers for %d sellers", len(sellers))
 
-        all_offers: list[G2GOffer] = []
-        batch_size = 5
+        # Task 1 Step 4: parallel execution with semaphore (max 5 concurrent)
+        sem = asyncio.Semaphore(5)
 
-        for i in range(0, len(sellers), batch_size):
-            batch = sellers[i : i + batch_size]
-            tasks = [client.fetch_seller_offers(brand_id, service_id, s) for s in batch]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for seller, result in zip(batch, results):
-                if isinstance(result, Exception):
-                    logger.warning("G2G seller=%s failed: %s", seller, result)
-                else:
-                    all_offers.extend(result)
-            if i + batch_size < len(sellers):
-                await asyncio.sleep(delay)
+        async def _bounded(s: str) -> list[G2GOffer]:
+            async with sem:
+                result = await client.fetch_seller_offers(brand_id, service_id, s)
+                await asyncio.sleep(0.15)  # Task 1 delay: 0.15s inside semaphore between sellers
+                return result
+
+        all_offers: list[G2GOffer] = []
+        tasks = [_bounded(s) for s in sellers]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for s, result in zip(sellers, results):
+            if isinstance(result, Exception):
+                logger.warning("G2G seller=%s failed: %s", s, result)
+            else:
+                all_offers.extend(result)
 
         logger.info(
             "G2G game=%s done: sellers=%d raw_offers=%d",

@@ -384,12 +384,36 @@ async def _do_snapshot_all_servers() -> None:
         idx = compute_index_price(offers)
         if idx is not None:
             _index_cache[f"{server}::{faction}"] = idx
+            m = re.match(r"^\((?P<region>[A-Za-z]{2,})\)\s*(?P<version>.+)$", server)
+            if m:
+                region = m.group("region").upper()
+                version = m.group("version").strip()
+                realm_names = sorted({o.server_name for o in offers if o.server_name})
+                for realm in realm_names:
+                    _index_cache[f"{realm}::{region}::{version}::{faction}"] = idx
             index_tasks.append(write_index_snapshot(server, faction, idx, ts))
     if index_tasks:
         await asyncio.gather(*index_tasks, return_exceptions=True)
 
     # ── 2. Per-server index (Task 4) ──────────────────────────────────────────
-    # Collect unique (server_id, faction) pairs from offers that have server_id
+    # Collect unique (server_id, faction) pairs AND metadata for cache key:
+    #   "server_name::region::version::faction"
+    # region+version are extracted from display_server "(EU) Anniversary" format.
+
+    # Build: server_id → (server_name, region, version) from offers
+    _server_id_meta: dict[int, tuple[str, str, str]] = {}
+    for o in all_offers:
+        if o.server_id is not None and o.server_id not in _server_id_meta:
+            ds = o.display_server or ""   # "(EU) Anniversary"
+            import re as _re
+            _ds_match = _re.match(r"^\(([A-Za-z]{2,})\)\s*(.+)$", ds)
+            if _ds_match:
+                _region  = _ds_match.group(1).upper()
+                _version = _ds_match.group(2).strip()
+            else:
+                _region, _version = "", ds
+            _server_id_meta[o.server_id] = (o.server_name or "", _region, _version)
+
     server_faction_pairs: set[tuple[int, str]] = set()
     for o in all_offers:
         if o.server_id is not None:
@@ -400,6 +424,23 @@ async def _do_snapshot_all_servers() -> None:
     for (server_id, faction) in server_faction_pairs:
         result = compute_server_index(server_id, faction, all_offers)
         if result is not None:
+            # Populate per-server _index_cache key (Task 4)
+            meta = _server_id_meta.get(server_id)
+            if meta:
+                srv_name, region, version = meta
+                if srv_name:
+                    cache_key = f"{srv_name}::{region}::{version}::{faction}"
+                    _index_cache[cache_key] = IndexPrice(
+                        index_price  = result["index_price"] * 1000,  # convert to per_1k
+                        vwap         = result["index_price"] * 1000,
+                        best_ask     = result["min_price"]  * 1000,
+                        price_min    = result["min_price"]  * 1000,
+                        price_max    = result["max_price"]  * 1000,
+                        offer_count  = result["sample_size"],
+                        total_volume = 0,
+                        sources      = [],
+                    )
+
             server_index_tasks.append(
                 upsert_server_index(
                     server_id=server_id,

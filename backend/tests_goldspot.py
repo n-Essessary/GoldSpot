@@ -103,7 +103,12 @@ def _install_httpx_stub():
     httpx.TimeoutException = Exception
     httpx.HTTPStatusError = Exception
     httpx.Timeout = MagicMock
+    httpx.Response = MagicMock        # needed for _http_get_retry return annotation
+    httpx.RequestError = Exception    # extra guards for any other annotations
     sys.modules["httpx"] = httpx
+    # httpcore is silenced in g2g_parser logging config
+    hc = types.ModuleType("httpcore")
+    sys.modules["httpcore"] = hc
 
 
 def _install_bs4_stub():
@@ -483,15 +488,23 @@ class TestParseFloat(unittest.TestCase):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _load_g2g_functions():
-    """Извлекаем функции g2g_parser без top-level импорта httpx."""
+    """Извлекаем функции g2g_parser без top-level импорта httpx.
+
+    Используем уже установленные stubs из sys.modules вместо замены на None,
+    чтобы type annotations вроде Optional[httpx.AsyncClient] не падали
+    с AttributeError: 'NoneType' object has no attribute 'AsyncClient'.
+    """
     import dataclasses
 
     src_path = os.path.join(os.path.dirname(__file__), "parser", "g2g_parser.py")
     with open(src_path) as f:
         raw = f.read()
 
-    src = raw.replace("import httpx", "httpx = None")
-    src = src.replace("from api.schemas import Offer", "Offer = None")
+    # НЕ заменяем import httpx на None — пусть exec достаёт из ns["httpx"].
+    # Stub уже установлен _install_httpx_stub() выше.
+    src = raw.replace("from api.schemas import Offer", "Offer = None")
+    # version_utils: загружаем напрямую, sys.path уже содержит backend dir
+    # (добавлен в начале файла через sys.path.insert)
 
     ns = {
         "re": re,
@@ -504,6 +517,8 @@ def _load_g2g_functions():
         "datetime": datetime,
         "timezone": timezone,
         "Optional": __import__("typing").Optional,
+        # Provide the httpx stub from sys.modules so AsyncClient annotation works
+        "httpx": sys.modules.get("httpx", MagicMock()),
         "__builtins__": __builtins__,
     }
     exec(compile(src, src_path, "exec"), ns)
@@ -585,33 +600,49 @@ class TestParseTitle(unittest.TestCase):
 
 
 class TestBuildOfferUrl(unittest.TestCase):
+    """Task 2: verify _build_offer_url produces seller-based URLs.
+
+    New signature (after seller-based refactor):
+        _build_offer_url(offer_id, region_id, seller) -> str
+    Expected format (verified live against G2G):
+        https://www.g2g.com/categories/wow-classic-era-vanilla-gold
+        /offer/{offer_id}?region_id={region_id}&seller={seller}
+    """
 
     @unittest.skipUnless(_G2G_AVAILABLE, "_build_offer_url недоступна")
-    def test_with_attributes(self):
-        attrs = [{"collection_id": "col1", "dataset_id": "dat1"}]
-        url = _build_offer_url("offer123", attrs, "region_eu")
-        self.assertIn("fa=col1:dat1", url)
-        self.assertIn("region_eu", url)
-        self.assertIn("sort=lowest_price", url)
-        self.assertIn("lowest_price", url)
+    def test_seller_url_format(self):
+        """URL must contain /offer/{id}?region_id=...&seller=... (Task 2)."""
+        url = _build_offer_url("offer123", "region_eu_1", "coolseller")
+        self.assertIn("/offer/offer123", url)
+        self.assertIn("region_id=region_eu_1", url)
+        self.assertIn("seller=coolseller", url)
 
     @unittest.skipUnless(_G2G_AVAILABLE, "_build_offer_url недоступна")
-    def test_fallback_to_offer_id(self):
-        url = _build_offer_url("offer123", [], "region_eu")
-        self.assertIn("offer123", url)
+    def test_url_contains_category_slug(self):
+        """URL must contain the category slug (wow-classic-era-vanilla-gold)."""
+        url = _build_offer_url("offer123", "reg1", "seller1")
+        self.assertIn("wow-classic-era-vanilla-gold", url)
 
     @unittest.skipUnless(_G2G_AVAILABLE, "_build_offer_url недоступна")
-    def test_empty_returns_empty(self):
-        url = _build_offer_url("", [], "")
+    def test_empty_offer_id_returns_empty(self):
+        """Empty offer_id → return empty string (no dead links)."""
+        url = _build_offer_url("", "reg1", "seller1")
         self.assertEqual(url, "")
 
     @unittest.skipUnless(_G2G_AVAILABLE, "_build_offer_url недоступна")
-    def test_partial_attributes(self):
-        """Отсутствует dataset_id → fallback на offer_id."""
-        attrs = [{"collection_id": "col1"}]  # нет dataset_id
-        url = _build_offer_url("offer123", attrs, "region_eu")
-        # Должен упасть на fallback (col_id есть, dat_id нет)
-        self.assertIn("offer123", url)
+    def test_no_group_url_format(self):
+        """URL must NOT use the old /offer/group format (dead links)."""
+        url = _build_offer_url("offer123", "reg1", "seller1")
+        self.assertNotIn("/offer/group", url)
+        self.assertNotIn("fa=", url)
+
+    @unittest.skipUnless(_G2G_AVAILABLE, "_build_offer_url недоступна")
+    def test_no_bare_offer_id_format(self):
+        """URL must NOT be the bare /offer/{id} format (leads to dead pages)."""
+        url = _build_offer_url("offer123", "reg1", "seller1")
+        # Must include region_id and seller query params
+        self.assertIn("?", url)
+        self.assertNotEqual(url, f"https://www.g2g.com/offer/offer123")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -814,6 +845,95 @@ class TestWriteIndexSnapshot(unittest.IsolatedAsyncioTestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 10. Task 3E — Validate migration 009 has no duplicate servers
+#     Checks the canonical server truth list for internal consistency.
+#     Equivalent SQL:
+#       SELECT name, region, version, COUNT(*) FROM servers
+#       GROUP BY name, region, version HAVING COUNT(*) > 1
+#       → must return 0 rows.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestNoduplicateServersTruth(unittest.TestCase):
+    """Task 3E: migration 009 must not introduce (name, region, version) duplicates."""
+
+    def _load_migration_servers(self) -> list[tuple[str, str, str]]:
+        """Load all (name, region, version) tuples from migration 009."""
+        import importlib.util
+        mig_path = os.path.join(
+            os.path.dirname(__file__),
+            "alembic", "versions", "009_canonical_server_truth.py",
+        )
+        spec = importlib.util.spec_from_file_location("mig009", mig_path)
+        mod = importlib.util.module_from_spec(spec)
+
+        # Stub alembic.op so the module-level code doesn't fail on import
+        alembic_stub = types.ModuleType("alembic")
+        op_stub = types.ModuleType("alembic.op")
+        op_stub.execute = lambda *a, **kw: None
+        alembic_stub.op = op_stub
+        sys.modules.setdefault("alembic", alembic_stub)
+        sys.modules.setdefault("alembic.op", op_stub)
+
+        spec.loader.exec_module(mod)
+
+        rows: list[tuple[str, str, str]] = []
+        for name, region in mod._CLASSIC_ERA_SERVERS:
+            rows.append((name, region, "Classic Era"))
+        for name, region in mod._HARDCORE_SERVERS:
+            rows.append((name, region, "Hardcore"))
+        for name in mod._RU_CLASSIC_ERA_SERVERS:
+            rows.append((name, "RU", "Classic Era"))
+        for name in mod._RU_SOD_SERVERS:
+            rows.append((name, "RU", "Season of Discovery"))
+        for name, region in mod._ANNIVERSARY_SERVERS:
+            rows.append((name, region, "Anniversary"))
+        return rows
+
+    def test_no_duplicate_servers_in_migration(self):
+        """(name, region, version) tuples in migration 009 must be unique."""
+        rows = self._load_migration_servers()
+        counts: dict[tuple, int] = {}
+        for key in rows:
+            counts[key] = counts.get(key, 0) + 1
+        duplicates = [(k, c) for k, c in counts.items() if c > 1]
+        self.assertEqual(
+            duplicates, [],
+            f"Migration 009 has duplicate (name, region, version) tuples: {duplicates}",
+        )
+
+    def test_no_empty_server_names(self):
+        """No server in migration 009 should have an empty name."""
+        rows = self._load_migration_servers()
+        empties = [r for r in rows if not r[0].strip()]
+        self.assertEqual(empties, [], f"Empty server names found: {empties}")
+
+    def test_all_regions_valid(self):
+        """All regions in migration 009 must be from the known set."""
+        _VALID_REGIONS = {"EU", "US", "AU", "OCE", "KR", "TW", "RU", "SEA"}
+        rows = self._load_migration_servers()
+        invalid = [(name, region) for name, region, _ in rows if region not in _VALID_REGIONS]
+        self.assertEqual(invalid, [], f"Invalid regions: {invalid}")
+
+    def test_no_banned_version_strings(self):
+        """Task 3D: no banned version strings ('Vanilla', 'SoD', 'Seasonal') in migration 009."""
+        rows = self._load_migration_servers()
+        banned = {"Vanilla", "SoD", "Seasonal", "Classic Anniversary", "Anniversary Gold"}
+        violations = [(name, region, version) for name, region, version in rows if version in banned]
+        self.assertEqual(violations, [], f"Banned version strings: {violations}")
+
+    def test_version_aliases_cover_known_variants(self):
+        """Task 3D: _VERSION_ALIASES must cover all canonical + common variant spellings."""
+        from utils.version_utils import _VERSION_ALIASES
+        required_keys = {
+            "seasonal", "season of discovery", "sod",
+            "anniversary", "hardcore", "classic era",
+            "vanilla", "classic", "tbc classic",
+        }
+        missing = required_keys - set(_VERSION_ALIASES.keys())
+        self.assertEqual(missing, set(), f"_VERSION_ALIASES missing keys: {missing}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # RUNNER
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -832,6 +952,7 @@ if __name__ == "__main__":
         TestOffersServiceUtils,
         TestRouterBucketMeta,
         TestWriteIndexSnapshot,
+        TestNoduplicateServersTruth,
     ]
     for cls in test_classes:
         suite.addTests(loader.loadTestsFromTestCase(cls))
