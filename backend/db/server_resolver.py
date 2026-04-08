@@ -30,6 +30,12 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# asyncpg UndefinedTableError — optional import (not available in test envs)
+try:
+    from asyncpg.exceptions import UndefinedTableError as _UndefinedTableError
+except ImportError:  # pragma: no cover
+    _UndefinedTableError = None  # type: ignore[assignment,misc]
+
 # ── In-process alias cache ────────────────────────────────────────────────────
 # {alias_text_lower: server_id}
 _alias_cache:     dict[str, int] = {}
@@ -43,6 +49,26 @@ _server_data_cache: dict[int, dict] = {}
 # {(name_lower, region_upper): [{"id", "name", "region", "version"}, ...]}
 # Used by find_server_versions() for price-rerouting lookups.
 _server_versions_index: dict[tuple[str, str], list[dict]] = {}
+
+# ── Alias-cache failure / circuit-breaker state ───────────────────────────────
+# Prevents log-spam when the DB is unreachable or tables are missing on deploy.
+#
+#   _alias_cache_failed     True  → skip all load attempts (circuit open).
+#                                   Reset only via reset_alias_cache_circuit_breaker()
+#                                   (e.g. called from /admin endpoint after tables exist).
+#   _alias_cache_retry_count        consecutive failure count (resets on success).
+#   _alias_cache_next_retry         monotonic threshold — don't attempt before this.
+#
+# Backoff schedule (non-blocking — avoids sleeping inside the normalize loop):
+#   attempt 0 → wait   5 s before retry
+#   attempt 1 → wait  15 s
+#   attempt 2 → wait  60 s
+#   attempt 3 → wait 120 s
+#   attempt 4 → open circuit-breaker (no more retries)
+_alias_cache_failed:      bool  = False
+_alias_cache_retry_count: int   = 0
+_alias_cache_next_retry:  float = 0.0
+_ALIAS_RETRY_DELAYS: list[float] = [5.0, 15.0, 60.0, 120.0]  # max 4 waits → 5 attempts total
 
 # Batch alias lookup cache: per-entry TTL (no global flush — safe under concurrent batches)
 _BATCH_MISS = object()
@@ -120,9 +146,26 @@ async def _load_alias_cache(pool) -> None:
       text), both are logged as reason="alias_conflict" and the alias is omitted
       from the in-process cache so it cannot silently resolve to the wrong server.
       This is a configuration error requiring manual review.
+
+    Failure handling (prevents Railway log-rate-limit spam):
+      • Circuit-breaker open (_alias_cache_failed=True) → return immediately.
+      • Backoff window not elapsed (_alias_cache_next_retry) → return immediately.
+      • UndefinedTableError (tables not yet created) → WARNING once, open circuit.
+      • Other DB errors → one debug log per attempt, exponential backoff.
+        After all retry slots exhausted → single ERROR log, open circuit-breaker.
+      • Success → reset retry count / next-retry; system resolves normally.
     """
     global _alias_cache, _cache_loaded_at
     global _server_data_cache, _server_versions_index
+    global _alias_cache_failed, _alias_cache_retry_count, _alias_cache_next_retry
+
+    # ── Fast exits (circuit-breaker / backoff window) ─────────────────────────
+    if _alias_cache_failed:
+        return
+    now = time.monotonic()
+    if now < _alias_cache_next_retry:
+        return   # backoff window not elapsed — do not retry yet
+
     try:
         # ── Alias cache (with conflict detection) ─────────────────────────────
         alias_rows = await pool.fetch(
@@ -182,8 +225,12 @@ async def _load_alias_cache(pool) -> None:
 
         _server_data_cache     = new_data
         _server_versions_index = new_versions
+        _cache_loaded_at       = time.monotonic()
 
-        _cache_loaded_at = time.monotonic()
+        # ── Success: reset failure state ──────────────────────────────────────
+        _alias_cache_retry_count = 0
+        _alias_cache_next_retry  = 0.0
+
         logger.debug(
             "server_resolver: loaded %d aliases (%d conflicts excluded), "
             "%d servers into cache",
@@ -191,12 +238,64 @@ async def _load_alias_cache(pool) -> None:
             len(conflicted_aliases),
             len(new_data),
         )
-    except Exception:
-        logger.exception("server_resolver: failed to load alias cache")
+
+    except Exception as exc:
+        # ── Classify: missing table vs transient DB error ─────────────────────
+        is_undefined_table = (
+            (_UndefinedTableError is not None and isinstance(exc, _UndefinedTableError))
+            or "does not exist" in str(exc).lower()
+            or "undefined table" in str(exc).lower()
+        )
+
+        if is_undefined_table:
+            # Tables not yet created (fresh deploy / migration pending).
+            # Log once as WARNING and open circuit-breaker — retrying is futile
+            # until the schema is applied and the breaker is manually reset.
+            logger.warning(
+                "server_resolver: alias/servers table not found — "
+                "alias resolution disabled until tables exist (reset via /admin/cache-reset): %s",
+                exc,
+            )
+            _alias_cache_failed = True
+            return
+
+        # ── Transient DB failure — apply non-blocking exponential backoff ─────
+        attempt = _alias_cache_retry_count          # 0-indexed
+        _alias_cache_retry_count += 1
+
+        if attempt >= len(_ALIAS_RETRY_DELAYS):
+            # All retry slots exhausted → open circuit-breaker, one final ERROR
+            logger.error(
+                "server_resolver: alias cache load failed after %d attempts — "
+                "alias resolution disabled until reset (reset via /admin/cache-reset): %s",
+                _alias_cache_retry_count, exc,
+            )
+            _alias_cache_failed = True
+        else:
+            # Still within retry budget — schedule next attempt, log at DEBUG only
+            delay = _ALIAS_RETRY_DELAYS[attempt]
+            _alias_cache_next_retry = time.monotonic() + delay
+            logger.debug(
+                "server_resolver: alias cache load failed "
+                "(attempt %d/%d), retry in %.0fs: %s",
+                attempt + 1,
+                len(_ALIAS_RETRY_DELAYS) + 1,
+                delay,
+                exc,
+            )
 
 
 async def _ensure_cache(pool) -> None:
+    """Trigger alias cache reload if TTL expired or cache was never loaded.
+
+    Fast-exits immediately if the circuit-breaker is open (_alias_cache_failed)
+    or the backoff window hasn't elapsed — avoiding per-offer log spam when the
+    DB is unreachable.
+    """
+    if _alias_cache_failed:
+        return
     now = time.monotonic()
+    # Respect both the normal TTL refresh and the failure backoff window.
     if now - _cache_loaded_at > _CACHE_TTL:
         await _load_alias_cache(pool)
 
@@ -508,7 +607,28 @@ async def register_alias(
         )
 
 
+def reset_alias_cache_circuit_breaker() -> None:
+    """Re-arm the alias cache circuit-breaker after a transient failure.
+
+    Call this from an admin endpoint (e.g. POST /admin/cache-reset) once the
+    DB is reachable and the schema has been applied.  The next resolve_server()
+    call will trigger a fresh _load_alias_cache() attempt.
+
+    This is the ONLY way to re-enable alias resolution after the circuit-breaker
+    has tripped — it will NOT re-open by itself to prevent automatic log storms.
+    """
+    global _alias_cache_failed, _alias_cache_retry_count, _alias_cache_next_retry
+    _alias_cache_failed      = False
+    _alias_cache_retry_count = 0
+    _alias_cache_next_retry  = 0.0
+    logger.info("server_resolver: alias cache circuit-breaker reset — will retry on next resolve")
+
+
 async def invalidate_cache() -> None:
-    """Force alias cache reload on next resolve call."""
+    """Force alias cache reload on next resolve call.
+
+    Does NOT reset the circuit-breaker — if the cache previously failed, call
+    reset_alias_cache_circuit_breaker() first, then invalidate_cache().
+    """
     global _cache_loaded_at
     _cache_loaded_at = 0.0

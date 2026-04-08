@@ -387,3 +387,25 @@ async def register_alias(
         )
     await _register(alias, server_id, source, pool)
     return {"registered": True, "alias": alias, "server_id": server_id}
+
+
+@router.post("/admin/cache-reset", dependencies=[Depends(require_admin_key)])
+async def admin_cache_reset():
+    """
+    Reset the alias cache circuit-breaker and force a fresh reload attempt.
+
+    Use this after a failed deploy where DB tables were missing and the
+    circuit-breaker tripped.  After calling this endpoint the next resolve
+    call will attempt to reload the alias cache from the DB.
+
+    Also calls invalidate_cache() so the reload happens immediately on the
+    next resolve, not after the normal 60 s TTL.
+    """
+    from db.server_resolver import (
+        invalidate_cache,
+        reset_alias_cache_circuit_breaker,
+    )
+
+    reset_alias_cache_circuit_breaker()
+    await invalidate_cache()
+    return {"reset": True, "message": "Alias cache circuit-breaker cleared — will reload on next resolve"}
