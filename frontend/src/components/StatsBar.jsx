@@ -30,7 +30,13 @@ export function StatsBar({ offers, loading, showPer1 = false }) {
     if (Math.abs(n) >= 1) money = `$${Math.abs(n).toFixed(2)}`
     else if (Math.abs(n) >= 0.01) money = `$${Math.abs(n).toFixed(4)}`
     else money = `$${Math.abs(n).toFixed(6)}`
-    return `${v.winner} cheaper by ${money}`
+  const price1 = Number(v.price1)
+  const price2 = Number(v.price2)
+  const denom = Math.max(price1, price2)
+  const pct = denom > 0
+    ? Math.abs((price1 - price2) / denom * 100).toFixed(1)
+    : '0.0'
+  return `${v.winner} cheaper by ${money} (${pct}%)`
   }
 
   return (
@@ -113,6 +119,8 @@ function computeStats(offers) {
     ? {
         value: Math.abs(bestG2g - bestFunpay),
         winner: bestG2g < bestFunpay ? 'G2G' : 'FunPay',
+        price1: bestFunpay,
+        price2: bestG2g,
       }
     : null
 
