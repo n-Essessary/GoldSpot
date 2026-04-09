@@ -337,6 +337,10 @@ def _build_alias_key(offer: "Offer") -> Optional[str]:
         if m and offer.server_name:
             region  = m.group("region").upper()
             version = ds[m.start("version"):].strip()
+            # Normalize Unicode apostrophes to ASCII (FunPay uses U+2019 right single quote)
+            if offer.server_name:
+                offer.server_name = offer.server_name.replace("\u2019", "'").replace("\u2018", "'")
+            version = version.replace("\u2019", "'").replace("\u2018", "'")
             return f"{offer.server_name} [{region} - {version}] - {offer.faction}"
         return None
 
@@ -348,6 +352,10 @@ def _build_alias_key(offer: "Offer") -> Optional[str]:
             return None
         region  = m.group("region").upper()
         version = ds[m.start("version"):].strip()
+        # Normalize Unicode apostrophes to ASCII (FunPay uses U+2019 right single quote)
+        if offer.server_name:
+            offer.server_name = offer.server_name.replace("\u2019", "'").replace("\u2018", "'")
+        version = version.replace("\u2019", "'").replace("\u2018", "'")
         if offer.server_name:
             return f"({region}) {version} - {offer.server_name}"
         return None
