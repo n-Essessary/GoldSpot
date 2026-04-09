@@ -80,6 +80,7 @@ class Offer(BaseModel):
 
     amount_gold: int
     seller: str
+    is_suspicious: bool = False
     offer_url: str | None = None
     updated_at: datetime
     fetched_at: datetime
@@ -150,6 +151,7 @@ class OfferRow(BaseModel):
     price_display: float         # respects price_unit
     amount_gold: int
     seller: str
+    is_suspicious: bool = False
     offer_url: str | None = None
     updated_at: datetime
     fetched_at: datetime
@@ -176,6 +178,7 @@ class OfferRow(BaseModel):
             price_display=price_display,
             amount_gold=offer.amount_gold,
             seller=offer.seller,
+            is_suspicious=offer.is_suspicious,
             offer_url=offer.offer_url,
             updated_at=offer.updated_at,
             fetched_at=offer.fetched_at,

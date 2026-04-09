@@ -265,9 +265,10 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
                         rel="noreferrer"
                         className={`${styles.buyBtn} ${isBest ? styles.buyBtnBest : ''}`}
                         style={isTopPick ? { color: src.color, borderColor: src.color } : undefined}
+                        title={offer.is_suspicious ? 'Цена значительно выше рыночной' : undefined}
                         aria-label={`Купить у ${offer.seller} на ${src.label}`}
                       >
-                        Купить
+                        {offer.is_suspicious ? '⚠ Купить' : 'Купить'}
                       </a>
                     )
                     : <span className={styles.noLink}>—</span>

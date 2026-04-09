@@ -230,11 +230,7 @@ def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
             f"price_per_1k too low ({price_per_1k_preview}): "
             f"raw_price={lot_price} — likely bad parse"
         )
-    if price_per_1k_preview > 500.0:
-        raise ValueError(
-            f"price_per_1k too high ({price_per_1k_preview}): "
-            f"raw_price={lot_price} — likely bad parse"
-        )
+    is_suspicious = price_per_1k_preview > 500.0
 
     href = _attr(item, "href")
     offer_url: str | None = None
@@ -260,6 +256,7 @@ def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
         lot_size=1,
         amount_gold=amount_gold,
         seller=seller,
+        is_suspicious=is_suspicious,
         offer_url=offer_url,
         updated_at=fetched_at,
         fetched_at=fetched_at,
