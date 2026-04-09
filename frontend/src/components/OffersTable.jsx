@@ -53,7 +53,8 @@ function formatTime(iso) {
   if (!iso) return '—'
   try {
     const d = new Date(iso)
-    return Number.isNaN(d.getTime()) ? '—' : d.toISOString().slice(11, 16)
+    if (Number.isNaN(d.getTime())) return '—'
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
   } catch {
     return '—'
   }
@@ -145,14 +146,14 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
       <table className={styles.table} aria-label="WoW gold market offers">
         <thead>
           <tr>
-            <th className={styles.rankCol}>#</th>
+            <th className={`${styles.rankCol} ${styles.hideOnMobile}`}>#</th>
             <th>Платформа</th>
             <th>Сервер · Фракция</th>
             <th className={styles.right}>{showPer1 ? 'Цена / 1' : 'Цена / 1K'}</th>
-            <th className={styles.right}>Position Value</th>
+            <th className={`${styles.right} ${styles.hideOnMobile}`}>Position Value</th>
             <th className={styles.right}>Объём</th>
             <th>Продавец</th>
-            <th className={styles.right}>Обновлено</th>
+            <th className={`${styles.right} ${styles.hideOnMobile}`}>Обновлено</th>
             <th className={styles.actionCol}></th>
           </tr>
         </thead>
@@ -185,7 +186,7 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
               <tr key={`${offer.source}-${offer.id}`} className={rowCls} style={topPickRowStyle}>
 
                 {/* Ранг: последовательный номер; для top picks — ★N */}
-                <td className={styles.rank}>
+                <td className={`${styles.rank} ${styles.hideOnMobile}`}>
                   {isTopPick
                     ? <span className={styles.crown} title="Top Pick">{`★${rank}`}</span>
                     : <span className={styles.rankNum}>{rank}</span>
@@ -235,7 +236,7 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
                   const positionValue = offer.price_per_1k * (offer.amount_gold / 1000)
                   const isHuge = positionValue > 9999
                   return (
-                    <td className={`${styles.right} mono${isHuge ? ` ${styles.posHuge}` : ''}`}>
+                    <td className={`${styles.right} ${styles.hideOnMobile} mono${isHuge ? ` ${styles.posHuge}` : ''}`}>
                       {isHuge ? '∞' : `$${positionValue.toFixed(2)}`}
                     </td>
                   )
@@ -250,7 +251,7 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
                 <td className={styles.seller}>{offer.seller}</td>
 
                 {/* Время последнего обновления */}
-                <td className={`${styles.time} ${styles.right} mono`}>
+                <td className={`${styles.time} ${styles.right} ${styles.hideOnMobile} mono`}>
                   {formatTime(offer.updated_at)}
                 </td>
 

@@ -237,3 +237,41 @@
 .hint      { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
 .errorIcon { font-size: 22px; color: var(--red); }
 .errorText { font-family: var(--font-mono); font-size: 12px; color: var(--red); }
+
+@media (max-width: 768px) {
+  .hideOnMobile { display: none; }
+
+  .wrapper {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .table {
+    font-size: 12px;
+    min-width: 380px;
+  }
+
+  .table th,
+  .table td {
+    padding: 8px;
+  }
+
+  .price,
+  .gold {
+    font-size: 12px;
+  }
+
+  .price { font-size: 13px; }
+
+  .buyBtn {
+    min-height: 44px;
+    padding: 8px 12px;
+  }
+
+  .seller {
+    max-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
