@@ -364,6 +364,46 @@ async def get_price_profiles_handler():
     return get_stats()
 
 
+@router.get("/admin/alias-coverage", dependencies=[Depends(require_admin_key)])
+async def get_alias_coverage():
+    from db.writer import get_pool
+    from service.normalize_pipeline import _build_alias_key
+    from service.offers_service import _cache
+
+    pool = await get_pool()
+    if pool is None:
+        return {"error": "database_unavailable", "missing": []}
+
+    rows = await pool.fetch("SELECT LOWER(alias) as alias FROM server_aliases")
+    known_aliases = {row["alias"] for row in rows}
+
+    funpay_offers = _cache["funpay"]
+    missing = []
+    seen = set()
+    for offer in funpay_offers:
+        key = _build_alias_key(offer)
+        if key is None:
+            continue
+        key_l = key.lower()
+        if key_l not in known_aliases and key_l not in seen:
+            seen.add(key_l)
+            missing.append(
+                {
+                    "alias_key": key,
+                    "display_server": offer.display_server,
+                    "server_name": offer.server_name,
+                    "server_id": offer.server_id,
+                    "source": offer.source,
+                }
+            )
+
+    return {
+        "total_funpay_offers": len(funpay_offers),
+        "missing_count": len(missing),
+        "missing": sorted(missing, key=lambda x: x["alias_key"]),
+    }
+
+
 @router.post("/admin/register-alias", dependencies=[Depends(require_admin_key)])
 async def register_alias(
     alias:     str = Query(..., description="Raw title to register as alias"),
