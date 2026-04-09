@@ -222,17 +222,18 @@ def _parse_item(item: Tag, fetched_at: datetime) -> Offer:
         raise ValueError(f"near-zero lot price: {lot_price!r}")
 
     # Guard: derived price_per_1k must be positive.
+    # FunPay .tc-price is per 1 gold, so price_per_1k = raw_price * 1000.
     # round(..., 6) can collapse a near-zero float to 0.0 → shows as $0.00 in UI.
-    price_per_1k_preview = round(lot_price / max(amount_gold, 1) * 1000.0, 6)
+    price_per_1k_preview = round(lot_price * 1000.0, 6)
     if price_per_1k_preview < 0.01:
         raise ValueError(
             f"price_per_1k too low ({price_per_1k_preview}): "
-            f"lot_price={lot_price}, amount_gold={amount_gold} — likely bad parse"
+            f"raw_price={lot_price} — likely bad parse"
         )
     if price_per_1k_preview > 500.0:
         raise ValueError(
             f"price_per_1k too high ({price_per_1k_preview}): "
-            f"lot_price={lot_price}, amount_gold={amount_gold} — likely bad parse"
+            f"raw_price={lot_price} — likely bad parse"
         )
 
     href = _attr(item, "href")

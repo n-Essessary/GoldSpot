@@ -56,7 +56,7 @@ def test_parse_html_only_offline_returns_empty():
     assert _parse_html(html, datetime.now(timezone.utc)) == []
 
 
-def test_parse_item_rejects_near_zero_price_per_1k():
+def test_parse_item_per_unit_price_is_not_near_zero():
     html = """
     <a class="tc-item" href="/x?id=1" data-online="1">
       <span class="tc-server">(EU) Classic</span>
@@ -67,8 +67,8 @@ def test_parse_item_rejects_near_zero_price_per_1k():
     </a>
     """
     item = BeautifulSoup(html, "html.parser").select_one(".tc-item")
-    with pytest.raises(ValueError):
-        _parse_item(item, datetime.now(timezone.utc))  # type: ignore[arg-type]
+    offer = _parse_item(item, datetime.now(timezone.utc))  # type: ignore[arg-type]
+    assert offer.price_per_1k == 500.0
 
 
 def test_parse_item_correct_price_per_1k():
