@@ -53,15 +53,6 @@ export function ServerSidebar({
     [],
   )
 
-  const clearSearchImmediate = () => {
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current)
-      debounceRef.current = null
-    }
-    setQuery('')
-    setDebouncedQuery('')
-  }
-
   const toggle = (displayServer) =>
     setOpenGroups((prev) => ({ ...prev, [displayServer]: !prev[displayServer] }))
 
@@ -156,7 +147,6 @@ export function ServerSidebar({
                     if (!searchActive) toggle(display_server)
                   } else {
                     onSelect(display_server, '')
-                    clearSearchImmediate()
                     onNavigate?.()
                   }
                 }}
@@ -185,7 +175,6 @@ export function ServerSidebar({
                           .join(' ')}
                         onClick={() => {
                           onSelect(display_server, realm)
-                          clearSearchImmediate()
                           onNavigate?.()
                         }}
                         title={realm}
