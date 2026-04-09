@@ -102,11 +102,36 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
 
   // Per-1 / Per-1K price unit toggle (client-side display only)
   const [showPer1, setShowPer1] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  useEffect(() => {
+    if (!sidebarOpen) return
+
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setSidebarOpen(false)
+    }
+
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', onKeyDown)
+
+    return () => {
+      document.body.style.overflow = prevOverflow
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [sidebarOpen])
 
   return (
     <div className={styles.layout}>
       {/* ── Шапка ─────────────────────────────────────────── */}
       <header className={styles.header}>
+        <button
+          className={styles.burgerBtn}
+          onClick={() => setSidebarOpen(true)}
+          aria-label="Открыть меню серверов"
+        >
+          ☰
+        </button>
         <div className={styles.title}>
           <span className={styles.titleAccent}>WoW</span> Gold Market Analytics
         </div>
@@ -115,12 +140,27 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
 
       {/* ── Тело: sidebar + основной контент ──────────────── */}
       <div className={styles.body}>
-        <ServerSidebar
-          servers={servers}
-          selectedServer={filters.server}
-          selectedRealm={filters.server_name ?? ''}
-          onSelect={onSelectServer}
+        <div
+          className={`${styles.sidebarOverlay} ${sidebarOpen ? styles.visible : ''}`}
+          onClick={() => setSidebarOpen(false)}
         />
+
+        <aside className={`${styles.sidebar} ${sidebarOpen ? styles.open : ''}`}>
+          <button
+            className={styles.sidebarClose}
+            onClick={() => setSidebarOpen(false)}
+            aria-label="Закрыть меню серверов"
+          >
+            ✕
+          </button>
+          <ServerSidebar
+            servers={servers}
+            selectedServer={filters.server}
+            selectedRealm={filters.server_name ?? ''}
+            onSelect={onSelectServer}
+            onNavigate={() => setSidebarOpen(false)}
+          />
+        </aside>
 
         <div className={styles.content}>
           <div className={styles.toolbar}>

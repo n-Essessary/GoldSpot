@@ -63,3 +63,19 @@
 
 /* Spread — yellow (positive = g2g more expensive = funpay is better) */
 .spreadValue { color: var(--yellow); }
+
+@media (max-width: 768px) {
+  .bar {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .item {
+    min-width: 45%;
+  }
+
+  .card {
+    min-width: 45%;
+  }
+}

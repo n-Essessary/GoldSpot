@@ -108,3 +108,15 @@
   border-left-color: var(--accent);
   background: var(--accent-dim);
 }
+
+@media (max-width: 768px) {
+  .sidebar {
+    width: 100%;
+    height: auto;
+    position: static;
+    top: auto;
+    margin-right: 0;
+    border-right: none;
+    padding: 52px 0 16px;
+  }
+}

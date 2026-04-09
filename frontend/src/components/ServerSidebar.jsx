@@ -15,9 +15,16 @@ import styles from './ServerSidebar.module.css'
  *   selectedServer: string
  *   selectedRealm?: string
  *   onSelect: (server: string, realm: string) => void
+ *   onNavigate?: () => void
  * }} props
  */
-export function ServerSidebar({ servers, selectedServer, selectedRealm = '', onSelect }) {
+export function ServerSidebar({
+  servers,
+  selectedServer,
+  selectedRealm = '',
+  onSelect,
+  onNavigate,
+}) {
   // Авто-раскрываем группу выбранного сервера при инициализации
   const [openGroups, setOpenGroups] = useState(() => {
     const initial = {}
@@ -53,6 +60,7 @@ export function ServerSidebar({ servers, selectedServer, selectedRealm = '', onS
                 } else {
                   // У группы нет реалмов (FunPay) — выбираем сразу
                   onSelect(display_server, '')
+                  onNavigate?.()
                 }
               }}
               title={display_server}
@@ -72,7 +80,10 @@ export function ServerSidebar({ servers, selectedServer, selectedRealm = '', onS
                     <div
                       key={realm}
                       className={isActive ? `${styles.item} ${styles.active}` : styles.item}
-                      onClick={() => onSelect(display_server, realm)}
+                      onClick={() => {
+                        onSelect(display_server, realm)
+                        onNavigate?.()
+                      }}
                       title={realm}
                     >
                       {realm}

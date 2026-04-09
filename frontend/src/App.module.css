@@ -60,3 +60,86 @@
 .main {
   flex: 1;
 }
+
+.sidebar {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.sidebarOverlay {
+  display: none;
+}
+
+.burgerBtn {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--text-primary, #fff);
+  font-size: 22px;
+  cursor: pointer;
+  padding: 8px;
+  line-height: 1;
+}
+
+.sidebarClose {
+  display: none;
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: none;
+  border: none;
+  color: var(--text-primary, #fff);
+  font-size: 20px;
+  cursor: pointer;
+  z-index: 1;
+}
+
+@media (max-width: 768px) {
+  .body {
+    flex-direction: column;
+    position: relative;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 80vw;
+    max-width: 320px;
+    height: 100vh;
+    z-index: 1000;
+    overflow-y: auto;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    background: var(--bg-surface, #1a1a2e);
+  }
+
+  .open {
+    transform: translateX(0);
+  }
+
+  .sidebarOverlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 999;
+  }
+
+  .visible {
+    display: block;
+  }
+
+  .content {
+    width: 100%;
+    padding: 8px;
+  }
+
+  .burgerBtn {
+    display: block;
+  }
+
+  .sidebarClose {
+    display: block;
+  }
+}
