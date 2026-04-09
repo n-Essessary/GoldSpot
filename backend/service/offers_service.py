@@ -163,6 +163,8 @@ def _detect_version(text: str) -> str:
         return "Anniversary"
     if "classic era" in t:
         return "Classic Era"
+    if "hardcore" in t:
+        return "Hardcore"
     return "Classic"
 
 
