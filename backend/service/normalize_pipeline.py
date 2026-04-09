@@ -76,6 +76,61 @@ _SOURCE_PRIORITY: dict[str, int] = {
     "g2g":    1,
 }
 
+# ── G2G raw_title parser for degraded mode ───────────────────────────────────
+# When the alias cache is unavailable we cannot resolve server_id, but we still
+# need a valid display_server for the sidebar.  Reconstruct it from the G2G
+# raw_title format: "ServerName [REGION - VERSION] - Faction"
+_DEGRADED_G2G_RE = re.compile(
+    r"^(?P<server>.+?)\s*\[(?P<region>[A-Za-z]{2,})\s*-\s*(?P<version>[^\]]+?)\]"
+    r"\s*(?:-\s*(?:Alliance|Horde))?$",
+    re.IGNORECASE,
+)
+
+
+def _reconstruct_display_server_from_raw_title(offer: "Offer") -> bool:
+    """Set display_server from raw_title for G2G offers in degraded mode.
+
+    Returns True if display_server was successfully reconstructed.
+    Does NOT touch non-G2G offers (FunPay already sets display_server from HTML).
+
+    Canonicalizes the version string via _canonicalize_version so that
+    degraded-mode offers produce valid sidebar group keys:
+      "Spineshatter [EU - Seasonal] - Horde"
+        → display_server = "(EU) Season of Discovery"  (not "(EU) Seasonal")
+    """
+    from utils.version_utils import _canonicalize_version
+
+    if offer.source != "g2g":
+        return bool((offer.display_server or "").strip())
+
+    raw = (getattr(offer, "raw_title", "") or "").strip()
+    if not raw:
+        return False
+
+    m = _DEGRADED_G2G_RE.match(raw)
+    if not m:
+        return False
+
+    region      = m.group("region").upper()
+    version_raw = m.group("version").strip()
+    server      = m.group("server").strip()
+
+    # Normalise region: NA → US (matches server_resolver._REGION_MAP)
+    if region == "NA":
+        region = "US"
+
+    # Canonicalize version so the sidebar shows a stable group label.
+    # "Seasonal" → "Season of Discovery", "anniversary" → "Anniversary", etc.
+    version = _canonicalize_version(version_raw)
+
+    display = f"({region}) {version}"
+    offer.display_server = display
+    offer.server         = display.lower()
+    if server:
+        offer.server_name = server
+
+    return True
+
 
 # ── Quarantine record ─────────────────────────────────────────────────────────
 
@@ -345,6 +400,7 @@ async def normalize_offer_batch(
     """
     from db.server_resolver import (
         get_server_data,
+        is_cache_loaded,
         resolve_server,
         resolve_server_batch,
     )
@@ -354,10 +410,26 @@ async def normalize_offer_batch(
     quarantined: list[QuarantinedOffer] = []
     seen_ids:    set[str]               = set()   # dedup: "source:offer_id"
 
+    # ── Degraded mode detection ──────────────────────────────────────────────
+    # When the alias cache was never loaded (DB unavailable on startup), the
+    # resolver cannot map ANY title → server_id.  In strict mode this means
+    # every single offer gets quarantined → empty cache → empty sidebar.
+    #
+    # Degraded mode: skip quarantine for unresolved offers and pass them
+    # through with parser-provided display_server (reconstructed from
+    # raw_title for G2G).  Offers get server_id=None — they won't appear in
+    # per-server indexes but WILL appear in the sidebar via display_server.
+    cache_available = is_cache_loaded()
+    if not cache_available:
+        logger.warning(
+            "normalize_pipeline: alias cache not loaded — running in DEGRADED mode "
+            "(offers pass through without server_id resolution)"
+        )
+
     # ── Batch alias resolution (one DB round-trip for all offers) ─────────────
     resolve_keys = _collect_resolve_keys(offers)
     alias_map: dict[str, int] = {}
-    if resolve_keys and pool is not None:
+    if resolve_keys and pool is not None and cache_available:
         alias_map = await resolve_server_batch(pool, resolve_keys)
 
     # ── Per-offer pipeline ────────────────────────────────────────────────────
@@ -393,56 +465,81 @@ async def normalize_offer_batch(
                     if server_id is not None:
                         offer.server_id = server_id
 
-            # ── Strict: unresolved server → quarantine ────────────────────────
-            # Per spec: "No implicit fallbacks — if canonical server cannot be
-            # resolved, send to quarantine. Do NOT guess, assign defaults, or
-            # create new canonical entries."
+            # ── Unresolved server handling ────────────────────────────────
             if offer.server_id is None:
-                quarantined.append(QuarantinedOffer(
-                    raw_id=offer_id_for_log,
-                    source=getattr(offer, "source", "unknown"),
-                    reason="unresolved_server",
-                    raw_title=getattr(offer, "raw_title", "") or getattr(offer, "display_server", ""),
-                    price=getattr(offer, "price_per_1k", 0.0),
-                    details=(
-                        f"server_name={offer.server_name!r} "
-                        f"display_server={offer.display_server!r}"
-                    ),
-                ))
-                continue
+                if cache_available:
+                    # ── Strict mode: cache is healthy → genuinely unknown server
+                    # Per spec: "No implicit fallbacks — if canonical server
+                    # cannot be resolved, send to quarantine."
+                    quarantined.append(QuarantinedOffer(
+                        raw_id=offer_id_for_log,
+                        source=getattr(offer, "source", "unknown"),
+                        reason="unresolved_server",
+                        raw_title=getattr(offer, "raw_title", "") or getattr(offer, "display_server", ""),
+                        price=getattr(offer, "price_per_1k", 0.0),
+                        details=(
+                            f"server_name={offer.server_name!r} "
+                            f"display_server={offer.display_server!r}"
+                        ),
+                    ))
+                    continue
 
-            # ── Step 3: canonicalize from registry ────────────────────────────
-            # Version, region, realm_type, name — ALWAYS from canonical servers
-            # table, NEVER from the raw source title.
-            server_data = get_server_data(offer.server_id)
-            if server_data is not None:
-                _apply_canonical(offer, server_data)
+                # ── Degraded mode: cache unavailable → pass through ──────────
+                # Reconstruct display_server from raw_title (G2G) so the offer
+                # is visible in the sidebar.  FunPay already has display_server
+                # from HTML parsing.  If reconstruction fails → quarantine even
+                # in degraded mode (we have nothing useful to show).
+                if not _reconstruct_display_server_from_raw_title(offer):
+                    quarantined.append(QuarantinedOffer(
+                        raw_id=offer_id_for_log,
+                        source=getattr(offer, "source", "unknown"),
+                        reason="unresolved_server",
+                        raw_title=getattr(offer, "raw_title", "") or getattr(offer, "display_server", ""),
+                        price=getattr(offer, "price_per_1k", 0.0),
+                        details=(
+                            f"degraded_mode=True "
+                            f"server_name={offer.server_name!r} "
+                            f"display_server={offer.display_server!r}"
+                        ),
+                    ))
+                    continue
+                # Offer passes through with server_id=None but valid
+                # display_server — skip canonicalization, is_active check,
+                # and price rerouting (all require server_id).
 
-            # ── Step 4: is_active check → quarantine deprecated versions ───────
-            # Inactive servers (e.g. Season of Mastery) are resolved and
-            # canonicalised (so the quarantine log shows the correct name) but
-            # then quarantined so they never reach the live cache.
-            if server_data is not None and not server_data.get("is_active", True):
-                quarantined.append(QuarantinedOffer(
-                    raw_id=offer_id_for_log,
-                    source=getattr(offer, "source", "unknown"),
-                    reason="deprecated_version",
-                    raw_title=getattr(offer, "raw_title", "") or getattr(offer, "display_server", ""),
-                    price=getattr(offer, "price_per_1k", 0.0),
-                    details=(
-                        f"server={offer.server_name!r} "
-                        f"version={server_data.get('version')!r}"
-                    ),
-                ))
-                continue
+            # ── Step 3–5: canonicalize / is_active / price (only with server_id)
+            if offer.server_id is not None:
+                # Step 3: canonicalize from registry
+                # Version, region, realm_type, name — ALWAYS from canonical
+                # servers table, NEVER from the raw source title.
+                server_data = get_server_data(offer.server_id)
+                if server_data is not None:
+                    _apply_canonical(offer, server_data)
 
-            # ── Step 5: price validation + optional rerouting ─────────────────
-            # Only runs if server_id resolved — otherwise no profile to compare.
-            # Price never creates servers; it only selects among existing ones.
-            profile = get_profile(offer.server_id, "All")
-            if not _price_fits_profile(offer.price_per_1k, profile):
-                await _try_reroute(offer, pool)
-                # If reroute fails, offer keeps its original server — not quarantined.
+                # Step 4: is_active check → quarantine deprecated versions
+                # Inactive servers (e.g. Season of Mastery) are resolved and
+                # canonicalised (so the quarantine log shows the correct name)
+                # but then quarantined so they never reach the live cache.
+                if server_data is not None and not server_data.get("is_active", True):
+                    quarantined.append(QuarantinedOffer(
+                        raw_id=offer_id_for_log,
+                        source=getattr(offer, "source", "unknown"),
+                        reason="deprecated_version",
+                        raw_title=getattr(offer, "raw_title", "") or getattr(offer, "display_server", ""),
+                        price=getattr(offer, "price_per_1k", 0.0),
+                        details=(
+                            f"server={offer.server_name!r} "
+                            f"version={server_data.get('version')!r}"
+                        ),
+                    ))
+                    continue
+
+                # Step 5: price validation + optional rerouting
+                # Price never creates servers; it only selects among existing.
+                profile = get_profile(offer.server_id, "All")
+                if not _price_fits_profile(offer.price_per_1k, profile):
+                    await _try_reroute(offer, pool)
+                    # If reroute fails, offer keeps original server — not quarantined.
 
             # ── Step 6: dedup by (source, offer_id) ──────────────────────────
             dedup_key = f"{offer.source}:{offer.id}"

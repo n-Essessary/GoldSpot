@@ -607,6 +607,17 @@ async def register_alias(
         )
 
 
+def is_cache_loaded() -> bool:
+    """Return True if the alias + server data cache was ever successfully loaded.
+
+    Used by normalize_pipeline to decide between strict quarantine (cache is
+    healthy → unresolved means genuinely unknown server) and degraded pass-through
+    (cache never loaded → resolver is unavailable, let offers through with
+    parser-provided display_server).
+    """
+    return _cache_loaded_at > 0
+
+
 def reset_alias_cache_circuit_breaker() -> None:
     """Re-arm the alias cache circuit-breaker after a transient failure.
 

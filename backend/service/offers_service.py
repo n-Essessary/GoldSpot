@@ -609,16 +609,26 @@ async def _run_funpay_loop() -> None:
                         ", ".join({q.reason for q in quarantined}),
                     )
 
-                _cache["funpay"] = offers
-                _cache_initialized["funpay"] = True
-                _cache_version["funpay"] += 1
-                _last_update["funpay"] = datetime.now(timezone.utc)
-                _last_error["funpay"] = None
-                logger.info(
-                    "FunPay updated: %d offers (%d quarantined)",
-                    len(offers), len(quarantined),
-                )
-                asyncio.create_task(_snapshot_all_servers())
+                # Cache protection: don't overwrite a healthy cache with empty
+                # results (e.g. all offers quarantined because resolver is down).
+                if not offers and _cache_initialized["funpay"]:
+                    _last_error["funpay"] = "empty_after_normalize"
+                    logger.warning(
+                        "FunPay normalize returned 0 offers (%d quarantined) — "
+                        "keeping %d cached offers",
+                        len(quarantined), len(_cache["funpay"]),
+                    )
+                else:
+                    _cache["funpay"] = offers
+                    _cache_initialized["funpay"] = True
+                    _cache_version["funpay"] += 1
+                    _last_update["funpay"] = datetime.now(timezone.utc)
+                    _last_error["funpay"] = None
+                    logger.info(
+                        "FunPay updated: %d offers (%d quarantined)",
+                        len(offers), len(quarantined),
+                    )
+                    asyncio.create_task(_snapshot_all_servers())
             elif _cache_initialized["funpay"]:
                 _last_error["funpay"] = "empty_result"
                 logger.warning(
@@ -668,17 +678,28 @@ async def _run_g2g_loop() -> None:
                         ", ".join({q.reason for q in quarantined}),
                     )
 
-                _cache["g2g"] = offers
-                _cache_initialized["g2g"] = True
-                _cache_version["g2g"] += 1
-                _last_update["g2g"] = datetime.now(timezone.utc)
-                _last_error["g2g"] = None
-                elapsed = asyncio.get_running_loop().time() - t0
-                logger.info(
-                    "G2G updated: %d offers (%d quarantined) in %.1fs",
-                    len(offers), len(quarantined), elapsed,
-                )
-                asyncio.create_task(_snapshot_all_servers())
+                # Cache protection: don't overwrite a healthy cache with empty
+                # results (e.g. all offers quarantined because resolver is down).
+                if not offers and _cache_initialized["g2g"]:
+                    _last_error["g2g"] = "empty_after_normalize"
+                    elapsed = asyncio.get_running_loop().time() - t0
+                    logger.warning(
+                        "G2G normalize returned 0 offers (%d quarantined) in %.1fs — "
+                        "keeping %d cached offers",
+                        len(quarantined), elapsed, len(_cache["g2g"]),
+                    )
+                else:
+                    _cache["g2g"] = offers
+                    _cache_initialized["g2g"] = True
+                    _cache_version["g2g"] += 1
+                    _last_update["g2g"] = datetime.now(timezone.utc)
+                    _last_error["g2g"] = None
+                    elapsed = asyncio.get_running_loop().time() - t0
+                    logger.info(
+                        "G2G updated: %d offers (%d quarantined) in %.1fs",
+                        len(offers), len(quarantined), elapsed,
+                    )
+                    asyncio.create_task(_snapshot_all_servers())
             elif _cache_initialized["g2g"]:
                 _last_error["g2g"] = "empty_result"
                 logger.warning(

@@ -200,20 +200,11 @@ def _parse_title(title: str) -> tuple[str, str, str, str]:
     if m:
         server_name = (m.group("server") or "").strip()
         region      = (m.group("region") or "").upper().strip()
-        version_raw = (m.group("version") or "").strip()
-        v = version_raw.lower()
-        if "seasonal" in v or "season of discovery" in v or v == "sod":
-            version = "Seasonal"
-        elif "anniversary" in v:
-            version = "Anniversary"
-        elif "classic era" in v:
-            version = "Classic Era"
-        elif "classic" in v:
-            version = "Classic"
-        elif "hardcore" in v:
-            version = "Hardcore"
-        else:
-            version = version_raw
+        # Pass version through verbatim from the bracket.
+        # Canonicalization ("Seasonal" → "Season of Discovery", etc.) happens
+        # downstream in _normalize_g2g_offer via _canonicalize_version so that
+        # the raw title alias key is never corrupted by pre-normalization.
+        version = (m.group("version") or "").strip()
         faction     = (m.group("faction") or "").strip().capitalize() or (
             "Alliance" if "alliance" in t.lower() else "Horde"
         )
