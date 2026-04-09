@@ -358,7 +358,9 @@ def _build_alias_key(offer: "Offer") -> Optional[str]:
         version = version.replace("\u2019", "'").replace("\u2018", "'")
         if offer.server_name:
             return f"({region}) {version} - {offer.server_name}"
-        return None
+        # No realm suffix — use group label as alias key
+        # e.g. "(US) Ashkandi" or "(EU) Flamelash"
+        return f"({region}) {version}"
 
     return None
 
