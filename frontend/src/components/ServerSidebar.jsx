@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import styles from './ServerSidebar.module.css'
 
 /**
@@ -32,69 +32,180 @@ export function ServerSidebar({
     return initial
   })
 
+  const [query, setQuery] = useState('')
+  const [debouncedQuery, setDebouncedQuery] = useState('')
+  const debounceRef = useRef(null)
+
+  const handleSearchChange = (e) => {
+    const v = e.target.value
+    setQuery(v)
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => {
+      debounceRef.current = null
+      setDebouncedQuery(v)
+    }, 150)
+  }
+
+  useEffect(
+    () => () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+    },
+    [],
+  )
+
+  const clearSearchImmediate = () => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current)
+      debounceRef.current = null
+    }
+    setQuery('')
+    setDebouncedQuery('')
+  }
+
   const toggle = (displayServer) =>
     setOpenGroups((prev) => ({ ...prev, [displayServer]: !prev[displayServer] }))
 
+  const filteredRows = useMemo(() => {
+    const raw = debouncedQuery.trim()
+    if (!raw) {
+      return servers.map((g) => ({
+        group: g,
+        hidden: false,
+        expanded: null,
+        realmsToShow: g.realms,
+        highlightRealms: false,
+      }))
+    }
+
+    const qLower = raw.toLowerCase()
+
+    return servers.map((g) => {
+      const groupLabel = stripRegionPrefix(g.display_server)
+      const groupMatches = groupLabel.toLowerCase().includes(qLower)
+      const matchingRealms = g.realms.filter((r) =>
+        r.toLowerCase().includes(qLower),
+      )
+
+      if (!groupMatches && matchingRealms.length === 0) {
+        return {
+          group: g,
+          hidden: true,
+          expanded: true,
+          realmsToShow: [],
+          highlightRealms: false,
+        }
+      }
+
+      if (matchingRealms.length > 0) {
+        return {
+          group: g,
+          hidden: false,
+          expanded: true,
+          realmsToShow: matchingRealms,
+          highlightRealms: true,
+        }
+      }
+
+      // Group label matches, no realm substring match — show all realms
+      return {
+        group: g,
+        hidden: false,
+        expanded: true,
+        realmsToShow: g.realms,
+        highlightRealms: false,
+      }
+    })
+  }, [servers, debouncedQuery])
+
+  const searchActive = debouncedQuery.trim().length > 0
+
   return (
     <aside className={styles.sidebar}>
+      <input
+        type="search"
+        className={styles.searchInput}
+        placeholder="Поиск сервера..."
+        value={query}
+        onChange={handleSearchChange}
+        autoComplete="off"
+        spellCheck={false}
+        aria-label="Поиск сервера"
+      />
+
       <div className={styles.heading}>Серверы</div>
 
-      {servers.map(({ display_server, realms }) => {
-        const isOpen = !!openGroups[display_server]
-        const isGroupActive = display_server === selectedServer
-        const hasRealms = realms.length > 0
+      {filteredRows.map(
+        ({ group: { display_server, realms }, hidden, expanded, realmsToShow, highlightRealms }) => {
+          if (hidden) return null
 
-        return (
-          <div key={display_server} className={styles.group}>
-            {/* ── Заголовок группы ── */}
-            <div
-              className={
-                isGroupActive
-                  ? `${styles.groupTitle} ${styles.groupTitleActive}`
-                  : styles.groupTitle
-              }
-              onClick={() => {
-                if (hasRealms) {
-                  // Раскрываем/скрываем список реалмов
-                  toggle(display_server)
-                } else {
-                  // У группы нет реалмов (FunPay) — выбираем сразу
-                  onSelect(display_server, '')
-                  onNavigate?.()
+          const isOpen = searchActive ? !!expanded : !!openGroups[display_server]
+          const isGroupActive = display_server === selectedServer
+          const hasRealms = realms.length > 0
+
+          return (
+            <div key={display_server} className={styles.group}>
+              {/* ── Заголовок группы ── */}
+              <div
+                className={
+                  isGroupActive
+                    ? `${styles.groupTitle} ${styles.groupTitleActive}`
+                    : styles.groupTitle
                 }
-              }}
-              title={display_server}
-            >
-              <span className={styles.arrow}>
-                {hasRealms ? (isOpen ? '▼' : '▶') : '·'}
-              </span>
-              {display_server}
-            </div>
-
-            {/* ── Реалмы внутри группы ── */}
-            {isOpen && hasRealms && (
-              <div className={styles.groupItems}>
-                {realms.map((realm) => {
-                  const isActive = isGroupActive && realm === selectedRealm
-                  return (
-                    <div
-                      key={realm}
-                      className={isActive ? `${styles.item} ${styles.active}` : styles.item}
-                      onClick={() => {
-                        onSelect(display_server, realm)
-                        onNavigate?.()
-                      }}
-                      title={realm}
-                    >
-                      {realm}
-                    </div>
-                  )
-                })}
+                onClick={() => {
+                  if (hasRealms) {
+                    if (!searchActive) toggle(display_server)
+                  } else {
+                    onSelect(display_server, '')
+                    clearSearchImmediate()
+                    onNavigate?.()
+                  }
+                }}
+                title={display_server}
+              >
+                <span className={styles.arrow}>
+                  {hasRealms ? (isOpen ? '▼' : '▶') : '·'}
+                </span>
+                {display_server}
               </div>
-            )}
-          </div>
-        )
-      })}
+
+              {/* ── Реалмы внутри группы ── */}
+              {isOpen && hasRealms && (
+                <div className={styles.groupItems}>
+                  {realmsToShow.map((realm) => {
+                    const isActive = isGroupActive && realm === selectedRealm
+                    return (
+                      <div
+                        key={realm}
+                        className={[
+                          styles.item,
+                          isActive ? styles.active : '',
+                          highlightRealms ? styles.realmMatch : '',
+                        ]
+                          .filter(Boolean)
+                          .join(' ')}
+                        onClick={() => {
+                          onSelect(display_server, realm)
+                          clearSearchImmediate()
+                          onNavigate?.()
+                        }}
+                        title={realm}
+                      >
+                        {realm}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        },
+      )}
     </aside>
   )
+}
+
+/** Часть display_server без префикса региона: "(EU) Anniversary" → "Anniversary" */
+function stripRegionPrefix(displayServer) {
+  const m = String(displayServer || '').match(/^\([^)]+\)\s*(.*)$/)
+  return m ? m[1].trim() : String(displayServer || '').trim()
 }
