@@ -46,11 +46,32 @@
 .row.best td:first-child    { box-shadow: inset 3px 0 0 var(--accent); }
 .row.best .price            { color: var(--accent); font-weight: 500; }
 
-/* Топ-5 кросс-платформенная подсветка: 2 лучших FunPay + 2 лучших G2G + cheapest overall */
+/* Топ-5 кросс-платформенная подсветка (deprecated — superseded by topPick) */
 .row.top5 td                { background: rgba(240, 180, 41, 0.045); }
 .row.top5:hover td          { background: rgba(240, 180, 41, 0.09); }
 .row.top5 td:first-child    { box-shadow: inset 3px 0 0 #f0b429; }
 .row.top5 .price            { color: #f0b429; }
+
+/* Top Pick: cheapest offer per (source, faction) — pinned at top of table */
+.row.topPick td             { background: rgba(167, 139, 250, 0.06); }
+.row.topPick:hover td       { background: rgba(167, 139, 250, 0.10); }
+.row.topPick td:first-child { box-shadow: inset 3px 0 0 #a78bfa; }
+.row.topPick .price         { color: #a78bfa; font-weight: 500; }
+
+/* Top Pick badge — source+faction label next to platform badge */
+.topPickBadge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(167, 139, 250, 0.15);
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: #a78bfa;
+  white-space: nowrap;
+  vertical-align: middle;
+}
 
 /* ── Колонки ─────────────────────────────────────────────── */
 .right     { text-align: right; }

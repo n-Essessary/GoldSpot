@@ -1,4 +1,23 @@
 import styles from './OffersTable.module.css'
+import { buildDisplayList } from '../hooks/useOffers'
+
+/**
+ * Sanitize a URL before rendering in an <a href>.
+ * Rejects non-http(s) protocols (e.g. javascript:) to prevent XSS.
+ * Returns null for missing, blank, or unsafe URLs.
+ *
+ * @param {string|null|undefined} url
+ * @returns {string|null}
+ */
+export function safeUrl(url) {
+  if (!url) return null
+  try {
+    const u = new URL(url)
+    return u.protocol === 'https:' || u.protocol === 'http:' ? url : null
+  } catch {
+    return null
+  }
+}
 
 // Цвета фракций
 const FACTION_COLOR = {
@@ -41,21 +60,14 @@ function formatTime(iso) {
 }
 
 /**
+ * @deprecated Superseded by getTopPickIds from useOffers.js (Task 3).
+ * Kept for backward compatibility — no longer used in OffersTable.
+ *
  * Cross-platform top-5 highlight set with per-source guarantee.
- *
- * Algorithm:
- *   1. Include the 2 cheapest offers PER SOURCE (guaranteed cross-platform representation).
- *   2. Fill any remaining slots up to 5 from the globally cheapest offers.
- *
- * This ensures FunPay always appears highlighted when it has offers, even when
- * all G2G prices are lower than all FunPay prices.
- *
  * `sorted` must be sorted ASC by price_per_1k.
  */
 export function getTop5Set(sorted) {
   const result = new Set()
-
-  // Step 1: guarantee top-2 per source
   const countBySource = {}
   for (const o of sorted) {
     const src = o.source
@@ -65,13 +77,10 @@ export function getTop5Set(sorted) {
       countBySource[src]++
     }
   }
-
-  // Step 2: fill remaining slots to reach 5 from global cheapest
   for (const o of sorted) {
     if (result.size >= 5) break
     result.add(o.id)
   }
-
   return result
 }
 
@@ -112,10 +121,20 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
     )
   }
 
-  // Сортируем по цене ASC — дешёвые сверху
-  const sorted   = [...offers].sort((a, b) => a.price_per_1k - b.price_per_1k)
-  const minPrice = sorted[0].price_per_1k
-  const top5Ids  = getTop5Set(sorted)
+  // Task 3: single pass — top picks pinned first, then remaining.
+  // buildDisplayList returns both the ordered list and the topPickIds Set so
+  // we never iterate offers twice for the same information.
+  const { sorted: displayList, topPickIds } = buildDisplayList(offers)
+  // minPrice is always displayList[0] (top picks are sorted cheapest-first)
+  const minPrice    = displayList.length > 0 ? displayList[0].price_per_1k : 0
+
+  // Pre-compute sequential rank for remaining (non-top-pick) offers
+  let _remainingRank = 0
+  const offerRanks = displayList.map((offer) => {
+    if (topPickIds.has(offer.id)) return null   // top pick → shows ★
+    _remainingRank++
+    return _remainingRank
+  })
 
   return (
     <div className={styles.wrapper}>
@@ -134,9 +153,10 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
           </tr>
         </thead>
         <tbody>
-          {sorted.map((offer, i) => {
+          {displayList.map((offer, i) => {
             const isBest      = offer.price_per_1k === minPrice
-            const isTop5      = top5Ids.has(offer.id)
+            const isTopPick   = topPickIds.has(offer.id)
+            const rank        = offerRanks[i]
             const src         = SOURCE_META[offer.source] ?? { label: offer.source, color: 'var(--text-secondary)' }
             // ⚠ Аномально дорогой G2G-оффер: >= 3× от min_price сервера
             const isExpensive = offer.source === 'g2g' && offer.price_per_1k >= minPrice * 3
@@ -148,22 +168,22 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
 
             const rowCls = [
               styles.row,
-              isBest ? styles.best : '',
-              isTop5 && !isBest ? styles.top5 : '',
+              isBest    ? styles.best    : '',       // cheapest overall: green accent
+              isTopPick && !isBest ? styles.topPick : '',  // other top picks: purple
             ].filter(Boolean).join(' ')
 
             return (
               <tr key={`${offer.source}-${offer.id}`} className={rowCls}>
 
-                {/* Ранг */}
+                {/* Ранг: ★ для top picks, порядковый номер для остальных */}
                 <td className={styles.rank}>
-                  {isBest
-                    ? <span className={styles.crown} title="Лучшая цена">★</span>
-                    : <span className={styles.rankNum}>{i + 1}</span>
+                  {isTopPick
+                    ? <span className={styles.crown} title="Top Pick">★</span>
+                    : <span className={styles.rankNum}>{rank}</span>
                   }
                 </td>
 
-                {/* Платформа — главный акцент */}
+                {/* Платформа — главный акцент + Top Pick badge */}
                 <td>
                   <span
                     className={styles.source}
@@ -171,6 +191,11 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
                   >
                     {src.label}
                   </span>
+                  {isTopPick && (
+                    <span className={styles.topPickBadge}>
+                      {offer.faction}
+                    </span>
+                  )}
                 </td>
 
                 {/* Сервер + Фракция в одной ячейке */}
@@ -227,10 +252,10 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
 
                 {/* Основное действие */}
                 <td className={styles.actionCell}>
-                  {offer.offer_url
+                  {safeUrl(offer.offer_url)
                     ? (
                       <a
-                        href={offer.offer_url}
+                        href={safeUrl(offer.offer_url)}
                         target="_blank"
                         rel="noreferrer"
                         className={`${styles.buyBtn} ${isBest ? styles.buyBtnBest : ''}`}

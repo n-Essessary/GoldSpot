@@ -11,6 +11,25 @@ def test_compute_index_price_single_offer_none(make_offer):
     assert osvc.compute_index_price([make_offer()]) is None
 
 
+def test_compute_index_price_single_top_pick_returns_none(make_offer):
+    """One offer → one (source, faction) pair → thin market → None."""
+    offers = [make_offer(source="funpay", faction="Horde", raw_price=0.0015)]
+    assert osvc.compute_index_price(offers) is None
+
+
+def test_compute_index_price_two_pairs_returns_index(make_offer):
+    """Two distinct (source, faction) pairs → should return a valid IndexPrice."""
+    offers = [
+        make_offer(id="o1", source="funpay", faction="Horde",    raw_price=0.0015),
+        make_offer(id="o2", source="g2g",    faction="Alliance", raw_price=0.002),
+    ]
+    result = osvc.compute_index_price(offers)
+    assert result is not None
+    assert result.offer_count == 2
+    assert abs(result.index_price - 1.75) < 1e-4  # mean(1.5, 2.0)
+    assert abs(result.best_ask - 1.5) < 1e-6
+
+
 def test_normalize_funpay_offer_extracts_realm(make_offer):
     o = make_offer(source="funpay", display_server="(EU) Season of Discovery - Firemaw", server="(EU) Season of Discovery - Firemaw")
     n = osvc._normalize_funpay_offer(o)

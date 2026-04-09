@@ -1,6 +1,85 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { fetchOffers, fetchMeta } from '../api/offers'
 
+// ── Top-pick display helpers ────────────────────────────────────────────────
+
+/**
+ * Stable dedup key for an offer.
+ * Falls back to a composite key when `o.id` is undefined / empty string,
+ * preventing all id-less offers from collapsing into a single bucket.
+ *
+ * @param {import('../api/offers').Offer} o
+ * @returns {string}
+ */
+export function offerId(o) {
+  return o.id || `${o.source}::${o.seller}::${o.price_per_1k}::${o.updated_at}`
+}
+
+/**
+ * Return a Set of dedup keys for "top pick" offers — cheapest per
+ * (source, faction) combination (up to 4: funpay/alliance, funpay/horde,
+ * g2g/alliance, g2g/horde).
+ *
+ * Uses `offerId()` so offers without an `id` field are handled safely.
+ *
+ * @param {import('../api/offers').Offer[]} offers
+ * @returns {Set<string>}
+ */
+export function getTopPickIds(offers) {
+  if (!offers || offers.length === 0) return new Set()
+  const topPickMap = {}
+  for (const offer of offers) {
+    const key = `${(offer.source || '').toLowerCase()}::${(offer.faction || '').toLowerCase()}`
+    if (!topPickMap[key] || offer.price_per_1k < topPickMap[key].price_per_1k) {
+      topPickMap[key] = offer
+    }
+  }
+  return new Set(Object.values(topPickMap).map(offerId))
+}
+
+/**
+ * Build the ordered display list for the offers table.
+ *
+ * Returns `{ sorted, topPickIds }` — a single pass over the offers avoids
+ * computing the top-pick set twice in the caller.
+ *
+ *   sorted:     offers in display order — top picks (up to 4) pinned first,
+ *               sorted by price_per_1k ASC within each section.
+ *   topPickIds: Set<string> of offerId keys for the top-pick rows.
+ *
+ * Uses `offerId()` for dedup so offers with missing `id` are safe.
+ * Pure function — no side-effects.
+ *
+ * @param {import('../api/offers').Offer[]} offers
+ * @returns {{ sorted: import('../api/offers').Offer[], topPickIds: Set<string> }}
+ */
+export function buildDisplayList(offers) {
+  if (!offers || offers.length === 0) return { sorted: [], topPickIds: new Set() }
+
+  // 1. Find cheapest offer per (source, faction) pair
+  const topPickMap = {}
+  for (const offer of offers) {
+    const key = `${(offer.source || '').toLowerCase()}::${(offer.faction || '').toLowerCase()}`
+    if (!topPickMap[key] || offer.price_per_1k < topPickMap[key].price_per_1k) {
+      topPickMap[key] = offer
+    }
+  }
+
+  // 2. Collect top picks and compute stable ID set
+  const topPicks   = Object.values(topPickMap)
+  const topPickIds = new Set(topPicks.map(offerId))
+
+  // 3. Sort top picks by price_per_1k ASC
+  topPicks.sort((a, b) => a.price_per_1k - b.price_per_1k)
+
+  // 4. Remaining offers (not top picks), sorted ASC — use offerId for safe filter
+  const remaining = offers.filter((o) => !topPickIds.has(offerId(o)))
+  remaining.sort((a, b) => a.price_per_1k - b.price_per_1k)
+
+  // 5. Top picks first, then remaining
+  return { sorted: [...topPicks, ...remaining], topPickIds }
+}
+
 /** Интервал опроса /meta — лёгкий запрос, не тянет офферы */
 const META_POLL_MS = 10_000
 

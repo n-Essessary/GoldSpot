@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, test, vi } from 'vitest'
 
-import { useOffers } from '../src/hooks/useOffers'
+import { buildDisplayList, useOffers } from '../src/hooks/useOffers'
 
 vi.mock('../src/api/offers', () => ({
   fetchOffers: vi.fn(),
@@ -59,4 +59,40 @@ describe('useOffers', () => {
     expect(result.current.error).toBe('boom')
     expect(result.current.offers.length).toBe(2)
   })
+})
+
+// ── buildDisplayList — missing id dedup safety ────────────────────────────────
+
+test('buildDisplayList handles offers with missing id', () => {
+  const offers = [
+    { source: 'funpay', faction: 'Horde',    price_per_1k: 1.5, seller: 'a', updated_at: 't1' },
+    { source: 'g2g',    faction: 'Alliance', price_per_1k: 2.0, seller: 'b', updated_at: 't2' },
+  ]
+  const { sorted } = buildDisplayList(offers)
+  expect(sorted).toHaveLength(2)
+  expect(sorted[0].price_per_1k).toBe(1.5) // cheaper first (top-pick order)
+})
+
+test('buildDisplayList returns empty sorted and empty topPickIds for empty input', () => {
+  const { sorted, topPickIds } = buildDisplayList([])
+  expect(sorted).toHaveLength(0)
+  expect(topPickIds.size).toBe(0)
+})
+
+test('buildDisplayList no duplicates between top picks and remaining', () => {
+  const offers = [
+    { id: 'fp1', source: 'funpay', faction: 'Alliance', price_per_1k: 2.5, seller: 's', updated_at: 't' },
+    { id: 'fp2', source: 'funpay', faction: 'Alliance', price_per_1k: 3.0, seller: 's', updated_at: 't' },
+    { id: 'g1',  source: 'g2g',    faction: 'Horde',    price_per_1k: 1.8, seller: 's', updated_at: 't' },
+    { id: 'g2',  source: 'g2g',    faction: 'Horde',    price_per_1k: 2.1, seller: 's', updated_at: 't' },
+  ]
+  const { sorted, topPickIds } = buildDisplayList(offers)
+  const topSection = sorted.filter((o) => topPickIds.has(o.id))
+  const remaining  = sorted.filter((o) => !topPickIds.has(o.id))
+  const topIdSet   = new Set(topSection.map((o) => o.id))
+  const remIdSet   = new Set(remaining.map((o) => o.id))
+  // No offer appears in both sections
+  for (const id of topIdSet) expect(remIdSet.has(id)).toBe(false)
+  expect(topSection).toHaveLength(2)  // funpay/alliance + g2g/horde
+  expect(remaining).toHaveLength(2)   // the two cheaper-priced alternatives
 })

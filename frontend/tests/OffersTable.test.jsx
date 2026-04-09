@@ -1,7 +1,7 @@
 import { cleanup, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, test } from 'vitest'
 
-import { OffersTable, formatPrice, getTop5Set } from '../src/components/OffersTable'
+import { OffersTable, formatPrice, getTop5Set, safeUrl } from '../src/components/OffersTable'
 
 
 function mkOffer(overrides = {}) {
@@ -52,7 +52,8 @@ describe('OffersTable', () => {
 
   it('first row has crown icon', () => {
     render(<OffersTable offers={[mkOffer({ id: 'a', price_per_1k: 2 }), mkOffer({ id: 'b', price_per_1k: 3 })]} loading={false} error={null} />)
-    expect(screen.getByTitle('Лучшая цена')).toBeInTheDocument()
+    // Title updated to 'Top Pick' (Task 3 refactor — top-pick display logic)
+    expect(screen.getByTitle('Top Pick')).toBeInTheDocument()
   })
 
   it('buy button links to offer url and renders dash for null', () => {
@@ -129,5 +130,33 @@ describe('getTop5Set', () => {
   it('handles empty input', () => {
     const top5 = getTop5Set([])
     expect(top5.size).toBe(0)
+  })
+})
+
+// ── safeUrl — URL sanitization ────────────────────────────────────────────────
+
+describe('safeUrl', () => {
+  test('rejects javascript: protocol', () => {
+    expect(safeUrl('javascript:alert(1)')).toBeNull()
+  })
+
+  test('rejects data: protocol', () => {
+    expect(safeUrl('data:text/html,<script>alert(1)</script>')).toBeNull()
+  })
+
+  test('accepts https URLs', () => {
+    expect(safeUrl('https://www.g2g.com/offer/123')).toBe('https://www.g2g.com/offer/123')
+  })
+
+  test('accepts http URLs', () => {
+    expect(safeUrl('http://funpay.com/en/chips/114/')).toBe('http://funpay.com/en/chips/114/')
+  })
+
+  test('returns null for null input', () => {
+    expect(safeUrl(null)).toBeNull()
+  })
+
+  test('returns null for empty string', () => {
+    expect(safeUrl('')).toBeNull()
   })
 })

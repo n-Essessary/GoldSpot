@@ -197,13 +197,16 @@ def _normalize_funpay_offer(offer: Offer) -> Offer:
 
     region  = m.group("region").upper()
     body    = (m.group("body") or "").strip()
-    version = _detect_version(body)
+    # Task 1: use _canonicalize_version (from _VERSION_ALIASES) so both
+    # _normalize_funpay_offer and _normalize_g2g_offer produce identical
+    # canonical version strings for the same logical server.
+    version = _canonicalize_version(_detect_version(body))
     realm   = ""
 
     if " - " in body:
         left, right = body.rsplit(" - ", 1)
         realm   = right.strip()
-        version = _detect_version(left or body)
+        version = _canonicalize_version(_detect_version(left or body))
     else:
         realm = body.strip()
 
@@ -304,65 +307,50 @@ def get_parser_status() -> dict:
 
 def compute_index_price(offers: list[Offer]) -> IndexPrice | None:
     """
-    Three-component price index (exchange approach).
+    Task 4: Top-pick price index — one best offer per (source, faction) pair.
 
-    index_price = Volume-Weighted Median (resilient to volume outliers)
-    vwap        = Volume-Weighted Average Price on top offers up to 1M gold
-    best_ask    = first price where accumulated volume ≥ 50k gold
+    Algorithm:
+      1. Collect the cheapest offer per (source, faction) pair — up to 4 picks:
+           funpay/Alliance, funpay/Horde, g2g/Alliance, g2g/Horde.
+      2. index_price = simple mean of top-pick price_per_1k values.
+      3. best_ask    = minimum price among top picks.
+      4. offer_count = number of top picks found (1–4).
+
+    Returns None if fewer than 2 raw offers are supplied, or if after building
+    the top-pick map fewer than 2 distinct (source, faction) pairs exist
+    (thin market — single noisy offer must not pollute the index).
+    Signature and return type (IndexPrice dataclass) are unchanged.
     """
-    if not offers or len(offers) < _MIN_OFFERS:
+    if not offers or len(offers) < 2:
         return None
 
-    prices_sorted = sorted(o.price_per_1k for o in offers)
-    raw_median = prices_sorted[len(prices_sorted) // 2]
-    clean = [
-        o for o in offers
-        if o.price_per_1k <= raw_median * _OUTLIER_MULTIPLIER and o.price_per_1k > 0
-    ]
-    if len(clean) < _MIN_OFFERS:
-        clean = [o for o in offers if o.price_per_1k > 0]
-    if not clean:
+    # Find cheapest offer per (source, faction) pair
+    top_pick_map: dict[tuple[str, str], Offer] = {}
+    for o in offers:
+        if o.price_per_1k <= 0:
+            continue
+        key = (o.source.lower(), o.faction.lower())
+        if key not in top_pick_map or o.price_per_1k < top_pick_map[key].price_per_1k:
+            top_pick_map[key] = o
+
+    # Require at least 2 distinct (source, faction) pairs — thin market returns None
+    if len(top_pick_map) < 2:
         return None
 
-    clean.sort(key=lambda o: o.price_per_1k)
-
-    total_vol = sum(o.amount_gold for o in clean)
-    cumulative, vw_median = 0, clean[0].price_per_1k
-    for o in clean:
-        cumulative += o.amount_gold
-        if cumulative >= total_vol * 0.5:
-            vw_median = o.price_per_1k
-            break
-
-    selected, acc = [], 0
-    for o in clean:
-        selected.append(o)
-        acc += o.amount_gold
-        if acc >= _VWAP_GOLD_CAP:
-            break
-    total_w = sum(o.amount_gold for o in selected)
-    vwap = (
-        sum(o.price_per_1k * o.amount_gold for o in selected) / total_w
-        if total_w else clean[0].price_per_1k
-    )
-
-    acc_ask = 0
-    best_ask = clean[0].price_per_1k
-    for o in clean:
-        acc_ask += o.amount_gold
-        best_ask = o.price_per_1k
-        if acc_ask >= _MIN_LIQUID_GOLD:
-            break
+    top_picks = list(top_pick_map.values())
+    prices    = [o.price_per_1k for o in top_picks]
+    index_price = sum(prices) / len(prices)
+    best_ask    = min(prices)
 
     return IndexPrice(
-        index_price  = round(vw_median, 6),
-        vwap         = round(vwap, 6),
+        index_price  = round(index_price, 6),
+        vwap         = round(index_price, 6),   # same as index in top-pick model
         best_ask     = round(best_ask, 6),
-        price_min    = round(clean[0].price_per_1k, 6),
-        price_max    = round(clean[-1].price_per_1k, 6),
-        offer_count  = len(clean),
-        total_volume = total_vol,
-        sources      = sorted({o.source for o in clean}),
+        price_min    = round(min(prices), 6),
+        price_max    = round(max(prices), 6),
+        offer_count  = len(top_picks),
+        total_volume = sum(o.amount_gold for o in top_picks),
+        sources      = sorted({o.source for o in top_picks}),
     )
 
 
@@ -376,42 +364,42 @@ def compute_server_index(
     """
     Compute price index for a specific server_id + faction.
 
-    Algorithm (Task 4):
+    Algorithm (updated Task 4 — top-pick-per-source):
       1. Filter offers to same server_id + faction.
-      2. Sort by price_per_1k ASC — already normalised for both sources:
-           G2G (per_unit):  price_per_1k = raw_price * 1000
+      2. Find cheapest offer per source (funpay, g2g) — mirrors the
+         top-pick selection in compute_index_price and buildDisplayList.
+         Sorting by price_per_1k (normalised) is correct for both sources:
+           G2G  (per_unit):  price_per_1k = raw_price * 1000
            FunPay (per_lot): price_per_1k = (raw_price / lot_size) * 1000
-         Sorting by raw_price directly would give wrong results because
-         FunPay raw_price is per-lot (e.g. 3.0 for 1000 gold) while
-         G2G raw_price is per-unit (e.g. 0.003 per 1 gold), making FunPay
-         look 1000× more expensive.
-      3. Take top _INDEX_TOP_N cheapest.
-      4. Return mean as index_price in per-unit (per 1 gold) form.
+      3. Return mean of top-pick prices as index_price (per-unit, per 1 gold).
 
     Returns dict with index_price (per unit), min, max, sample_size.
-    Returns None if not enough offers.
+    Returns None if no valid offers exist.
     """
     matching = [
         o for o in offers
         if o.server_id == server_id
         and (faction == "All" or o.faction.lower() == faction.lower())
-        and o.price_per_1k > 0  # use normalised price — correct for all sources
+        and o.price_per_1k > 0
     ]
 
-    if len(matching) < _MIN_OFFERS:
+    if not matching:
         return None
 
-    # Sort by normalised price_per_1k ASC (works correctly for FunPay + G2G)
-    matching.sort(key=lambda o: o.price_per_1k)
-    top = matching[:_INDEX_TOP_N]
+    # Find cheapest offer per source — top-pick-per-source logic
+    top_pick_map: dict[str, Offer] = {}
+    for o in matching:
+        src = o.source.lower()
+        if src not in top_pick_map or o.price_per_1k < top_pick_map[src].price_per_1k:
+            top_pick_map[src] = o
 
-    # Compute mean in per-1k space, then convert to per-unit for DB storage
-    mean_per_1k = sum(o.price_per_1k for o in top) / len(top)
-    prices_per_1k = [o.price_per_1k for o in top]
+    top_picks     = list(top_pick_map.values())
+    prices_per_1k = [o.price_per_1k for o in top_picks]
+    mean_per_1k   = sum(prices_per_1k) / len(prices_per_1k)
 
     return {
         "index_price": round(mean_per_1k / 1000.0, 8),   # per unit (per 1 gold)
-        "sample_size": len(top),
+        "sample_size": len(top_picks),
         "min_price":   round(min(prices_per_1k) / 1000.0, 8),
         "max_price":   round(max(prices_per_1k) / 1000.0, 8),
     }
@@ -595,6 +583,10 @@ async def _run_funpay_loop() -> None:
             if raw_offers:
                 # Phase 0: normalize display_server string format
                 raw_offers = [_normalize_funpay_offer(o) for o in raw_offers]
+                # Task 1: log sample display_server values after Phase 0 to
+                # verify FunPay strings match G2G canonical values.
+                _fp_samples = [o.display_server for o in raw_offers if o.display_server][:5]
+                logger.debug("FunPay Phase0 display_server samples: %s", _fp_samples)
 
                 # Phase 1: full normalization pipeline
                 from db.writer import get_pool
@@ -663,6 +655,10 @@ async def _run_g2g_loop() -> None:
             if raw_offers:
                 # Phase 0: normalize display_server string format
                 raw_offers = [_normalize_g2g_offer(o) for o in raw_offers]
+                # Task 1: log sample display_server values after Phase 0 to
+                # verify G2G strings (after _apply_canonical in Phase 1) match FunPay.
+                _g2g_samples = [o.display_server for o in raw_offers if o.display_server][:5]
+                logger.debug("G2G Phase0 display_server samples: %s", _g2g_samples)
 
                 # Phase 1: full normalization pipeline
                 from db.writer import get_pool
