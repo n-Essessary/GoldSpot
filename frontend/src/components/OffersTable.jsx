@@ -59,6 +59,18 @@ function formatTime(iso) {
   }
 }
 
+function hexToRgba(hex, alpha = 1) {
+  if (!hex || typeof hex !== 'string') return `rgba(255, 255, 255, ${alpha})`
+  const clean = hex.replace('#', '')
+  const full = clean.length === 3 ? clean.split('').map((c) => c + c).join('') : clean
+  const num = parseInt(full, 16)
+  if (Number.isNaN(num)) return `rgba(255, 255, 255, ${alpha})`
+  const r = (num >> 16) & 255
+  const g = (num >> 8) & 255
+  const b = num & 255
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
+
 /**
  * @deprecated Superseded by getTopPickIds from useOffers.js (Task 3).
  * Kept for backward compatibility — no longer used in OffersTable.
@@ -128,14 +140,6 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
   // minPrice is always displayList[0] (top picks are sorted cheapest-first)
   const minPrice    = displayList.length > 0 ? displayList[0].price_per_1k : 0
 
-  // Pre-compute sequential rank for remaining (non-top-pick) offers
-  let _remainingRank = 0
-  const offerRanks = displayList.map((offer) => {
-    if (topPickIds.has(offer.id)) return null   // top pick → shows ★
-    _remainingRank++
-    return _remainingRank
-  })
-
   return (
     <div className={styles.wrapper}>
       <table className={styles.table} aria-label="WoW gold market offers">
@@ -156,7 +160,7 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
           {displayList.map((offer, i) => {
             const isBest      = offer.price_per_1k === minPrice
             const isTopPick   = topPickIds.has(offer.id)
-            const rank        = offerRanks[i]
+            const rank        = i + 1
             const src         = SOURCE_META[offer.source] ?? { label: offer.source, color: 'var(--text-secondary)' }
             // ⚠ Аномально дорогой G2G-оффер: >= 3× от min_price сервера
             const isExpensive = offer.source === 'g2g' && offer.price_per_1k >= minPrice * 3
@@ -169,21 +173,26 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
             const rowCls = [
               styles.row,
               isBest    ? styles.best    : '',       // cheapest overall: green accent
-              isTopPick && !isBest ? styles.topPick : '',  // other top picks: purple
             ].filter(Boolean).join(' ')
+            const topPickRowStyle = isTopPick
+              ? {
+                  backgroundColor: `${hexToRgba(src.color, 0.08)}`,
+                  boxShadow: `inset 3px 0 0 ${src.color}`,
+                }
+              : undefined
 
             return (
-              <tr key={`${offer.source}-${offer.id}`} className={rowCls}>
+              <tr key={`${offer.source}-${offer.id}`} className={rowCls} style={topPickRowStyle}>
 
-                {/* Ранг: ★ для top picks, порядковый номер для остальных */}
+                {/* Ранг: последовательный номер; для top picks — ★N */}
                 <td className={styles.rank}>
                   {isTopPick
-                    ? <span className={styles.crown} title="Top Pick">★</span>
+                    ? <span className={styles.crown} title="Top Pick">{`★${rank}`}</span>
                     : <span className={styles.rankNum}>{rank}</span>
                   }
                 </td>
 
-                {/* Платформа — главный акцент + Top Pick badge */}
+                {/* Платформа — главный акцент */}
                 <td>
                   <span
                     className={styles.source}
@@ -191,11 +200,6 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
                   >
                     {src.label}
                   </span>
-                  {isTopPick && (
-                    <span className={styles.topPickBadge}>
-                      {offer.faction}
-                    </span>
-                  )}
                 </td>
 
                 {/* Сервер + Фракция в одной ячейке */}
@@ -259,6 +263,7 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
                         target="_blank"
                         rel="noreferrer"
                         className={`${styles.buyBtn} ${isBest ? styles.buyBtnBest : ''}`}
+                        style={isTopPick ? { color: src.color, borderColor: src.color } : undefined}
                         aria-label={`Купить у ${offer.seller} на ${src.label}`}
                       >
                         Купить
