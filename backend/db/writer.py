@@ -25,9 +25,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _WRITE_THRESHOLD = 0.005     # write snapshot only if price changed > 0.5%
-_MAX_HISTORY_PER_SERVER = 1000  # keep last N points per server+faction (Task 4)
+_HISTORY_WRITE_INTERVAL = timedelta(minutes=15)
+_PRUNE_INTERVAL = timedelta(hours=23)
 
 _last_written: dict[str, float] = {}
+_last_history_written: dict[str, datetime] = {}
+_last_pruned: dict[str, datetime] = {}
 _pool = None
 _pool_lock: asyncio.Lock | None = None   # created lazily inside the event loop
 
@@ -213,7 +216,8 @@ async def upsert_server_index(
 ) -> None:
     """
     Upsert current index in server_price_index table (one row per server+faction).
-    Also append to server_price_history and prune to keep last 1000 points.
+    Appends to server_price_history at most once per 15 minutes per pair; prunes
+    rows older than 35 days at most once per 23 hours per pair.
 
     index_price is price per unit (per 1 gold), NOT per 1k.
     """
@@ -226,10 +230,18 @@ async def upsert_server_index(
 
     faction_db = _faction_to_db(faction)
     key = f"si:{server_id}::{faction_db}"
+    history_key = f"h:{server_id}::{faction_db}"
+    now = computed_at
 
     # Throttle: only write if price changed > 0.5%
     if not _should_write(key, index_price):
         return
+
+    last_history_at = _last_history_written.get(history_key)
+    write_history = (
+        last_history_at is None
+        or (now - last_history_at) >= _HISTORY_WRITE_INTERVAL
+    )
 
     try:
         async with pool.acquire() as conn:
@@ -251,30 +263,29 @@ async def upsert_server_index(
                     server_id, faction_db, computed_at,
                     index_price, sample_size, min_price, max_price,
                 )
-                # Append to history
-                await conn.execute(
-                    """
-                    INSERT INTO server_price_history
-                        (server_id, faction, recorded_at, index_price, sample_size)
-                    VALUES ($1,$2,$3,$4,$5)
-                    """,
-                    server_id, faction_db, computed_at,
-                    index_price, sample_size,
-                )
-                # Prune history: keep only last _MAX_HISTORY_PER_SERVER rows
-                await conn.execute(
-                    """
-                    DELETE FROM server_price_history
-                    WHERE server_id = $1 AND faction = $2
-                      AND id NOT IN (
-                          SELECT id FROM server_price_history
-                          WHERE server_id = $1 AND faction = $2
-                          ORDER BY id DESC
-                          LIMIT $3
-                      )
-                    """,
-                    server_id, faction_db, _MAX_HISTORY_PER_SERVER,
-                )
+                if write_history:
+                    await conn.execute(
+                        """
+                        INSERT INTO server_price_history
+                            (server_id, faction, recorded_at, index_price, sample_size)
+                        VALUES ($1,$2,$3,$4,$5)
+                        """,
+                        server_id, faction_db, computed_at,
+                        index_price, sample_size,
+                    )
+                    _last_history_written[history_key] = now
+
+                last_pruned_at = _last_pruned.get(history_key)
+                if last_pruned_at is None or (now - last_pruned_at) >= _PRUNE_INTERVAL:
+                    await conn.execute(
+                        """
+                        DELETE FROM server_price_history
+                        WHERE server_id = $1 AND faction = $2
+                          AND recorded_at < NOW() - INTERVAL '35 days'
+                        """,
+                        server_id, faction_db,
+                    )
+                    _last_pruned[history_key] = now
         _last_written[key] = index_price
         logger.debug(
             "DB server index: server_id=%d faction=%s idx=%.6f",
@@ -487,24 +498,54 @@ async def query_price_index_all(faction: str = "All") -> list[dict]:
 # ── Maintenance ───────────────────────────────────────────────────────────────
 
 async def cleanup_old_snapshots() -> None:
-    """Background task: delete snapshots older than 1 year (runs daily)."""
+    """Background task: retention cleanup and size safety valve (runs daily)."""
+    _TABLE_SIZE_LIMIT = 350 * 1024 * 1024  # 350 MB
+
     while True:
         await asyncio.sleep(86_400)
         pool = await get_pool()
         if pool is None:
             continue
         try:
+            # Safety valve: if server_price_history exceeds threshold, drop oldest 10%
+            size_bytes = await pool.fetchval(
+                "SELECT pg_total_relation_size('server_price_history')"
+            )
+            if size_bytes and size_bytes > _TABLE_SIZE_LIMIT:
+                total_rows = await pool.fetchval(
+                    "SELECT COUNT(*) FROM server_price_history"
+                )
+                delete_count = max(1000, (total_rows or 0) // 10)
+                await pool.execute(
+                    """
+                    DELETE FROM server_price_history
+                    WHERE id IN (
+                        SELECT id FROM server_price_history
+                        ORDER BY recorded_at ASC
+                        LIMIT $1
+                    )
+                    """,
+                    delete_count,
+                )
+                logger.warning(
+                    "DB size valve triggered: deleted %d oldest server_price_history "
+                    "rows (table was %.1f MB)",
+                    delete_count,
+                    size_bytes / 1024 / 1024,
+                )
+
+            # price_index_snapshots: 30 days (group OHLC)
             result = await pool.fetchval(
                 "WITH d AS (DELETE FROM price_index_snapshots "
-                "WHERE ts < NOW() - INTERVAL '1 year' RETURNING 1) "
+                "WHERE ts < NOW() - INTERVAL '30 days' RETURNING 1) "
                 "SELECT count(*) FROM d"
             )
             logger.info("DB cleanup: removed %s old index snapshots", result)
 
-            # Also clean raw price snapshots older than 7 days
+            # price_snapshots: 1 day (raw offer log, not historical product)
             result2 = await pool.fetchval(
                 "WITH d AS (DELETE FROM price_snapshots "
-                "WHERE fetched_at < NOW() - INTERVAL '7 days' RETURNING 1) "
+                "WHERE fetched_at < NOW() - INTERVAL '1 day' RETURNING 1) "
                 "SELECT count(*) FROM d"
             )
             logger.info("DB cleanup: removed %s old raw price snapshots", result2)
