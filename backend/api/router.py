@@ -26,8 +26,6 @@ from api.schemas import (
     PriceHistoryResponse,
     PriceIndexResponse,
     PriceUnit,
-    ServerHistoryPoint,
-    ServerHistoryResponse,
     ServerPriceIndexEntry,
     ServersResponse,
 )
@@ -131,7 +129,8 @@ async def parser_status_handler():
 async def get_price_history_handler(
     server:  str = Query("all"),
     faction: str = Query("all"),
-    last:    int = Query(50, ge=1, le=200),
+    last:    int = Query(50, ge=1, le=2000),
+    hours:   int = Query(24, ge=1, le=720, description="Time window in hours"),
     # Per-server params (Task 4) — all three required to use DB path
     region:  str | None = Query(None, description="Region, e.g. 'EU'. Required for per-server DB query."),
     version: str | None = Query(None, description="Version, e.g. 'Classic Era'. Required for per-server DB query."),
@@ -156,25 +155,17 @@ async def get_price_history_handler(
             version=version,
             faction=faction,
             last=last,
+            hours=hours,
         )
         if rows:
-            points = [
-                ServerHistoryPoint(
-                    recorded_at=p["recorded_at"],
-                    index_price=p["index_price"],
-                    index_price_per_1k=p["index_price_per_1k"],
-                    sample_size=p["sample_size"],
-                )
-                for p in rows
-            ]
-            return ServerHistoryResponse(
-                server=server,
-                region=region.upper(),
-                version=version,
-                faction=faction,
-                count=len(points),
-                points=points,
-            )
+            return {
+                "server": server,
+                "region": region.upper(),
+                "version": version,
+                "faction": faction,
+                "count": len(rows),
+                "points": rows,
+            }
         # DB empty / unavailable — fall through to in-memory
 
     # Mode 1: legacy in-memory

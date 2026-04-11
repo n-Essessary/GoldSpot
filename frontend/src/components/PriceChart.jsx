@@ -18,6 +18,10 @@ const PERIODS = [
 
 const FACTIONS = ['All', 'Alliance', 'Horde']
 
+/** API values are per 1k gold; Per 1 divides by 1000. */
+export const applyPriceUnit = (valuePer1k, showPer1) =>
+  showPer1 ? valuePer1k / 1000 : valuePer1k
+
 /**
  * Parse region + version from a display_server group label.
  * "(EU) Anniversary" → { region: "EU", version: "Anniversary" }
@@ -41,7 +45,7 @@ export function _parseGroupLabel(serverSlug) {
  *                   When set → fetches per-server DB history
  *                   When unset → fetches legacy group OHLC from price_index_snapshots
  */
-export function PriceChart({ serverSlug, refreshSignal, realmName }) {
+export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = false }) {
   const containerRef = useRef(null)
   const chartRef     = useRef(null)
   const seriesRef    = useRef({})
@@ -138,6 +142,14 @@ export function PriceChart({ serverSlug, refreshSignal, realmName }) {
     }
   }, [])
 
+  useEffect(() => {
+    chartRef.current?.applyOptions({
+      localization: {
+        priceFormatter: p => (showPer1 ? `$${p.toFixed(5)}` : `$${p.toFixed(2)}`),
+      },
+    })
+  }, [showPer1])
+
   // ── Загрузка данных ────────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
     if (!serverSlug || serverSlug === 'all') return
@@ -155,7 +167,8 @@ export function PriceChart({ serverSlug, refreshSignal, realmName }) {
           region:  parsed.region,
           version: parsed.version,
           faction: faction.toLowerCase(),
-          last:    String(Math.min(period.points, 200)),
+          last:    String(period.points),
+          hours:   String(period.hours),
         })
         const res = await fetch(`${API_BASE}/price-history?${params}`)
         if (res.ok) {
@@ -164,12 +177,11 @@ export function PriceChart({ serverSlug, refreshSignal, realmName }) {
           const raw = data.points ?? []
           const toTS = p => Math.floor(new Date(p.recorded_at).getTime() / 1000)
           if (raw.length > 0) {
-            // index_price_per_1k is the display-friendly price
             points = raw.map(p => ({
               time:      toTS(p),
               avg_price: p.index_price_per_1k,
-              vwap:      p.index_price_per_1k,   // no vwap in per-server history
-              best_ask:  p.index_price_per_1k,
+              vwap:      p.vwap ?? p.index_price_per_1k,
+              best_ask:  p.best_ask ?? p.index_price_per_1k,
               sources:   [],
             }))
           }
@@ -200,19 +212,19 @@ export function PriceChart({ serverSlug, refreshSignal, realmName }) {
         return
       }
 
-      // time приходит как ISO string из asyncpg
+      const conv = v => applyPriceUnit(v, showPer1)
       const toTS = p => Math.floor(new Date(p.time ?? p.recorded_at).getTime() / 1000)
 
       seriesRef.current.index?.setData(
-        points.map(p => ({ time: toTS(p), value: p.avg_price || p.close || 0 }))
+        points.map(p => ({ time: toTS(p), value: conv(p.avg_price || p.close || 0) }))
       )
       seriesRef.current.vwap?.setData(
         points.filter(p => (p.vwap || 0) > 0)
-              .map(p => ({ time: toTS(p), value: p.vwap }))
+              .map(p => ({ time: toTS(p), value: conv(p.vwap) }))
       )
       seriesRef.current.ask?.setData(
         points.filter(p => (p.best_ask || 0) > 0)
-              .map(p => ({ time: toTS(p), value: p.best_ask }))
+              .map(p => ({ time: toTS(p), value: conv(p.best_ask) }))
       )
 
       const allSrc = new Set(points.flatMap(p => p.sources || []))
@@ -223,7 +235,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName }) {
     } finally {
       setLoading(false)
     }
-  }, [serverSlug, realmName, faction, period])
+  }, [serverSlug, realmName, faction, period, showPer1])
 
   useEffect(() => { loadData() }, [loadData, refreshSignal])
 

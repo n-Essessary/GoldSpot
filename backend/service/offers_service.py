@@ -78,7 +78,6 @@ _OUTLIER_MULTIPLIER  = 3.0
 _MIN_LIQUID_GOLD     = 50_000
 _VWAP_GOLD_CAP       = 1_000_000
 _MIN_OFFERS          = 2
-_INDEX_TOP_N         = 10   # Task 4: top-N cheapest offers for server index
 
 # Throttle for raw price snapshots: skip write if price changed less than this
 _SNAP_WRITE_THRESHOLD = 0.005   # 0.5%
@@ -363,47 +362,49 @@ def compute_server_index(
     faction: str,
     offers: list[Offer],
 ) -> dict | None:
-    """
-    Compute price index for a specific server_id + faction.
-
-    Algorithm (updated Task 4 — top-pick-per-source):
-      1. Filter offers to same server_id + faction.
-      2. Find cheapest offer per source (funpay, g2g) — mirrors the
-         top-pick selection in compute_index_price and buildDisplayList.
-         Sorting by price_per_1k (normalised) is correct for both sources:
-           G2G  (per_unit):  price_per_1k = raw_price * 1000
-           FunPay (per_lot): price_per_1k = (raw_price / lot_size) * 1000
-      3. Return mean of top-pick prices as index_price (per-unit, per 1 gold).
-
-    Returns dict with index_price (per unit), min, max, sample_size.
-    Returns None if no valid offers exist.
-    """
     matching = [
         o for o in offers
         if o.server_id == server_id
         and (faction == "All" or o.faction.lower() == faction.lower())
         and o.price_per_1k > 0
     ]
-
-    if not matching:
+    if len(matching) < _MIN_OFFERS:
         return None
 
-    # Find cheapest offer per source — top-pick-per-source logic
-    top_pick_map: dict[str, Offer] = {}
+    # Top-2 per platform
+    by_source: dict[str, list[Offer]] = {}
     for o in matching:
-        src = o.source.lower()
-        if src not in top_pick_map or o.price_per_1k < top_pick_map[src].price_per_1k:
-            top_pick_map[src] = o
+        by_source.setdefault(o.source, []).append(o)
 
-    top_picks     = list(top_pick_map.values())
-    prices_per_1k = [o.price_per_1k for o in top_picks]
-    mean_per_1k   = sum(prices_per_1k) / len(prices_per_1k)
+    top: list[Offer] = []
+    for source_offers in by_source.values():
+        source_offers.sort(key=lambda o: o.price_per_1k)
+        top.extend(source_offers[:2])
+
+    if len(top) < _MIN_OFFERS:
+        return None
+
+    top.sort(key=lambda o: o.price_per_1k)
+    prices = [o.price_per_1k for o in top]
+    mean_per_1k = sum(prices) / len(prices)
+
+    # best_ask = cheapest single offer across all platforms
+    best_ask_per_1k = prices[0]
+
+    # vwap = volume-weighted average
+    total_vol = sum(o.amount_gold for o in top)
+    vwap_per_1k = (
+        sum(o.price_per_1k * o.amount_gold for o in top) / total_vol
+        if total_vol else mean_per_1k
+    )
 
     return {
-        "index_price": round(mean_per_1k / 1000.0, 8),   # per unit (per 1 gold)
-        "sample_size": len(top_picks),
-        "min_price":   round(min(prices_per_1k) / 1000.0, 8),
-        "max_price":   round(max(prices_per_1k) / 1000.0, 8),
+        "index_price": round(mean_per_1k / 1000.0, 8),      # per unit
+        "best_ask":    round(best_ask_per_1k / 1000.0, 8),  # per unit
+        "vwap":        round(vwap_per_1k / 1000.0, 8),      # per unit
+        "sample_size": len(top),
+        "min_price":   round(min(prices) / 1000.0, 8),
+        "max_price":   round(max(prices) / 1000.0, 8),
     }
 
 
@@ -512,8 +513,8 @@ async def _do_snapshot_all_servers() -> None:
                     cache_key = f"{srv_name}::{region}::{version}::{faction}"
                     _index_cache[cache_key] = IndexPrice(
                         index_price  = result["index_price"] * 1000,  # convert to per_1k
-                        vwap         = result["index_price"] * 1000,
-                        best_ask     = result["min_price"]  * 1000,
+                        vwap         = result["vwap"] * 1000,
+                        best_ask     = result["best_ask"] * 1000,
                         price_min    = result["min_price"]  * 1000,
                         price_max    = result["max_price"]  * 1000,
                         offer_count  = result["sample_size"],
@@ -526,6 +527,8 @@ async def _do_snapshot_all_servers() -> None:
                     server_id=server_id,
                     faction=faction,
                     index_price=result["index_price"],
+                    best_ask=result["best_ask"],
+                    vwap=result["vwap"],
                     sample_size=result["sample_size"],
                     min_price=result["min_price"],
                     max_price=result["max_price"],

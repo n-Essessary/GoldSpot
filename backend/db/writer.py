@@ -209,6 +209,8 @@ async def upsert_server_index(
     server_id: int,
     faction: str,
     index_price: float,    # price per unit (per 1 gold)
+    best_ask: float,
+    vwap: float,
     sample_size: int,
     min_price: float,
     max_price: float,
@@ -230,11 +232,12 @@ async def upsert_server_index(
 
     faction_db = _faction_to_db(faction)
     key = f"si:{server_id}::{faction_db}"
+    ask_key = f"si:{server_id}::{faction_db}::ask"
     history_key = f"h:{server_id}::{faction_db}"
     now = computed_at
 
-    # Throttle: only write if price changed > 0.5%
-    if not _should_write(key, index_price):
+    # Throttle: write if index_price OR best_ask changed > 0.5%
+    if not _should_write(key, index_price) and not _should_write(ask_key, best_ask):
         return
 
     last_history_at = _last_history_written.get(history_key)
@@ -251,27 +254,29 @@ async def upsert_server_index(
                     """
                     INSERT INTO server_price_index
                         (server_id, faction, computed_at, index_price,
-                         sample_size, min_price, max_price)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7)
+                         best_ask, vwap, sample_size, min_price, max_price)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
                     ON CONFLICT (server_id, faction) DO UPDATE SET
                         computed_at = EXCLUDED.computed_at,
                         index_price = EXCLUDED.index_price,
+                        best_ask    = EXCLUDED.best_ask,
+                        vwap        = EXCLUDED.vwap,
                         sample_size = EXCLUDED.sample_size,
                         min_price   = EXCLUDED.min_price,
                         max_price   = EXCLUDED.max_price
                     """,
                     server_id, faction_db, computed_at,
-                    index_price, sample_size, min_price, max_price,
+                    index_price, best_ask, vwap, sample_size, min_price, max_price,
                 )
                 if write_history:
                     await conn.execute(
                         """
                         INSERT INTO server_price_history
-                            (server_id, faction, recorded_at, index_price, sample_size)
-                        VALUES ($1,$2,$3,$4,$5)
+                            (server_id, faction, recorded_at, index_price, best_ask, vwap, sample_size)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7)
                         """,
                         server_id, faction_db, computed_at,
-                        index_price, sample_size,
+                        index_price, best_ask, vwap, sample_size,
                     )
                     _last_history_written[history_key] = now
 
@@ -287,6 +292,7 @@ async def upsert_server_index(
                     )
                     _last_pruned[history_key] = now
         _last_written[key] = index_price
+        _last_written[ask_key] = best_ask
         logger.debug(
             "DB server index: server_id=%d faction=%s idx=%.6f",
             server_id, faction_db, index_price,
@@ -392,12 +398,13 @@ async def query_server_history(
     version: str,
     faction: str = "All",
     last: int = 500,
+    hours: int = 24,
 ) -> list[dict]:
     """
     Return price history for a specific real server from server_price_history.
 
     GET /price-history?server=Firemaw&region=EU&version=Classic+Era&faction=Horde
-    → [{recorded_at, index_price, index_price_per_1k, sample_size}, ...]
+    → [{recorded_at, index_price, index_price_per_1k, best_ask, vwap, sample_size}, ...]
     """
     pool = await get_pool()
     if pool is None:
@@ -408,23 +415,34 @@ async def query_server_history(
     try:
         rows = await pool.fetch(
             """
-            SELECT h.recorded_at, h.index_price, h.sample_size
+            SELECT h.recorded_at, h.index_price, h.best_ask, h.vwap, h.sample_size
             FROM server_price_history h
             JOIN servers s ON s.id = h.server_id
             WHERE LOWER(s.name)    = LOWER($1)
               AND s.region         = $2
               AND LOWER(s.version) = LOWER($3)
               AND h.faction        = $4
+              AND h.recorded_at    > NOW() - ($5::integer * INTERVAL '1 hour')
             ORDER BY h.recorded_at DESC
-            LIMIT $5
+            LIMIT $6
             """,
-            server_name, region, version, faction_db, last,
+            server_name, region, version, faction_db, hours, last,
         )
+        def _per_1k_display(col: str, row) -> float:
+            """Prefer column when present; NULL (pre-migration rows) falls back to index_price."""
+            v = row[col]
+            base = float(row["index_price"])
+            if v is None:
+                return round(base * 1000, 4)
+            return round(float(v) * 1000, 4)
+
         return [
             {
                 "recorded_at":        r["recorded_at"].isoformat(),
                 "index_price":        float(r["index_price"]),
                 "index_price_per_1k": round(float(r["index_price"]) * 1000, 4),
+                "best_ask":           _per_1k_display("best_ask", r),
+                "vwap":               _per_1k_display("vwap", r),
                 "sample_size":        r["sample_size"],
             }
             for r in reversed(rows)  # return chronological order

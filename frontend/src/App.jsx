@@ -186,6 +186,7 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
             refreshSignal={lastFetched}
             serverSlug={filters.server || 'all'}
             realmName={filters.server_name ?? ''}
+            showPer1={showPer1}
           />
 
           <main className={styles.main}>
