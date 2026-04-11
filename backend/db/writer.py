@@ -4,9 +4,9 @@ db/writer.py — async PostgreSQL writer.
 Responsibilities:
   write_index_snapshot   — legacy: price_index_snapshots (group-level, OHLC history)
   write_price_snapshot   — new (Task 1): price_snapshots with raw prices
-  upsert_server_index    — new (Task 4): server_price_index + server_price_history
+  upsert_server_index    — server_price_index + server_price_history (+ short HF table)
   query_index_history    — legacy: OHLC from price_index_snapshots (group-level)
-  query_server_history   — new (Task 4): per-real-server price history
+  query_server_history   — per-real-server long history; query_server_history_short — 1H/6H
 
 All errors are non-fatal: logged, never propagated to parser loop.
 Uses asyncpg pool from DATABASE_URL.
@@ -26,10 +26,12 @@ logger = logging.getLogger(__name__)
 
 _WRITE_THRESHOLD = 0.005     # write snapshot only if price changed > 0.5%
 _HISTORY_WRITE_INTERVAL = timedelta(minutes=15)
+_HISTORY_SHORT_WRITE_INTERVAL = timedelta(minutes=2)
 _PRUNE_INTERVAL = timedelta(hours=23)
 
 _last_written: dict[str, float] = {}
 _last_history_written: dict[str, datetime] = {}
+_last_history_short_written: dict[str, datetime] = {}
 _last_pruned: dict[str, datetime] = {}
 _pool = None
 _pool_lock: asyncio.Lock | None = None   # created lazily inside the event loop
@@ -218,8 +220,9 @@ async def upsert_server_index(
 ) -> None:
     """
     Upsert current index in server_price_index table (one row per server+faction).
-    Appends to server_price_history at most once per 15 minutes per pair; prunes
-    rows older than 35 days at most once per 23 hours per pair.
+    Appends to server_price_history at most once per 15 minutes per pair; appends to
+    server_price_history_short at most once per 2 minutes; prunes long history rows
+    older than 35 days at most once per 23 hours per pair.
 
     index_price is price per unit (per 1 gold), NOT per 1k.
     """
@@ -227,14 +230,13 @@ async def upsert_server_index(
     if pool is None:
         return
 
-    if computed_at is None:
-        computed_at = datetime.now(timezone.utc)
+    now = computed_at if computed_at is not None else datetime.now(timezone.utc)
+    computed_at = now
 
     faction_db = _faction_to_db(faction)
     key = f"si:{server_id}::{faction_db}"
     ask_key = f"si:{server_id}::{faction_db}::ask"
     history_key = f"h:{server_id}::{faction_db}"
-    now = computed_at
 
     # Throttle: write if index_price OR best_ask changed > 0.5%
     if not _should_write(key, index_price) and not _should_write(ask_key, best_ask):
@@ -279,6 +281,21 @@ async def upsert_server_index(
                         index_price, best_ask, vwap, sample_size,
                     )
                     _last_history_written[history_key] = now
+
+                # Append to short-term history (2-min throttle, 48h retention via cleanup)
+                short_key = f"sh:{server_id}::{faction_db}"
+                last_short = _last_history_short_written.get(short_key)
+                if last_short is None or (now - last_short) >= _HISTORY_SHORT_WRITE_INTERVAL:
+                    await conn.execute(
+                        """
+                        INSERT INTO server_price_history_short
+                            (server_id, faction, recorded_at, index_price, best_ask, vwap, sample_size)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7)
+                        """,
+                        server_id, faction_db, computed_at,
+                        index_price, best_ask, vwap, sample_size,
+                    )
+                    _last_history_short_written[short_key] = now
 
                 last_pruned_at = _last_pruned.get(history_key)
                 if last_pruned_at is None or (now - last_pruned_at) >= _PRUNE_INTERVAL:
@@ -455,6 +472,67 @@ async def query_server_history(
         return []
 
 
+async def query_server_history_short(
+    server_name: str,
+    region: str,
+    version: str,
+    faction: str = "All",
+    last: int = 500,
+    hours: int = 6,
+) -> list[dict]:
+    """
+    Return high-frequency price history from server_price_history_short.
+    Used for 1H and 6H chart views. Max retention: 48 hours.
+    """
+    pool = await get_pool()
+    if pool is None:
+        return []
+
+    faction_db = _faction_to_db(faction)
+
+    try:
+        rows = await pool.fetch(
+            """
+            SELECT h.recorded_at, h.index_price, h.best_ask, h.vwap, h.sample_size
+            FROM server_price_history_short h
+            JOIN servers s ON s.id = h.server_id
+            WHERE LOWER(s.name)    = LOWER($1)
+              AND s.region         = $2
+              AND LOWER(s.version) = LOWER($3)
+              AND h.faction        = $4
+              AND h.recorded_at    > NOW() - ($5::integer * INTERVAL '1 hour')
+            ORDER BY h.recorded_at DESC
+            LIMIT $6
+            """,
+            server_name, region, version, faction_db, hours, last,
+        )
+
+        def _per_1k_display(col: str, row) -> float:
+            v = row[col]
+            base = float(row["index_price"])
+            if v is None:
+                return round(base * 1000, 4)
+            return round(float(v) * 1000, 4)
+
+        return [
+            {
+                "recorded_at":        r["recorded_at"].isoformat(),
+                "index_price":        float(r["index_price"]),
+                "index_price_per_1k": round(float(r["index_price"]) * 1000, 4),
+                "best_ask":           _per_1k_display("best_ask", r),
+                "vwap":               _per_1k_display("vwap", r),
+                "sample_size":        r["sample_size"],
+            }
+            for r in reversed(rows)
+        ]
+    except Exception:
+        logger.exception(
+            "DB query_server_history_short failed for %s/%s/%s/%s",
+            server_name, region, version, faction,
+        )
+        return []
+
+
 async def query_price_index_all(faction: str = "All") -> list[dict]:
     """
     Return current index for all active servers.
@@ -567,5 +645,13 @@ async def cleanup_old_snapshots() -> None:
                 "SELECT count(*) FROM d"
             )
             logger.info("DB cleanup: removed %s old raw price snapshots", result2)
+
+            # server_price_history_short: 48 hours retention
+            result3 = await pool.fetchval(
+                "WITH d AS (DELETE FROM server_price_history_short "
+                "WHERE recorded_at < NOW() - INTERVAL '48 hours' RETURNING 1) "
+                "SELECT count(*) FROM d"
+            )
+            logger.info("DB cleanup: removed %s short history rows", result3)
         except Exception:
             logger.exception("DB cleanup failed")

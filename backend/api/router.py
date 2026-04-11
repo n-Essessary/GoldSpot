@@ -144,19 +144,29 @@ async def get_price_history_handler(
 
     2. Per-server from DB (Task 4): requires server + region + version:
        GET /price-history?server=Firemaw&region=EU&version=Classic+Era&faction=Horde
-       Returns real price history for that specific realm from server_price_history.
+       Returns real price history for that realm (short HF table if hours≤6, else long).
     """
     # Mode 2: per-server DB query
     if server != "all" and region and version:
-        from db.writer import query_server_history
-        rows = await query_server_history(
-            server_name=server,
-            region=region.upper(),
-            version=version,
-            faction=faction,
-            last=last,
-            hours=hours,
-        )
+        from db.writer import query_server_history, query_server_history_short
+        if hours <= 6:
+            rows = await query_server_history_short(
+                server_name=server,
+                region=region.upper(),
+                version=version,
+                faction=faction,
+                last=last,
+                hours=hours,
+            )
+        else:
+            rows = await query_server_history(
+                server_name=server,
+                region=region.upper(),
+                version=version,
+                faction=faction,
+                last=last,
+                hours=hours,
+            )
         if rows:
             return {
                 "server": server,

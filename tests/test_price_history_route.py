@@ -71,6 +71,106 @@ def test_price_history_per_server_returns_points_with_best_ask_vwap(monkeypatch)
     assert pt["index_price_per_1k"] == 10.0
 
 
+def test_price_history_uses_short_query_when_hours_lte_6(monkeypatch):
+    called: list[str] = []
+
+    async def fake_short(**kwargs):
+        called.append("short")
+        return [
+            {
+                "recorded_at": "2024-01-15T10:00:00+00:00",
+                "index_price": 0.01,
+                "index_price_per_1k": 10.0,
+                "best_ask": 9.5,
+                "vwap": 9.7,
+                "sample_size": 4,
+            }
+        ]
+
+    async def fake_long(**kwargs):
+        called.append("long")
+        return []
+
+    monkeypatch.setattr("db.writer.query_server_history_short", fake_short)
+    monkeypatch.setattr("db.writer.query_server_history", fake_long)
+
+    client = TestClient(app)
+    r = client.get(
+        "/price-history",
+        params={
+            "server": "Firemaw",
+            "region": "EU",
+            "version": "Anniversary",
+            "faction": "All",
+            "last": "200",
+            "hours": "1",
+        },
+    )
+    assert r.status_code == 200
+    assert called == ["short"]
+    assert r.json()["count"] == 1
+
+
+def test_price_history_hours_6_uses_short(monkeypatch):
+    called: list[str] = []
+
+    async def fake_short(**kwargs):
+        called.append("short")
+        return []
+
+    async def fake_long(**kwargs):
+        called.append("long")
+        return []
+
+    monkeypatch.setattr("db.writer.query_server_history_short", fake_short)
+    monkeypatch.setattr("db.writer.query_server_history", fake_long)
+
+    client = TestClient(app)
+    r = client.get(
+        "/price-history",
+        params={
+            "server": "Firemaw",
+            "region": "EU",
+            "version": "Anniversary",
+            "hours": "6",
+            "last": "300",
+        },
+    )
+    assert r.status_code == 200
+    assert called == ["short"]
+
+
+def test_price_history_uses_long_query_when_hours_gt_6(monkeypatch):
+    called: list[str] = []
+
+    async def fake_short(**kwargs):
+        called.append("short")
+        return []
+
+    async def fake_long(**kwargs):
+        called.append("long")
+        return [{"recorded_at": "2024-01-15T10:00:00+00:00", "index_price": 0.01,
+                 "index_price_per_1k": 10.0, "best_ask": 9.5, "vwap": 9.7, "sample_size": 2}]
+
+    monkeypatch.setattr("db.writer.query_server_history_short", fake_short)
+    monkeypatch.setattr("db.writer.query_server_history", fake_long)
+
+    client = TestClient(app)
+    r = client.get(
+        "/price-history",
+        params={
+            "server": "Firemaw",
+            "region": "EU",
+            "version": "Anniversary",
+            "hours": "24",
+            "last": "50",
+        },
+    )
+    assert r.status_code == 200
+    assert called == ["long"]
+    assert r.json()["count"] == 1
+
+
 def test_price_history_hours_validation_422(monkeypatch):
     monkeypatch.setattr(
         "db.writer.query_server_history",
