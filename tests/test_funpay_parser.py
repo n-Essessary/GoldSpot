@@ -36,11 +36,16 @@ def test_parse_item_near_zero_guard_raises():
 
 
 def test_parse_html_empty_returns_empty():
-    assert _parse_html("", datetime.now(timezone.utc)) == []
+    # _parse_html now returns tuple[list[Offer], str]
+    offers, symbol = _parse_html("", datetime.now(timezone.utc))
+    assert offers == []
+    assert symbol == "$"
 
 
 def test_parse_html_no_items_returns_empty():
-    assert _parse_html("<div>none</div>", datetime.now(timezone.utc)) == []
+    offers, symbol = _parse_html("<div>none</div>", datetime.now(timezone.utc))
+    assert offers == []
+    assert symbol == "$"
 
 
 def test_parse_html_only_offline_returns_empty():
@@ -53,7 +58,9 @@ def test_parse_html_only_offline_returns_empty():
       <span class="tc-seller">s</span>
     </a>
     """
-    assert _parse_html(html, datetime.now(timezone.utc)) == []
+    offers, symbol = _parse_html(html, datetime.now(timezone.utc))
+    assert offers == []
+    assert symbol == "$"
 
 
 def test_parse_item_per_unit_price_is_not_near_zero():

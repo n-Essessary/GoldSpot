@@ -14,6 +14,7 @@ FunPay HTML-парсер офферов WoW Classic gold.
 import asyncio
 import logging
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -44,6 +45,12 @@ _HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+# ── Currency conversion cache ────────────────────────────────────────────────
+_currency_cache: dict[str, float] = {}
+_currency_cache_ts: float = 0.0
+_CURRENCY_TTL = 3600  # refresh rate every 1 hour
+_SYMBOL_TO_CODE: dict[str, str] = {"$": "USD", "€": "EUR", "£": "GBP"}
 
 # ── Селекторы продавца ───────────────────────────────────────────────────────
 _SELLER_SELECTORS: tuple[str, ...] = (
@@ -271,24 +278,24 @@ def _group_by_server(offers: list[Offer]) -> dict[str, list[Offer]]:
     return grouped
 
 
-def _parse_html(html: str, fetched_at: datetime) -> list[Offer]:
+def _parse_html(html: str, fetched_at: datetime) -> tuple[list[Offer], str]:
     """
     Синхронный разбор HTML (BeautifulSoup + DOM). Вызывать через asyncio.to_thread.
     """
     if not html or not html.strip():
         logger.warning("FunPay: получен пустой HTML")
-        return []
+        return [], "$"
 
     try:
         soup = BeautifulSoup(html, "html.parser")
     except Exception as exc:
         logger.error("FunPay: BeautifulSoup упал — %s", exc)
-        return []
+        return [], "$"
 
     items = soup.select(".tc-item")
     if not items:
         logger.warning("FunPay: .tc-item не найдены в HTML — возможно изменилась вёрстка")
-        return []
+        return [], "$"
 
     online_items = [it for it in items if _is_online(it)]
     if not online_items:
@@ -296,7 +303,7 @@ def _parse_html(html: str, fetched_at: datetime) -> list[Offer]:
             "FunPay: онлайн-офферов не найдено из %d total — возможно изменился data-online",
             len(items),
         )
-        return []
+        return [], "$"
     logger.debug("FunPay: online=%d / total=%d", len(online_items), len(items))
     items = online_items
 
@@ -319,8 +326,50 @@ def _parse_html(html: str, fetched_at: datetime) -> list[Offer]:
                 seen.add(offer.id)
                 unique.append(offer)
 
-    logger.info("FunPay: servers=%d offers=%d", len(grouped), len(unique))
-    return unique
+    # Extract currency symbol once from first price element on the page
+    currency_symbol = "$"
+    first_unit = soup.select_one(".tc-price .unit")
+    if first_unit:
+        currency_symbol = first_unit.get_text(strip=True)
+
+    logger.info(
+        "FunPay: servers=%d offers=%d currency=%s",
+        len(grouped), len(unique), currency_symbol,
+    )
+    return unique, currency_symbol
+
+
+# ── Currency conversion ──────────────────────────────────────────────────────
+
+async def _get_usd_rate(currency_symbol: str) -> float:
+    """Return USD conversion rate for given currency symbol.
+    Cached for _CURRENCY_TTL seconds. Never raises — returns 1.0 on error.
+    """
+    global _currency_cache_ts
+
+    code = _SYMBOL_TO_CODE.get(currency_symbol, "USD")
+    if code == "USD":
+        return 1.0
+
+    now = time.monotonic()
+    if code in _currency_cache and (now - _currency_cache_ts) < _CURRENCY_TTL:
+        return _currency_cache[code]
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                "https://api.frankfurter.app/latest",
+                params={"from": code, "to": "USD"},
+            )
+            resp.raise_for_status()
+            rate = float(resp.json()["rates"]["USD"])
+            _currency_cache[code] = rate
+            _currency_cache_ts = now
+            logger.info("FunPay: currency rate %s/USD = %.4f", code, rate)
+            return rate
+    except Exception as exc:
+        logger.warning("FunPay: failed to fetch %s/USD rate — %s", code, exc)
+        return _currency_cache.get(code, 1.0)
 
 
 # ── Публичная точка входа ────────────────────────────────────────────────────
@@ -382,7 +431,20 @@ async def fetch_funpay_offers() -> list[Offer]:
     if not html:
         return []
 
-    return await asyncio.to_thread(_parse_html, html, fetched_at)
+    raw_offers, currency_symbol = await asyncio.to_thread(_parse_html, html, fetched_at)
+
+    if raw_offers and currency_symbol != "$":
+        rate = await _get_usd_rate(currency_symbol)
+        if rate != 1.0:
+            for offer in raw_offers:
+                offer.raw_price = round(offer.raw_price * rate, 8)
+                offer.price_per_1k = round(offer.raw_price * 1000.0, 6)
+            logger.info(
+                "FunPay: converted %d offers %s→USD rate=%.4f",
+                len(raw_offers), currency_symbol, rate,
+            )
+
+    return raw_offers
 
 
 async def fetch_offers() -> list[Offer]:
