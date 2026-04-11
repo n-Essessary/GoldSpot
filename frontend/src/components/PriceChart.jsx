@@ -98,6 +98,11 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       priceLineVisible:       true,
       priceLineColor:         'rgba(30,158,117,0.6)',
       lastValueVisible:       true,
+      priceFormat:            {
+        type:      'price',
+        precision: 2,
+        minMove:   0.01,
+      },
       title:                  'Index',
     })
 
@@ -121,6 +126,11 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       priceLineVisible:       false,
       lastValueVisible:       true,
       title:                  'Best ask',
+    })
+
+    // Crosshair tooltip — keeps scale/labels active; lastValueVisible shows series values
+    chart.subscribeCrosshairMove(param => {
+      if (!param.time || !param.seriesData) return
     })
 
     chartRef.current = chart
@@ -157,6 +167,12 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
     try {
       let points = []
 
+      const toTS = p => {
+        const raw = p.time ?? p.recorded_at
+        if (typeof raw === 'number') return raw
+        return Math.floor(new Date(raw).getTime() / 1000)
+      }
+
       const parsed = _parseGroupLabel(serverSlug)
 
       if (realmName && parsed) {
@@ -166,7 +182,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
           server:  realmName,
           region:  parsed.region,
           version: parsed.version,
-          faction: faction.toLowerCase(),
+          faction,
           last:    String(period.points),
           hours:   String(period.hours),
         })
@@ -175,7 +191,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
           const data = await res.json()
           // per-server endpoint returns ServerHistoryResponse with points[]
           const raw = data.points ?? []
-          const toTS = p => Math.floor(new Date(p.recorded_at).getTime() / 1000)
           if (raw.length > 0) {
             points = raw.map(p => ({
               time:      toTS(p),
@@ -193,7 +208,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         // ── Legacy mode (group OHLC) ──────────────────────────────────────────
         const params = new URLSearchParams({
           server:     serverSlug,
-          faction:    faction.toLowerCase(),
+          faction,
           last_hours: String(period.hours),
           max_points: String(period.points),
         })
@@ -213,7 +228,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       }
 
       const conv = v => applyPriceUnit(v, showPer1)
-      const toTS = p => Math.floor(new Date(p.time ?? p.recorded_at).getTime() / 1000)
 
       seriesRef.current.index?.setData(
         points.map(p => ({ time: toTS(p), value: conv(p.avg_price || p.close || 0) }))
