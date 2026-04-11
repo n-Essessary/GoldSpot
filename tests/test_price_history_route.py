@@ -35,7 +35,7 @@ def test_price_history_per_server_forwards_hours_and_last(monkeypatch):
     assert captured.get("version") == "Anniversary"
 
 
-def test_price_history_per_server_returns_points_with_best_ask_vwap(monkeypatch):
+def test_price_history_per_server_returns_points_with_best_ask(monkeypatch):
     async def fake_query_server_history(**kwargs):
         return [
             {
@@ -43,7 +43,6 @@ def test_price_history_per_server_returns_points_with_best_ask_vwap(monkeypatch)
                 "index_price": 0.01,
                 "index_price_per_1k": 10.0,
                 "best_ask": 9.5,
-                "vwap": 9.7,
                 "sample_size": 4,
             }
         ]
@@ -67,7 +66,6 @@ def test_price_history_per_server_returns_points_with_best_ask_vwap(monkeypatch)
     assert body["count"] == 1
     pt = body["points"][0]
     assert pt["best_ask"] == 9.5
-    assert pt["vwap"] == 9.7
     assert pt["index_price_per_1k"] == 10.0
 
 
@@ -82,7 +80,6 @@ def test_price_history_uses_short_query_when_hours_lte_6(monkeypatch):
                 "index_price": 0.01,
                 "index_price_per_1k": 10.0,
                 "best_ask": 9.5,
-                "vwap": 9.7,
                 "sample_size": 4,
             }
         ]
@@ -150,7 +147,7 @@ def test_price_history_uses_long_query_when_hours_gt_6(monkeypatch):
     async def fake_long(**kwargs):
         called.append("long")
         return [{"recorded_at": "2024-01-15T10:00:00+00:00", "index_price": 0.01,
-                 "index_price_per_1k": 10.0, "best_ask": 9.5, "vwap": 9.7, "sample_size": 2}]
+                 "index_price_per_1k": 10.0, "best_ask": 9.5, "sample_size": 2}]
 
     monkeypatch.setattr("db.writer.query_server_history_short", fake_short)
     monkeypatch.setattr("db.writer.query_server_history", fake_long)

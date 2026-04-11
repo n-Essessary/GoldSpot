@@ -32,7 +32,7 @@ async def test_query_server_history_passes_hours_and_limit(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_query_server_history_maps_null_best_ask_to_index(monkeypatch):
-    """NULL best_ask/vwap (legacy rows) display as index_price_per_1k."""
+    """NULL best_ask (legacy rows) displays as index_price_per_1k."""
     ts = datetime(2024, 6, 1, 12, 0, tzinfo=timezone.utc)
 
     class Row:
@@ -50,7 +50,6 @@ async def test_query_server_history_maps_null_best_ask_to_index(monkeypatch):
                         "recorded_at": ts,
                         "index_price": 0.012,
                         "best_ask": None,
-                        "vwap": None,
                         "sample_size": 3,
                     }
                 )
@@ -64,4 +63,3 @@ async def test_query_server_history_maps_null_best_ask_to_index(monkeypatch):
     assert len(out) == 1
     assert out[0]["index_price_per_1k"] == pytest.approx(12.0)
     assert out[0]["best_ask"] == pytest.approx(12.0)
-    assert out[0]["vwap"] == pytest.approx(12.0)

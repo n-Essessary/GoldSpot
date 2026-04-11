@@ -391,17 +391,9 @@ def compute_server_index(
     # best_ask = cheapest single offer across all platforms
     best_ask_per_1k = prices[0]
 
-    # vwap = volume-weighted average
-    total_vol = sum(o.amount_gold for o in top)
-    vwap_per_1k = (
-        sum(o.price_per_1k * o.amount_gold for o in top) / total_vol
-        if total_vol else mean_per_1k
-    )
-
     return {
         "index_price": round(mean_per_1k / 1000.0, 8),      # per unit
         "best_ask":    round(best_ask_per_1k / 1000.0, 8),  # per unit
-        "vwap":        round(vwap_per_1k / 1000.0, 8),      # per unit
         "sample_size": len(top),
         "min_price":   round(min(prices) / 1000.0, 8),
         "max_price":   round(max(prices) / 1000.0, 8),
@@ -513,7 +505,7 @@ async def _do_snapshot_all_servers() -> None:
                     cache_key = f"{srv_name}::{region}::{version}::{faction}"
                     _index_cache[cache_key] = IndexPrice(
                         index_price  = result["index_price"] * 1000,  # convert to per_1k
-                        vwap         = result["vwap"] * 1000,
+                        vwap         = result["index_price"] * 1000,
                         best_ask     = result["best_ask"] * 1000,
                         price_min    = result["min_price"]  * 1000,
                         price_max    = result["max_price"]  * 1000,
@@ -528,7 +520,6 @@ async def _do_snapshot_all_servers() -> None:
                     faction=faction,
                     index_price=result["index_price"],
                     best_ask=result["best_ask"],
-                    vwap=result["vwap"],
                     sample_size=result["sample_size"],
                     min_price=result["min_price"],
                     max_price=result["max_price"],

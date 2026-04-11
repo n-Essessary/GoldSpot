@@ -212,7 +212,6 @@ async def upsert_server_index(
     faction: str,
     index_price: float,    # price per unit (per 1 gold)
     best_ask: float,
-    vwap: float,
     sample_size: int,
     min_price: float,
     max_price: float,
@@ -256,29 +255,28 @@ async def upsert_server_index(
                     """
                     INSERT INTO server_price_index
                         (server_id, faction, computed_at, index_price,
-                         best_ask, vwap, sample_size, min_price, max_price)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                         best_ask, sample_size, min_price, max_price)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                     ON CONFLICT (server_id, faction) DO UPDATE SET
                         computed_at = EXCLUDED.computed_at,
                         index_price = EXCLUDED.index_price,
                         best_ask    = EXCLUDED.best_ask,
-                        vwap        = EXCLUDED.vwap,
                         sample_size = EXCLUDED.sample_size,
                         min_price   = EXCLUDED.min_price,
                         max_price   = EXCLUDED.max_price
                     """,
                     server_id, faction_db, computed_at,
-                    index_price, best_ask, vwap, sample_size, min_price, max_price,
+                    index_price, best_ask, sample_size, min_price, max_price,
                 )
                 if write_history:
                     await conn.execute(
                         """
                         INSERT INTO server_price_history
-                            (server_id, faction, recorded_at, index_price, best_ask, vwap, sample_size)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7)
+                            (server_id, faction, recorded_at, index_price, best_ask, sample_size)
+                        VALUES ($1,$2,$3,$4,$5,$6)
                         """,
                         server_id, faction_db, computed_at,
-                        index_price, best_ask, vwap, sample_size,
+                        index_price, best_ask, sample_size,
                     )
                     _last_history_written[history_key] = now
 
@@ -289,11 +287,11 @@ async def upsert_server_index(
                     await conn.execute(
                         """
                         INSERT INTO server_price_history_short
-                            (server_id, faction, recorded_at, index_price, best_ask, vwap, sample_size)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7)
+                            (server_id, faction, recorded_at, index_price, best_ask, sample_size)
+                        VALUES ($1,$2,$3,$4,$5,$6)
                         """,
                         server_id, faction_db, computed_at,
-                        index_price, best_ask, vwap, sample_size,
+                        index_price, best_ask, sample_size,
                     )
                     _last_history_short_written[short_key] = now
 
@@ -421,7 +419,7 @@ async def query_server_history(
     Return price history for a specific real server from server_price_history.
 
     GET /price-history?server=Firemaw&region=EU&version=Classic+Era&faction=Horde
-    → [{recorded_at, index_price, index_price_per_1k, best_ask, vwap, sample_size}, ...]
+    → [{recorded_at, index_price, index_price_per_1k, best_ask, sample_size}, ...]
     """
     pool = await get_pool()
     if pool is None:
@@ -432,7 +430,7 @@ async def query_server_history(
     try:
         rows = await pool.fetch(
             """
-            SELECT h.recorded_at, h.index_price, h.best_ask, h.vwap, h.sample_size
+            SELECT h.recorded_at, h.index_price, h.best_ask, h.sample_size
             FROM server_price_history h
             JOIN servers s ON s.id = h.server_id
             WHERE LOWER(s.name)    = LOWER($1)
@@ -445,9 +443,8 @@ async def query_server_history(
             """,
             server_name, region, version, faction_db, hours, last,
         )
-        def _per_1k_display(col: str, row) -> float:
-            """Prefer column when present; NULL (pre-migration rows) falls back to index_price."""
-            v = row[col]
+        def _best_ask_per_1k(row) -> float:
+            v = row["best_ask"]
             base = float(row["index_price"])
             if v is None:
                 return round(base * 1000, 4)
@@ -458,8 +455,7 @@ async def query_server_history(
                 "recorded_at":        r["recorded_at"].isoformat(),
                 "index_price":        float(r["index_price"]),
                 "index_price_per_1k": round(float(r["index_price"]) * 1000, 4),
-                "best_ask":           _per_1k_display("best_ask", r),
-                "vwap":               _per_1k_display("vwap", r),
+                "best_ask":           _best_ask_per_1k(r),
                 "sample_size":        r["sample_size"],
             }
             for r in reversed(rows)  # return chronological order
@@ -493,7 +489,7 @@ async def query_server_history_short(
     try:
         rows = await pool.fetch(
             """
-            SELECT h.recorded_at, h.index_price, h.best_ask, h.vwap, h.sample_size
+            SELECT h.recorded_at, h.index_price, h.best_ask, h.sample_size
             FROM server_price_history_short h
             JOIN servers s ON s.id = h.server_id
             WHERE LOWER(s.name)    = LOWER($1)
@@ -507,8 +503,8 @@ async def query_server_history_short(
             server_name, region, version, faction_db, hours, last,
         )
 
-        def _per_1k_display(col: str, row) -> float:
-            v = row[col]
+        def _best_ask_per_1k(row) -> float:
+            v = row["best_ask"]
             base = float(row["index_price"])
             if v is None:
                 return round(base * 1000, 4)
@@ -519,8 +515,7 @@ async def query_server_history_short(
                 "recorded_at":        r["recorded_at"].isoformat(),
                 "index_price":        float(r["index_price"]),
                 "index_price_per_1k": round(float(r["index_price"]) * 1000, 4),
-                "best_ask":           _per_1k_display("best_ask", r),
-                "vwap":               _per_1k_display("vwap", r),
+                "best_ask":           _best_ask_per_1k(r),
                 "sample_size":        r["sample_size"],
             }
             for r in reversed(rows)

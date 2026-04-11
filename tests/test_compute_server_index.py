@@ -29,8 +29,8 @@ def test_compute_server_index_single_platform_two_cheapest(make_offer):
     assert abs(r["max_price"] * 1000 - 15.0) < 1e-6
 
 
-def test_compute_server_index_two_platforms_top2_each_and_vwap(make_offer):
-    """Two sources × top-2; VWAP uses amount_gold weights."""
+def test_compute_server_index_two_platforms_top2_each(make_offer):
+    """Two sources × top-2; index is mean of the four cheapest-by-platform picks."""
     offers = [
         make_offer(id="g1", server_id=1, source="g2g", raw_price=0.01, amount_gold=1000),   # 10 / 1k
         make_offer(id="g2", server_id=1, source="g2g", raw_price=0.015, amount_gold=1000),  # 15
@@ -42,9 +42,7 @@ def test_compute_server_index_two_platforms_top2_each_and_vwap(make_offer):
     assert r["sample_size"] == 4
     # Sorted prices: 10, 11, 15, 20
     assert abs(r["best_ask"] * 1000 - 10.0) < 1e-5
-    total_vol = 1000 + 1000 + 500 + 500
-    expected_vwap = (10 * 1000 + 15 * 1000 + 11 * 500 + 20 * 500) / total_vol
-    assert abs(r["vwap"] * 1000 - expected_vwap) < 1e-3
+    assert abs(r["index_price"] * 1000 - 14.0) < 1e-2  # mean(10,11,15,20)
 
 
 def test_compute_server_index_wrong_server_id_none(make_offer):

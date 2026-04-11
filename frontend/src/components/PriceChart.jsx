@@ -1,6 +1,6 @@
 /**
  * PriceChart.jsx — TradingView lightweight-charts.
- * Три линии: index_price (VW-Median), vwap, best_ask.
+ * Две серии: Index (area) и Best ask (линия).
  * Requires: npm install lightweight-charts
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
@@ -106,17 +106,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       title:                  'Index',
     })
 
-    // vwap — пунктир синий
-    seriesRef.current.vwap = chart.addLineSeries({
-      color:                  'rgba(55,138,221,0.75)',
-      lineWidth:              1,
-      lineStyle:              LineStyle.Dashed,
-      crosshairMarkerVisible: false,
-      priceLineVisible:       false,
-      lastValueVisible:       true,
-      title:                  'VWAP',
-    })
-
     // best_ask — тонкая жёлтая точечная
     seriesRef.current.ask = chart.addLineSeries({
       color:                  'rgba(186,117,23,0.85)',
@@ -128,9 +117,67 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       title:                  'Best ask',
     })
 
-    // Crosshair tooltip — keeps scale/labels active; lastValueVisible shows series values
+    // Floating crosshair tooltip — follows cursor
+    const tooltip = document.createElement('div')
+    tooltip.style.cssText = `
+      position: absolute;
+      pointer-events: none;
+      font-family: var(--font-mono, monospace);
+      font-size: 11px;
+      line-height: 1.5;
+      color: rgba(220,220,220,0.95);
+      background: rgba(14,14,20,0.92);
+      border: 1px solid rgba(156,154,146,0.2);
+      border-radius: 3px;
+      padding: 3px 7px;
+      white-space: nowrap;
+      display: none;
+      z-index: 10;
+    `
+    containerRef.current.style.position = 'relative'
+    containerRef.current.appendChild(tooltip)
+
     chart.subscribeCrosshairMove(param => {
-      if (!param.time || !param.seriesData) return
+      if (
+        !param.time ||
+        !param.point ||
+        param.point.x < 0 ||
+        param.point.y < 0
+      ) {
+        tooltip.style.display = 'none'
+        return
+      }
+
+      const indexData = param.seriesData.get(seriesRef.current.index)
+      const askData   = param.seriesData.get(seriesRef.current.ask)
+
+      if (!indexData && !askData) {
+        tooltip.style.display = 'none'
+        return
+      }
+
+      const fmt = v => v != null ? `$${Number(v).toFixed(2)}` : '—'
+
+      tooltip.innerHTML = [
+        indexData ? `<span style="color:#1D9E75">▸ Index&nbsp;&nbsp;&nbsp;${fmt(indexData.value)}</span>` : '',
+        askData   ? `<span style="color:#BA7517">▸ Best ask ${fmt(askData.value)}</span>`                 : '',
+      ].filter(Boolean).join('<br/>')
+
+      tooltip.style.display = 'block'
+      const tooltipWidth  = tooltip.offsetWidth
+      const tooltipHeight = tooltip.offsetHeight
+      const chartHeight   = containerRef.current.offsetHeight
+
+      // Float LEFT of crosshair, flip RIGHT if near left edge
+      let left = param.point.x - tooltipWidth - 12
+      if (left < 4) left = param.point.x + 12
+
+      let top = param.point.y - tooltipHeight / 2
+      if (top < 4) top = 4
+      if (top + tooltipHeight > chartHeight - 4) top = chartHeight - tooltipHeight - 4
+
+      tooltip.style.left = `${left}px`
+      tooltip.style.top  = `${top}px`
     })
 
     chartRef.current = chart
@@ -149,6 +196,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       chart.remove()
       chartRef.current  = null
       seriesRef.current = {}
+      tooltip.remove()
     }
   }, [])
 
@@ -195,7 +243,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
             points = raw.map(p => ({
               time:      toTS(p),
               avg_price: p.index_price_per_1k,
-              vwap:      p.vwap ?? p.index_price_per_1k,
               best_ask:  p.best_ask ?? p.index_price_per_1k,
               sources:   [],
             }))
@@ -231,10 +278,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
 
       seriesRef.current.index?.setData(
         points.map(p => ({ time: toTS(p), value: conv(p.avg_price || p.close || 0) }))
-      )
-      seriesRef.current.vwap?.setData(
-        points.filter(p => (p.vwap || 0) > 0)
-              .map(p => ({ time: toTS(p), value: conv(p.vwap) }))
       )
       seriesRef.current.ask?.setData(
         points.filter(p => (p.best_ask || 0) > 0)
