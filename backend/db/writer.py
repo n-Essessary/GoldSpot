@@ -219,16 +219,13 @@ async def upsert_server_index(
 ) -> None:
     """
     Upsert current index in server_price_index table (one row per server+faction).
-    Appends to server_price_history at most once per 15 minutes per pair; appends to
-    server_price_history_short at most once per 2 minutes; prunes long history rows
-    older than 35 days at most once per 23 hours per pair.
+    server_price_history_short: at most once per 2 minutes per pair, regardless of
+    price movement. Long-term server_price_history and index upsert: only when
+    index_price or best_ask moved > 0.5%; long history row at most every 15 minutes.
+    Prunes long history older than 35 days at most once per 23 hours per pair.
 
     index_price is price per unit (per 1 gold), NOT per 1k.
     """
-    pool = await get_pool()
-    if pool is None:
-        return
-
     now = computed_at if computed_at is not None else datetime.now(timezone.utc)
     computed_at = now
 
@@ -237,8 +234,36 @@ async def upsert_server_index(
     ask_key = f"si:{server_id}::{faction_db}::ask"
     history_key = f"h:{server_id}::{faction_db}"
 
-    # Throttle: write if index_price OR best_ask changed > 0.5%
+    # ── Short-term history: write every 2 min regardless of price change ──
+    short_key = f"sh:{server_id}::{faction_db}"
+    last_short = _last_history_short_written.get(short_key)
+    if last_short is None or (now - last_short) >= _HISTORY_SHORT_WRITE_INTERVAL:
+        try:
+            pool_ref = await get_pool()
+            if pool_ref is not None:
+                await pool_ref.execute(
+                    """
+                    INSERT INTO server_price_history_short
+                        (server_id, faction, recorded_at, index_price, best_ask, sample_size)
+                    VALUES ($1,$2,$3,$4,$5,$6)
+                    """,
+                    server_id, faction_db, now,
+                    index_price, best_ask, sample_size,
+                )
+                _last_history_short_written[short_key] = now
+        except Exception:
+            logger.debug(
+                "DB short history write failed server_id=%d/%s",
+                server_id,
+                faction_db,
+            )
+
+    # ── Price-change throttle: gates long-term writes only ────────────────────
     if not _should_write(key, index_price) and not _should_write(ask_key, best_ask):
+        return
+
+    pool = await get_pool()
+    if pool is None:
         return
 
     last_history_at = _last_history_written.get(history_key)
@@ -279,21 +304,6 @@ async def upsert_server_index(
                         index_price, best_ask, sample_size,
                     )
                     _last_history_written[history_key] = now
-
-                # Append to short-term history (2-min throttle, 48h retention via cleanup)
-                short_key = f"sh:{server_id}::{faction_db}"
-                last_short = _last_history_short_written.get(short_key)
-                if last_short is None or (now - last_short) >= _HISTORY_SHORT_WRITE_INTERVAL:
-                    await conn.execute(
-                        """
-                        INSERT INTO server_price_history_short
-                            (server_id, faction, recorded_at, index_price, best_ask, sample_size)
-                        VALUES ($1,$2,$3,$4,$5,$6)
-                        """,
-                        server_id, faction_db, computed_at,
-                        index_price, best_ask, sample_size,
-                    )
-                    _last_history_short_written[short_key] = now
 
                 last_pruned_at = _last_pruned.get(history_key)
                 if last_pruned_at is None or (now - last_pruned_at) >= _PRUNE_INTERVAL:
