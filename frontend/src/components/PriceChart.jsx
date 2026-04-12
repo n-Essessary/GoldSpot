@@ -131,7 +131,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         precision: 2,
         minMove:   0.01,
       },
-      title:                  'Index',
+      title:                  'Market Price',
     })
 
     // best_ask — тонкая жёлтая точечная
@@ -142,7 +142,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       crosshairMarkerVisible: false,
       priceLineVisible:       false,
       lastValueVisible:       true,
-      title:                  'Best ask',
+      title:                  'Cheapest',
     })
 
     // Floating crosshair tooltip — follows cursor
@@ -187,8 +187,8 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       const fmt = v => v != null ? `$${Number(v).toFixed(2)}` : '—'
 
       tooltip.innerHTML = [
-        indexData ? `<span style="color:#1D9E75">▸ Index&nbsp;&nbsp;&nbsp;${fmt(indexData.value)}</span>` : '',
-        askData   ? `<span style="color:#BA7517">▸ Best ask ${fmt(askData.value)}</span>`                 : '',
+        indexData ? `<span style="color:#1D9E75">▸ Market Price ${fmt(indexData.value)}</span>` : '',
+        askData   ? `<span style="color:#BA7517">▸ Cheapest&nbsp;&nbsp;&nbsp;&nbsp;${fmt(askData.value)}</span>`   : '',
       ].filter(Boolean).join('<br/>')
 
       tooltip.style.display = 'block'
