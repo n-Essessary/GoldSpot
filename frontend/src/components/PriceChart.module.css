@@ -30,7 +30,39 @@
   border-color: var(--color-border-primary, var(--border, rgba(156,154,146,.4)));
 }
 
+.chartRow {
+  display: flex;
+  align-items: stretch;
+}
+
 .chart { width: 100%; }
+
+.seriesLabels {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 8px;
+  min-width: 130px;
+}
+
+.seriesLabels .labelItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.seriesLabels .labelName {
+  opacity: 0.7;
+}
+
+.seriesLabels .labelValue {
+  font-weight: 600;
+}
 
 .hint {
   font-size: 11px;
