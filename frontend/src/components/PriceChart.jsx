@@ -112,9 +112,11 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         borderColor:    'rgba(156,154,146,0.15)',
         timeVisible:    true,
         secondsVisible: false,
-        fixLeftEdge:    false,
+        fixLeftEdge:    true,
         fixRightEdge:   false,
         rightOffset:    5,
+        minBarSpacing:  0.5,
+        barSpacing:     6,
       },
     })
 
@@ -356,8 +358,16 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         timeScale?.fitContent()
         fittedRef.current = true
       } else if (savedRange) {
-        // Background refresh — restore user's zoom
-        timeScale?.setVisibleLogicalRange(savedRange)
+        // Background refresh — restore user's zoom, clamped to data bounds
+        const totalPoints = points.length
+        const clampedRange = {
+          from: Math.max(0, savedRange.from),
+          to:   Math.min(totalPoints - 1, savedRange.to),
+        }
+        // Only restore if range is valid
+        if (clampedRange.to > clampedRange.from) {
+          timeScale?.setVisibleLogicalRange(clampedRange)
+        }
       }
     } catch {
       // сетевой сбой — граф остаётся со старыми данными, loading скрывается
