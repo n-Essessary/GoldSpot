@@ -344,6 +344,10 @@ def _parse_html(html: str, fetched_at: datetime) -> tuple[list[Offer], str]:
 async def _get_usd_rate(currency_symbol: str) -> float:
     """Return USD conversion rate for given currency symbol.
     Cached for _CURRENCY_TTL seconds. Never raises — returns 1.0 on error.
+
+    Uses two APIs in fallback chain (frankfurter.app is blocked on Railway):
+      1. open.er-api.com  — primary
+      2. cdn.jsdelivr.net/@fawazahmed0/currency-api — fallback
     """
     global _currency_cache_ts
 
@@ -355,21 +359,44 @@ async def _get_usd_rate(currency_symbol: str) -> float:
     if code in _currency_cache and (now - _currency_cache_ts) < _CURRENCY_TTL:
         return _currency_cache[code]
 
+    # Primary: open.er-api.com (no key, reliable, Railway-accessible)
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
-                "https://api.frankfurter.app/latest",
-                params={"from": code, "to": "USD"},
+                f"https://open.er-api.com/v6/latest/{code}",
             )
             resp.raise_for_status()
             rate = float(resp.json()["rates"]["USD"])
             _currency_cache[code] = rate
             _currency_cache_ts = now
-            logger.info("FunPay: currency rate %s/USD = %.4f", code, rate)
+            logger.info("FunPay: currency rate %s/USD = %.4f (open.er-api)", code, rate)
             return rate
-    except Exception as exc:
-        logger.warning("FunPay: failed to fetch %s/USD rate — %s", code, exc)
-        return _currency_cache.get(code, 1.0)
+    except Exception as e:
+        logger.warning("FunPay: open.er-api failed for %s/USD — %s", code, e)
+
+    # Fallback: jsdelivr CDN currency API
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/{code.lower()}.json",
+            )
+            resp.raise_for_status()
+            rate = float(resp.json()[code.lower()]["usd"])
+            _currency_cache[code] = rate
+            _currency_cache_ts = now
+            logger.info("FunPay: currency rate %s/USD = %.4f (jsdelivr)", code, rate)
+            return rate
+    except Exception as e:
+        logger.warning("FunPay: jsdelivr fallback failed for %s/USD — %s", code, e)
+
+    # Both APIs failed — return stale cache or 1.0
+    cached = _currency_cache.get(code)
+    if cached:
+        logger.warning("FunPay: using stale cached rate %s/USD = %.4f", code, cached)
+        return cached
+
+    logger.error("FunPay: no rate available for %s/USD — prices will be in %s", code, code)
+    return 1.0
 
 
 # ── Публичная точка входа ────────────────────────────────────────────────────
