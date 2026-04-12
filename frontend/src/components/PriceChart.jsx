@@ -114,7 +114,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         secondsVisible: false,
         fixLeftEdge:    true,
         fixRightEdge:   true,
-        rightOffset:    2,
+        rightOffset:    0,
         minBarSpacing:  0.5,
         barSpacing:     6,
       },
@@ -126,16 +126,16 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       topColor:               'rgba(30,158,117,0.18)',
       bottomColor:            'rgba(30,158,117,0.0)',
       lineWidth:              2,
-      crosshairMarkerVisible: true,
-      priceLineVisible:       true,
-      priceLineColor:         'rgba(30,158,117,0.6)',
+      crosshairMarkerVisible: false,
+      lastPriceAnimation:     0,
+      priceLineVisible:       false,
       lastValueVisible:       true,
       priceFormat:            {
         type:      'custom',
-        formatter: p => `Market Price $${Number(p).toFixed(2)}`,
+        formatter: p => `$${Number(p).toFixed(2)}`,
         minMove:   0.01,
       },
-      title:                  '',
+      title:                  'Market Price',
     })
 
     // best_ask — тонкая жёлтая точечная
@@ -144,14 +144,15 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       lineWidth:              1,
       lineStyle:              LineStyle.SparseDotted,
       crosshairMarkerVisible: false,
+      lastPriceAnimation:     0,
       priceLineVisible:       false,
       lastValueVisible:       true,
       priceFormat:            {
         type:      'custom',
-        formatter: p => `Cheapest $${Number(p).toFixed(2)}`,
+        formatter: p => `$${Number(p).toFixed(2)}`,
         minMove:   0.01,
       },
-      title:                  '',
+      title:                  'Cheapest',
     })
 
     // Floating crosshair tooltip — follows cursor
@@ -251,16 +252,26 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       : `$${Number(p).toFixed(2)}`
 
     seriesRef.current.index?.applyOptions?.({
+      title:                  'Market Price',
+      crosshairMarkerVisible: false,
+      lastPriceAnimation:     0,
+      priceLineVisible:       false,
+      lastValueVisible:       true,
       priceFormat: {
         type:      'custom',
-        formatter: p => `Market Price ${fmt2(p)}`,
+        formatter: p => fmt2(p),
         minMove:   showPer1 ? 0.00001 : 0.01,
       },
     })
     seriesRef.current.ask?.applyOptions?.({
+      title:                  'Cheapest',
+      crosshairMarkerVisible: false,
+      lastPriceAnimation:     0,
+      priceLineVisible:       false,
+      lastValueVisible:       true,
       priceFormat: {
         type:      'custom',
-        formatter: p => `Cheapest ${fmt2(p)}`,
+        formatter: p => fmt2(p),
         minMove:   showPer1 ? 0.00001 : 0.01,
       },
     })
@@ -336,9 +347,8 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         const live = await fetchLivePrice(realmName, parsed.region, parsed.version, factionApi)
         if (live) {
           const nowTs = Math.floor(Date.now() / 1000)
-          // Only append if live point is newer than last historical point
           const lastTs = points.length > 0
-            ? Math.floor(new Date(points[points.length - 1].recorded_at ?? points[points.length - 1].time).getTime() / 1000)
+            ? toTS(points[points.length - 1])
             : 0
           if (nowTs > lastTs) {
             points = [
@@ -348,7 +358,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
                 index_price_per_1k: live.index_price_per_1k,
                 best_ask:           live.best_ask_per_1k,
                 avg_price:          live.index_price_per_1k,
-                vwap:               null,
                 sources:            [],
               },
             ]
