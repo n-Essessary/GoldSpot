@@ -131,11 +131,11 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       priceLineColor:         'rgba(30,158,117,0.6)',
       lastValueVisible:       true,
       priceFormat:            {
-        type:      'price',
-        precision: 2,
+        type:      'custom',
+        formatter: p => `Market Price $${Number(p).toFixed(2)}`,
         minMove:   0.01,
       },
-      title:                  'Market Price',
+      title:                  '',
     })
 
     // best_ask — тонкая жёлтая точечная
@@ -146,7 +146,12 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       crosshairMarkerVisible: false,
       priceLineVisible:       false,
       lastValueVisible:       true,
-      title:                  'Cheapest',
+      priceFormat:            {
+        type:      'custom',
+        formatter: p => `Cheapest $${Number(p).toFixed(2)}`,
+        minMove:   0.01,
+      },
+      title:                  '',
     })
 
     // Floating crosshair tooltip — follows cursor
@@ -191,8 +196,8 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       const fmt = v => v != null ? `$${Number(v).toFixed(2)}` : '—'
 
       tooltip.innerHTML = [
-        indexData ? `<span style="color:#1D9E75">▸ Market Price ${fmt(indexData.value)}</span>` : '',
-        askData   ? `<span style="color:#BA7517">▸ Cheapest&nbsp;&nbsp;&nbsp;&nbsp;${fmt(askData.value)}</span>`   : '',
+        indexData ? `<span style="color:#1D9E75">Market Price ${fmt(indexData.value)}</span>` : '',
+        askData   ? `<span style="color:#BA7517">Cheapest ${fmt(askData.value)}</span>`        : '',
       ].filter(Boolean).join('<br/>')
 
       tooltip.style.display = 'block'
@@ -236,6 +241,27 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
     chartRef.current?.applyOptions({
       localization: {
         priceFormatter: p => (showPer1 ? `$${p.toFixed(5)}` : `$${p.toFixed(2)}`),
+      },
+    })
+  }, [showPer1])
+
+  useEffect(() => {
+    const fmt2 = p => showPer1
+      ? `$${Number(p).toFixed(5)}`
+      : `$${Number(p).toFixed(2)}`
+
+    seriesRef.current.index?.applyOptions?.({
+      priceFormat: {
+        type:      'custom',
+        formatter: p => `Market Price ${fmt2(p)}`,
+        minMove:   showPer1 ? 0.00001 : 0.01,
+      },
+    })
+    seriesRef.current.ask?.applyOptions?.({
+      priceFormat: {
+        type:      'custom',
+        formatter: p => `Cheapest ${fmt2(p)}`,
+        minMove:   showPer1 ? 0.00001 : 0.01,
       },
     })
   }, [showPer1])
