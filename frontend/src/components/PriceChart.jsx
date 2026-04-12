@@ -78,6 +78,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   const containerRef = useRef(null)
   const chartRef     = useRef(null)
   const seriesRef    = useRef({})
+  const fittedRef    = useRef(false)
   const [period,  setPeriod]  = useState(PERIODS[2])   // 24H default
   const [loading, setLoading] = useState(false)
   const [empty,   setEmpty]   = useState(false)
@@ -236,6 +237,10 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
     })
   }, [showPer1])
 
+  useEffect(() => {
+    fittedRef.current = false
+  }, [serverSlug, realmName, faction, period])
+
   // ── Загрузка данных ────────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
     if (!serverSlug || serverSlug === 'all') return
@@ -340,7 +345,10 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
 
       const allSrc = new Set(points.flatMap(p => p.sources || []))
       setSources([...allSrc])
-      chartRef.current?.timeScale().fitContent()
+      if (!fittedRef.current) {
+        chartRef.current?.timeScale().fitContent()
+        fittedRef.current = true
+      }
     } catch {
       // сетевой сбой — граф остаётся со старыми данными, loading скрывается
     } finally {
