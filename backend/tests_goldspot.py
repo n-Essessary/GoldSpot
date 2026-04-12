@@ -225,6 +225,28 @@ class TestWriterIntervalFix(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 1b. db/writer — server_price_history: срок хранения при prune (upsert_server_index)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestServerPriceHistoryRetention(unittest.TestCase):
+    """Регрессия: prune в upsert_server_index держит историю 90 дней, не 35."""
+
+    def test_upsert_server_index_prune_uses_90_day_interval(self):
+        import inspect
+        from db import writer as w
+        src = inspect.getsource(w.upsert_server_index)
+        self.assertIn("DELETE FROM server_price_history", src)
+        self.assertIn("INTERVAL '90 days'", src)
+        self.assertNotIn("INTERVAL '35 days'", src)
+
+    def test_upsert_server_index_docstring_matches_retention(self):
+        import inspect
+        from db import writer as w
+        src = inspect.getsource(w.upsert_server_index)
+        self.assertIn("older than 90 days", src)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 2. db/writer — _faction_to_db, _should_write
 # ══════════════════════════════════════════════════════════════════════════════
 

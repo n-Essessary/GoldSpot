@@ -16,11 +16,14 @@ const PERIODS = [
   { label: '30D', hours: 720, points: 500 },
 ]
 
-const FACTIONS = ['All', 'Alliance', 'Horde']
-
 /** API values are per 1k gold; Per 1 divides by 1000. */
 export const applyPriceUnit = (valuePer1k, showPer1) =>
   showPer1 ? valuePer1k / 1000 : valuePer1k
+
+/** FiltersBar uses '' for «все»; backend expects `All`. */
+export function normalizeFactionForApi(faction) {
+  return faction || 'All'
+}
 
 /**
  * Parse region + version from a display_server group label.
@@ -36,6 +39,31 @@ export function _parseGroupLabel(serverSlug) {
 }
 
 /**
+ * Fetch current live index+best_ask for a specific server from /price-index.
+ * Returns { index_price_per_1k, best_ask_per_1k } or null on failure.
+ */
+export async function fetchLivePrice(serverName, region, version, faction) {
+  try {
+    const res = await fetch(`${API_BASE}/price-index?faction=${faction}`)
+    if (!res.ok) return null
+    const data = await res.json()
+    const entry = (data.entries ?? []).find(e =>
+      e.server_name.toLowerCase() === serverName.toLowerCase() &&
+      e.region.toUpperCase()      === region.toUpperCase() &&
+      e.version.toLowerCase()     === version.toLowerCase() &&
+      e.faction                   === faction
+    )
+    if (!entry) return null
+    return {
+      index_price_per_1k: entry.index_price_per_1k,
+      best_ask_per_1k:    entry.min_price * 1000,  // min_price is per-unit
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
  * PriceChart — TradingView lightweight-charts.
  *
  * Props:
@@ -44,13 +72,13 @@ export function _parseGroupLabel(serverSlug) {
  *   realmName     — specific realm, e.g. "Firemaw" (optional, Task 4)
  *                   When set → fetches per-server DB history
  *                   When unset → fetches legacy group OHLC from price_index_snapshots
+ *   faction       — from FiltersBar ('' → treated as All)
  */
-export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = false }) {
+export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = false, faction = 'All' }) {
   const containerRef = useRef(null)
   const chartRef     = useRef(null)
   const seriesRef    = useRef({})
   const [period,  setPeriod]  = useState(PERIODS[2])   // 24H default
-  const [faction, setFaction] = useState('All')
   const [loading, setLoading] = useState(false)
   const [empty,   setEmpty]   = useState(false)
   const [sources, setSources] = useState([])
@@ -213,6 +241,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
     if (!serverSlug || serverSlug === 'all') return
     setLoading(true)
     try {
+      const factionApi = normalizeFactionForApi(faction)
       let points = []
 
       const toTS = p => {
@@ -230,7 +259,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
           server:  realmName,
           region:  parsed.region,
           version: parsed.version,
-          faction,
+          faction: factionApi,
           last:    String(period.points),
           hours:   String(period.hours),
         })
@@ -255,7 +284,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         // ── Legacy mode (group OHLC) ──────────────────────────────────────────
         const params = new URLSearchParams({
           server:     serverSlug,
-          faction,
+          faction: factionApi,
           last_hours: String(period.hours),
           max_points: String(period.points),
         })
@@ -266,6 +295,31 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         }
         const data = await res.json()
         points = data.points ?? []
+      }
+
+      // Append live point — always shows current price on right edge
+      if (realmName && parsed) {
+        const live = await fetchLivePrice(realmName, parsed.region, parsed.version, factionApi)
+        if (live) {
+          const nowTs = Math.floor(Date.now() / 1000)
+          // Only append if live point is newer than last historical point
+          const lastTs = points.length > 0
+            ? Math.floor(new Date(points[points.length - 1].recorded_at ?? points[points.length - 1].time).getTime() / 1000)
+            : 0
+          if (nowTs > lastTs) {
+            points = [
+              ...points,
+              {
+                recorded_at:        new Date().toISOString(),
+                index_price_per_1k: live.index_price_per_1k,
+                best_ask:           live.best_ask_per_1k,
+                avg_price:          live.index_price_per_1k,
+                vwap:               null,
+                sources:            [],
+              },
+            ]
+          }
+        }
       }
 
       setEmpty(points.length === 0)
@@ -307,17 +361,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
               onClick={() => setPeriod(p)}
             >
               {p.label}
-            </button>
-          ))}
-        </div>
-        <div className={styles.group}>
-          {FACTIONS.map(f => (
-            <button
-              key={f}
-              className={faction === f ? styles.active : styles.btn}
-              onClick={() => setFaction(f)}
-            >
-              {f}
             </button>
           ))}
         </div>

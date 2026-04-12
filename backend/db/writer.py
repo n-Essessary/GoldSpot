@@ -222,7 +222,7 @@ async def upsert_server_index(
     server_price_history_short: at most once per 2 minutes per pair, regardless of
     price movement. Long-term server_price_history and index upsert: only when
     index_price or best_ask moved > 0.5%; long history row at most every 15 minutes.
-    Prunes long history older than 35 days at most once per 23 hours per pair.
+    Prunes long history older than 90 days at most once per 23 hours per pair.
 
     index_price is price per unit (per 1 gold), NOT per 1k.
     """
@@ -311,7 +311,7 @@ async def upsert_server_index(
                         """
                         DELETE FROM server_price_history
                         WHERE server_id = $1 AND faction = $2
-                          AND recorded_at < NOW() - INTERVAL '35 days'
+                          AND recorded_at < NOW() - INTERVAL '90 days'
                         """,
                         server_id, faction_db,
                     )

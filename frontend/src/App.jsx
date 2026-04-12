@@ -187,6 +187,7 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
             serverSlug={filters.server || 'all'}
             realmName={filters.server_name ?? ''}
             showPer1={showPer1}
+            faction={filters.faction || 'All'}
           />
 
           <main className={styles.main}>
