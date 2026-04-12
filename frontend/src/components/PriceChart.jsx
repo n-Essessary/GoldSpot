@@ -377,13 +377,33 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       const timeScale = chartRef.current?.timeScale()
       const savedRange = fittedRef.current ? timeScale?.getVisibleLogicalRange() : null
 
-      seriesRef.current.index?.setData(
-        points.map(p => ({ time: toTS(p), value: conv(p.avg_price || p.close || 0) }))
-      )
-      seriesRef.current.ask?.setData(
-        points.filter(p => (p.best_ask || 0) > 0)
-              .map(p => ({ time: toTS(p), value: conv(p.best_ask) }))
-      )
+      const indexData = points.map(p => ({
+        time:  toTS(p),
+        value: conv(p.avg_price || p.close || 0),
+      }))
+
+      // Build ask data — keep all points that have best_ask,
+      // then always append the last point of index series so both series
+      // end at exactly the same timestamp (badges align horizontally)
+      const askPoints = points.filter(p => (p.best_ask || 0) > 0)
+      const lastIndex = indexData[indexData.length - 1]
+      const lastAsk   = askPoints[askPoints.length - 1]
+      const askData   = askPoints.map(p => ({
+        time:  toTS(p),
+        value: conv(p.best_ask),
+      }))
+
+      // Extend ask line to match index last timestamp if they differ
+      if (lastIndex && (!lastAsk || toTS(lastAsk) < lastIndex.time)) {
+        // Use last known best_ask value for the extension point
+        const lastBestAsk = askPoints.length > 0
+          ? conv(askPoints[askPoints.length - 1].best_ask)
+          : lastIndex.value
+        askData.push({ time: lastIndex.time, value: lastBestAsk })
+      }
+
+      seriesRef.current.index?.setData(indexData)
+      seriesRef.current.ask?.setData(askData)
 
       const allSrc = new Set(points.flatMap(p => p.sources || []))
       setSources([...allSrc])
