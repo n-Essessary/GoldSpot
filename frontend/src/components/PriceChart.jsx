@@ -112,8 +112,9 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         borderColor:    'rgba(156,154,146,0.15)',
         timeVisible:    true,
         secondsVisible: false,
-        fixLeftEdge:    true,
-        fixRightEdge:   true,
+        fixLeftEdge:    false,
+        fixRightEdge:   false,
+        rightOffset:    5,
       },
     })
 
@@ -335,6 +336,10 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
 
       const conv = v => applyPriceUnit(v, showPer1)
 
+      // Save visible range before setData (only if user has already zoomed)
+      const timeScale = chartRef.current?.timeScale()
+      const savedRange = fittedRef.current ? timeScale?.getVisibleLogicalRange() : null
+
       seriesRef.current.index?.setData(
         points.map(p => ({ time: toTS(p), value: conv(p.avg_price || p.close || 0) }))
       )
@@ -345,9 +350,14 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
 
       const allSrc = new Set(points.flatMap(p => p.sources || []))
       setSources([...allSrc])
+
       if (!fittedRef.current) {
-        chartRef.current?.timeScale().fitContent()
+        // First load — fit all data
+        timeScale?.fitContent()
         fittedRef.current = true
+      } else if (savedRange) {
+        // Background refresh — restore user's zoom
+        timeScale?.setVisibleLogicalRange(savedRange)
       }
     } catch {
       // сетевой сбой — граф остаётся со старыми данными, loading скрывается
