@@ -114,7 +114,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         secondsVisible: false,
         fixLeftEdge:    true,
         fixRightEdge:   true,
-        rightOffset:    0,
+        rightOffset:    3,
         minBarSpacing:  0.5,
         barSpacing:     6,
       },
@@ -126,7 +126,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       topColor:               'rgba(30,158,117,0.18)',
       bottomColor:            'rgba(30,158,117,0.0)',
       lineWidth:              2,
-      crosshairMarkerVisible: false,
+      crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
       lastValueVisible:       true,
@@ -143,7 +143,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       color:                  'rgba(186,117,23,0.85)',
       lineWidth:              1,
       lineStyle:              LineStyle.SparseDotted,
-      crosshairMarkerVisible: false,
+      crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
       lastValueVisible:       true,
@@ -253,7 +253,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
 
     seriesRef.current.index?.applyOptions?.({
       title:                  'Market Price',
-      crosshairMarkerVisible: false,
+      crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
       lastValueVisible:       true,
@@ -265,7 +265,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
     })
     seriesRef.current.ask?.applyOptions?.({
       title:                  'Cheapest',
-      crosshairMarkerVisible: false,
+      crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
       lastValueVisible:       true,
