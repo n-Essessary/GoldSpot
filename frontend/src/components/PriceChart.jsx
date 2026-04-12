@@ -105,8 +105,9 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         horzLine: { color: 'rgba(156,154,146,0.4)', style: LineStyle.Dashed, labelVisible: true },
       },
       rightPriceScale: {
-        borderColor:  'rgba(156,154,146,0.15)',
-        scaleMargins: { top: 0.12, bottom: 0.12 },
+        borderColor:   'rgba(156,154,146,0.15)',
+        scaleMargins:  { top: 0.12, bottom: 0.12 },
+        minimumWidth:  130,
       },
       timeScale: {
         borderColor:    'rgba(156,154,146,0.15)',
