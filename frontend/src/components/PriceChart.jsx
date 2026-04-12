@@ -79,7 +79,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   const chartRef     = useRef(null)
   const seriesRef    = useRef({})
   const fittedRef    = useRef(false)
-  const labelsRef    = useRef(null)
   const [period,  setPeriod]  = useState(PERIODS[2])   // 24H default
   const [loading, setLoading] = useState(false)
   const [empty,   setEmpty]   = useState(false)
@@ -136,6 +135,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         precision: 2,
         minMove:   0.01,
       },
+      title:                  'Market Price',
     })
 
     // best_ask — тонкая жёлтая точечная
@@ -146,6 +146,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       crosshairMarkerVisible: false,
       priceLineVisible:       false,
       lastValueVisible:       true,
+      title:                  'Cheapest',
     })
 
     // Floating crosshair tooltip — follows cursor
@@ -242,21 +243,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   useEffect(() => {
     fittedRef.current = false
   }, [serverSlug, realmName, faction, period])
-
-  const updateSeriesLabels = useCallback((indexValue, askValue) => {
-    if (!labelsRef.current) return
-    const fmt = v => v != null && v > 0 ? `$${Number(v).toFixed(2)}` : '—'
-    labelsRef.current.innerHTML = `
-      <div class="${styles.labelItem}">
-        <span class="${styles.labelName}" style="color:rgba(156,154,146,0.7)">Market Price</span>
-        <span class="${styles.labelValue}" style="color:#1D9E75">${fmt(indexValue)}</span>
-      </div>
-      <div class="${styles.labelItem}">
-        <span class="${styles.labelName}" style="color:rgba(156,154,146,0.7)">Cheapest</span>
-        <span class="${styles.labelValue}" style="color:#BA7517">${fmt(askValue)}</span>
-      </div>
-    `
-  }, [])
 
   // ── Загрузка данных ────────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
@@ -364,15 +350,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
               .map(p => ({ time: toTS(p), value: conv(p.best_ask) }))
       )
 
-      // Update external labels with latest values
-      const lastPoint = points[points.length - 1]
-      if (lastPoint) {
-        updateSeriesLabels(
-          conv(lastPoint.avg_price || lastPoint.close || 0),
-          conv(lastPoint.best_ask || 0),
-        )
-      }
-
       const allSrc = new Set(points.flatMap(p => p.sources || []))
       setSources([...allSrc])
 
@@ -397,7 +374,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
     } finally {
       setLoading(false)
     }
-  }, [serverSlug, realmName, faction, period, showPer1, updateSeriesLabels])
+  }, [serverSlug, realmName, faction, period, showPer1])
 
   useEffect(() => { loadData() }, [loadData, refreshSignal])
 
@@ -421,14 +398,11 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         {loading && <span className={styles.hint}>…</span>}
       </div>
 
-      <div className={styles.chartRow} style={{ display: 'flex', alignItems: 'stretch' }}>
-        <div
-          ref={containerRef}
-          className={styles.chart}
-          style={{ height: 240, flex: 1, opacity: loading ? 0.6 : 1, transition: 'opacity .25s' }}
-        />
-        <div ref={labelsRef} className={styles.seriesLabels} />
-      </div>
+      <div
+        ref={containerRef}
+        className={styles.chart}
+        style={{ height: 240, opacity: loading ? 0.6 : 1, transition: 'opacity .25s' }}
+      />
 
       {empty && !loading && (
         <div className={styles.empty}>Нет данных за выбранный период</div>
