@@ -79,6 +79,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   const chartRef     = useRef(null)
   const seriesRef    = useRef({})
   const fittedRef    = useRef(false)
+  const isFirstLoadRef = useRef(true)
   const [period,  setPeriod]  = useState(PERIODS[2])   // 24H default
   const [loading, setLoading] = useState(false)
   const [empty,   setEmpty]   = useState(false)
@@ -107,7 +108,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       rightPriceScale: {
         borderColor:   'rgba(156,154,146,0.15)',
         scaleMargins:  { top: 0.12, bottom: 0.12 },
-        minimumWidth:  130,
+        minimumWidth:  80,
       },
       timeScale: {
         borderColor:    'rgba(156,154,146,0.15)',
@@ -130,7 +131,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
-      lastValueVisible:       true,
+      lastValueVisible:       false,
       priceFormat:            {
         type:      'custom',
         formatter: p => `$${Number(p).toFixed(2)}`,
@@ -147,7 +148,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
-      lastValueVisible:       true,
+      lastValueVisible:       false,
       priceFormat:            {
         type:      'custom',
         formatter: p => `$${Number(p).toFixed(2)}`,
@@ -161,17 +162,17 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
     tooltip.style.cssText = `
       position: absolute;
       pointer-events: none;
-      font-family: var(--font-mono, monospace);
-      font-size: 11px;
-      line-height: 1.5;
-      color: rgba(220,220,220,0.95);
-      background: rgba(14,14,20,0.92);
-      border: 1px solid rgba(156,154,146,0.2);
-      border-radius: 3px;
-      padding: 3px 7px;
-      white-space: nowrap;
       display: none;
       z-index: 10;
+      background: rgba(14,16,22,0.96);
+      border: 1px solid rgba(156,154,146,0.18);
+      border-radius: 6px;
+      padding: 6px 10px;
+      gap: 12px;
+      white-space: nowrap;
+      display: none;
+      flex-direction: column;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
     `
     containerRef.current.style.position = 'relative'
     containerRef.current.appendChild(tooltip)
@@ -195,14 +196,39 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         return
       }
 
-      const fmt = v => v != null ? `$${Number(v).toFixed(2)}` : '—'
+      const rows = []
+      if (indexData) rows.push({
+        label: 'Market Price',
+        color: '#1D9E75',
+        value: `$${Number(indexData.value).toFixed(2)}`,
+      })
+      if (askData) rows.push({
+        label: 'Cheapest',
+        color: '#BA7517',
+        value: `$${Number(askData.value).toFixed(2)}`,
+      })
 
-      tooltip.innerHTML = [
-        indexData ? `<span style="color:#1D9E75">Market Price ${fmt(indexData.value)}</span>` : '',
-        askData   ? `<span style="color:#BA7517">Cheapest ${fmt(askData.value)}</span>`        : '',
-      ].filter(Boolean).join('<br/>')
-
-      tooltip.style.display = 'block'
+      tooltip.innerHTML = rows.map(r => `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:16px;">
+          <span style="
+            font-family: var(--font-sans, sans-serif);
+            font-size: 10px;
+            font-weight: 500;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: ${r.color};
+            opacity: 0.8;
+          ">${r.label}</span>
+          <span style="
+            font-family: var(--font-mono, monospace);
+            font-size: 13px;
+            font-weight: 600;
+            color: ${r.color};
+            letter-spacing: 0.02em;
+          ">${r.value}</span>
+        </div>
+      `).join('')
+      tooltip.style.display = rows.length > 0 ? 'flex' : 'none'
       const tooltipWidth  = tooltip.offsetWidth
       const tooltipHeight = tooltip.offsetHeight
       const chartHeight   = containerRef.current.offsetHeight
@@ -257,7 +283,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
-      lastValueVisible:       true,
+      lastValueVisible:       false,
       priceFormat: {
         type:      'custom',
         formatter: p => fmt2(p),
@@ -269,7 +295,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
-      lastValueVisible:       true,
+      lastValueVisible:       false,
       priceFormat: {
         type:      'custom',
         formatter: p => fmt2(p),
@@ -281,6 +307,10 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   useEffect(() => {
     fittedRef.current = false
   }, [serverSlug, realmName, faction, period])
+
+  useEffect(() => {
+    isFirstLoadRef.current = false
+  }, [])
 
   // ── Загрузка данных ────────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
@@ -457,7 +487,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       <div
         ref={containerRef}
         className={styles.chart}
-        style={{ height: 240, opacity: loading ? 0.6 : 1, transition: 'opacity .25s' }}
+        style={{ height: 240 }}
       />
 
       {empty && !loading && (
