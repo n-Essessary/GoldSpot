@@ -132,7 +132,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
-      lastValueVisible:       false,
+      lastValueVisible:       true,
       priceFormat:            {
         type:      'custom',
         formatter: p => `$${Number(p).toFixed(2)}`,
@@ -149,7 +149,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
-      lastValueVisible:       false,
+      lastValueVisible:       true,
       priceFormat:            {
         type:      'custom',
         formatter: p => `$${Number(p).toFixed(2)}`,
@@ -195,44 +195,38 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       const rows = []
       if (indexData) rows.push({
         label: 'Market Price',
-        bg: '#1D9E75',
+        color: '#1D9E75',
         value: `$${Number(indexData.value).toFixed(2)}`,
       })
       if (askData) rows.push({
         label: 'Cheapest',
-        bg: '#9A6010',
+        color: '#9A6010',
         value: `$${Number(askData.value).toFixed(2)}`,
       })
 
       tooltip.innerHTML = rows.map(r => `
-        <div style="
-          display: flex;
-          align-items: center;
-          background: ${r.bg};
-          border-radius: 4px;
-          overflow: hidden;
-          font-family: var(--font-mono, monospace);
-          font-size: 11px;
-          font-weight: 600;
-          color: #fff;
-          height: 20px;
-          line-height: 20px;
-        ">
+        <div style="display:flex; align-items:center; gap:8px; line-height:1;">
           <span style="
-            padding: 0 7px;
-            opacity: 0.75;
-            font-weight: 500;
+            background: ${r.color};
+            color: #fff;
+            font-family: var(--font-mono, monospace);
+            font-size: 11px;
+            font-weight: 600;
             letter-spacing: 0.04em;
-            border-right: 1px solid rgba(255,255,255,0.25);
+            padding: 2px 6px;
+            border-radius: 3px;
+            white-space: nowrap;
           ">${r.label}</span>
           <span style="
-            padding: 0 7px;
-            font-weight: 700;
-            letter-spacing: 0.02em;
+            color: #fff;
+            font-family: var(--font-mono, monospace);
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.04em;
           ">${r.value}</span>
         </div>
       `).join('')
-      tooltip.style.display = rows.length > 0 ? 'flex' : 'none'
+      tooltip.style.display = rows.length > 0 ? 'block' : 'none'
       const tooltipWidth  = tooltip.offsetWidth
       const tooltipHeight = tooltip.offsetHeight
       const chartHeight   = containerRef.current.offsetHeight
@@ -283,11 +277,11 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       : `$${Number(p).toFixed(2)}`
 
     seriesRef.current.index?.applyOptions?.({
-      title:                  'Market Price',
+      title:                  '',
       crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
-      lastValueVisible:       false,
+      lastValueVisible:       true,
       priceFormat: {
         type:      'custom',
         formatter: p => fmt2(p),
@@ -295,11 +289,11 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       },
     })
     seriesRef.current.ask?.applyOptions?.({
-      title:                  'Cheapest',
+      title:                  '',
       crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
-      lastValueVisible:       false,
+      lastValueVisible:       true,
       priceFormat: {
         type:      'custom',
         formatter: p => fmt2(p),
