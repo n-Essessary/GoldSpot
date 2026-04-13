@@ -258,6 +258,11 @@ def _parse_title(title: str) -> tuple[str, str, str, str]:
     return server_name, region, version, faction
 
 
+_seller_registry: dict[str, set[str]] = {}
+# key = game_key e.g. "wow_classic_era_seasonal_anniversary"
+# value = set of seller usernames discovered via grouped search (phase 1)
+
+
 class G2GClient:
     def __init__(self, country: str = "SG", currency: str = "USD"):
         self.country = country
@@ -579,48 +584,71 @@ async def fetch_g2g_game(
     """
     if game_key not in GAME_CONFIG:
         raise ValueError(f"Unknown game: {game_key}. Available: {list(GAME_CONFIG)}")
-
-    cfg        = GAME_CONFIG[game_key]
-    brand_id   = cfg["brand_id"]
+    cfg = GAME_CONFIG[game_key]
+    brand_id = cfg["brand_id"]
     service_id = cfg["service_id"]
+    delay = 0.3  # polite inter-region delay for phase 1
 
+    # ── Phase 1: grouped discovery ────────────────────────────────────────
+    phase1_offers: list[G2GOffer] = []
     async with G2GClient(country=country) as client:
         regions = await client.fetch_regions(brand_id, service_id)
         if max_regions:
             regions = regions[:max_regions]
-
-        if not regions:
-            logger.warning("G2G game=%s: no regions found, skipping", game_key)
-            return []
-
-        logger.info(
-            "G2G game=%s: regions=%d (brand_id=%s service_id=%s country=%s)",
-            game_key, len(regions), brand_id, service_id, country,
-        )
-
-        all_offers: list[G2GOffer] = []
-        for region in regions:
+        for i, region in enumerate(regions):
             try:
-                region_offers = await client.fetch_offers(
-                    brand_id, service_id, region.relation_id, sort=sort
+                offers = await client.fetch_offers(
+                    brand_id=brand_id,
+                    service_id=service_id,
+                    relation_id=region.relation_id,
+                    sort=sort,
                 )
-                all_offers.extend(region_offers)
-                logger.info(
-                    "G2G game=%s region=%s → %d grouped offers",
-                    game_key, region.relation_id, len(region_offers),
-                )
-            except Exception as e:
-                logger.warning(
-                    "G2G game=%s region=%s fetch_offers failed: %s",
-                    game_key, region.relation_id, e,
-                )
-            await asyncio.sleep(0.3)  # polite delay between regions
+                phase1_offers.extend(offers)
+                for o in offers:
+                    if o.seller:
+                        _seller_registry.setdefault(game_key, set()).add(o.seller)
+            except httpx.HTTPStatusError as e:
+                logger.warning("G2G phase1 HTTP error region %s: %s", region.region_id, e)
+            if i < len(regions) - 1:
+                await asyncio.sleep(delay)
+    logger.info(
+        "G2G phase1: %d offers, registry=%d sellers",
+        len(phase1_offers), len(_seller_registry.get(game_key, set())),
+    )
 
-        logger.info(
-            "G2G game=%s done: regions=%d raw_offers=%d",
-            game_key, len(regions), len(all_offers),
-        )
-        return all_offers
+    # ── Phase 2: seller fetch (skipped on cold start — registry empty) ────
+    sellers = list(_seller_registry.get(game_key, set()))
+    phase2_offers: list[G2GOffer] = []
+    BATCH = 10
+    BATCH_DELAY = 0.3
+    if sellers:
+        async with G2GClient(country=country) as client:
+            for i in range(0, len(sellers), BATCH):
+                batch = sellers[i:i + BATCH]
+                results = await asyncio.gather(
+                    *[client.fetch_seller_offers(brand_id, service_id, s)
+                      for s in batch],
+                    return_exceptions=True,
+                )
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.warning("G2G seller fetch error: %s", result)
+                        continue
+                    phase2_offers.extend(result)
+                if i + BATCH < len(sellers):
+                    await asyncio.sleep(BATCH_DELAY)
+        logger.info("G2G phase2: %d sellers → %d offers", len(sellers), len(phase2_offers))
+
+    # ── Dedup: phase2 first (has correct seller URLs), phase1 fills gaps ──
+    seen: set[str] = set()
+    combined: list[G2GOffer] = []
+    for o in phase2_offers + phase1_offers:
+        key = o.offer_id if o.offer_id else f"{o.seller}:{o.title}"
+        if key not in seen:
+            seen.add(key)
+            combined.append(o)
+    logger.info("G2G total after dedup: %d offers", len(combined))
+    return combined
 
 
 async def discover_brand_ids(
