@@ -308,6 +308,80 @@ class G2GClient:
         )
         return regions
 
+    async def fetch_offers(
+        self,
+        brand_id: str,
+        service_id: str,
+        relation_id: str,
+        sort: str = "lowest_price",
+        page_size: int = 48,
+    ) -> list[G2GOffer]:
+        all_offers: list[G2GOffer] = []
+        page = 1
+        max_pages = 20  # increased from 10; grouped view has more pages per region
+
+        while page <= max_pages:
+            resp = await self._client.get(
+                f"{BASE}/offer/search",
+                params={
+                    "brand_id": brand_id,
+                    "service_id": service_id,
+                    "relation_id": relation_id,
+                    "country": self.country,
+                    "currency": self.currency,
+                    "sort": sort,
+                    "page": page,
+                    "page_size": page_size,
+                    "include_offline": "0",    # online sellers only
+                    "group_by": "keyword_id",  # one best-price offer per server×faction
+                },
+            )
+            resp.raise_for_status()
+
+            results = resp.json().get("payload", {}).get("results", [])
+
+            if not results:
+                break
+
+            for o in results:
+                try:
+                    # grouped response: use converted_unit_price (per-unit),
+                    # NOT unit_price_in_usd (which is per-lot in grouped mode)
+                    price_usd = float(o.get("converted_unit_price") or 0)
+                    if price_usd <= 0:
+                        continue
+                    all_offers.append(
+                        G2GOffer(
+                            offer_id=o.get("offer_id", ""),
+                            title=o.get("title", ""),
+                            server_name=o.get("title", ""),
+                            region_id=o.get("region_id", ""),
+                            relation_id=o.get("relation_id", ""),
+                            price_usd=price_usd,
+                            min_qty=int(o.get("min_qty") or 1),
+                            available_qty=int(o.get("available_qty") or 0),
+                            seller=(o.get("username") or "").strip(),
+                            brand_id=o.get("brand_id", ""),
+                            service_id=o.get("service_id", ""),
+                            raw=o,
+                        )
+                    )
+                except (ValueError, TypeError):
+                    continue
+
+            logger.debug(
+                "G2G grouped: relation_id=%s page=%d → %d offers (total %d)",
+                relation_id, page, len(results), len(all_offers),
+            )
+
+            if len(results) < page_size:
+                break
+
+            page += 1
+            await asyncio.sleep(0.2)
+
+        return all_offers
+
     async def fetch_all_sellers(
         self,
         brand_id: str,
@@ -524,34 +598,27 @@ async def fetch_g2g_game(
             game_key, len(regions), brand_id, service_id, country,
         )
 
-        sellers = await client.fetch_all_sellers(brand_id, service_id, regions)
-        if not sellers:
-            logger.warning("G2G: no sellers discovered for %s", game_key)
-            return []
-
-        logger.info("G2G: fetching offers for %d sellers", len(sellers))
-
-        # Task 1 Step 4: parallel execution with semaphore (max 5 concurrent)
-        sem = asyncio.Semaphore(5)
-
-        async def _bounded(s: str) -> list[G2GOffer]:
-            async with sem:
-                result = await client.fetch_seller_offers(brand_id, service_id, s)
-                await asyncio.sleep(0.15)  # Task 1 delay: 0.15s inside semaphore between sellers
-                return result
-
         all_offers: list[G2GOffer] = []
-        tasks = [_bounded(s) for s in sellers]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for s, result in zip(sellers, results):
-            if isinstance(result, Exception):
-                logger.warning("G2G seller=%s failed: %s", s, result)
-            else:
-                all_offers.extend(result)
+        for region in regions:
+            try:
+                region_offers = await client.fetch_offers(
+                    brand_id, service_id, region.relation_id, sort=sort
+                )
+                all_offers.extend(region_offers)
+                logger.info(
+                    "G2G game=%s region=%s → %d grouped offers",
+                    game_key, region.relation_id, len(region_offers),
+                )
+            except Exception as e:
+                logger.warning(
+                    "G2G game=%s region=%s fetch_offers failed: %s",
+                    game_key, region.relation_id, e,
+                )
+            await asyncio.sleep(0.3)  # polite delay between regions
 
         logger.info(
-            "G2G game=%s done: sellers=%d raw_offers=%d",
-            game_key, len(sellers), len(all_offers),
+            "G2G game=%s done: regions=%d raw_offers=%d",
+            game_key, len(regions), len(all_offers),
         )
         return all_offers
 
