@@ -117,7 +117,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         secondsVisible: false,
         fixLeftEdge:    true,
         fixRightEdge:   true,
-        rightOffset:    3,
+        rightOffset:    0,
         minBarSpacing:  0.5,
         barSpacing:     6,
       },
@@ -165,9 +165,13 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       pointer-events: none;
       display: none;
       z-index: 10;
-      display: flex;
+      background: rgba(14,16,22,0.92);
+      border: 1px solid rgba(156,154,146,0.2);
+      border-radius: 5px;
+      padding: 6px 8px;
+      display: none;
       flex-direction: column;
-      gap: 4px;
+      gap: 5px;
       white-space: nowrap;
     `
     containerRef.current.style.position = 'relative'
@@ -205,7 +209,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       })
 
       tooltip.innerHTML = rows.map(r => `
-        <div style="display:flex; align-items:center; gap:8px; line-height:1;">
+        <div style="display:flex; align-items:center; gap:6px; line-height:1;">
           <span style="
             background: ${r.color};
             color: #fff;
@@ -218,15 +222,18 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
             white-space: nowrap;
           ">${r.label}</span>
           <span style="
+            background: ${r.color};
             color: #fff;
             font-family: var(--font-mono, monospace);
             font-size: 11px;
             font-weight: 600;
             letter-spacing: 0.04em;
+            padding: 2px 6px;
+            border-radius: 3px;
           ">${r.value}</span>
         </div>
       `).join('')
-      tooltip.style.display = rows.length > 0 ? 'block' : 'none'
+      tooltip.style.display = rows.length > 0 ? 'flex' : 'none'
       const tooltipWidth  = tooltip.offsetWidth
       const tooltipHeight = tooltip.offsetHeight
       const chartHeight   = containerRef.current.offsetHeight
