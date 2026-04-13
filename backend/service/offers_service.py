@@ -468,16 +468,18 @@ async def _do_snapshot_all_servers() -> None:
     if index_tasks:
         await asyncio.gather(*index_tasks, return_exceptions=True)
 
-    # ── 2. Per-server index (Task 4) ──────────────────────────────────────────
-    # Collect unique (server_id, faction) pairs AND metadata for cache key:
-    #   "server_name::region::version::faction"
-    # region+version are extracted from display_server "(EU) Anniversary" format.
+    # ── 2. Per-server index (current value table + _index_cache) ─────────────
+    # History writes (server_price_history / server_price_history_short) were
+    # removed in migration 012 — the tiered snapshot loop now handles those via
+    # snapshots_1m / 5m / 1h / 1d.  We still:
+    #   a) populate _index_cache for the /index/{server} endpoint
+    #   b) upsert server_price_index for the /price-index endpoint
 
     # Build: server_id → (server_name, region, version) from offers
     _server_id_meta: dict[int, tuple[str, str, str]] = {}
     for o in all_offers:
         if o.server_id is not None and o.server_id not in _server_id_meta:
-            ds = o.display_server or ""   # "(EU) Anniversary"
+            ds = o.display_server or ""
             import re as _re
             _ds_match = _re.match(r"^\(([A-Za-z]{2,})\)\s*(.+)$", ds)
             if _ds_match:
@@ -497,7 +499,7 @@ async def _do_snapshot_all_servers() -> None:
     for (server_id, faction) in server_faction_pairs:
         result = compute_server_index(server_id, faction, all_offers)
         if result is not None:
-            # Populate per-server _index_cache key (Task 4)
+            # Populate per-server _index_cache key (used by /index/{server})
             meta = _server_id_meta.get(server_id)
             if meta:
                 srv_name, region, version = meta
@@ -514,6 +516,7 @@ async def _do_snapshot_all_servers() -> None:
                         sources      = [],
                     )
 
+            # Upsert server_price_index (current value — no history writes)
             server_index_tasks.append(
                 upsert_server_index(
                     server_id=server_id,

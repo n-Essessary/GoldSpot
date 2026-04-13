@@ -127,26 +127,66 @@ async def parser_status_handler():
 
 @router.get("/price-history", summary="Price history (in-memory snapshot or per-server DB)")
 async def get_price_history_handler(
-    server:  str = Query("all"),
-    faction: str = Query("all"),
-    last:    int = Query(50, ge=1, le=2000),
-    hours:   int = Query(24, ge=1, le=720, description="Time window in hours"),
+    server:     str = Query("all"),
+    faction:    str = Query("all"),
+    last:       int = Query(50, ge=1, le=2000),
+    hours:      int = Query(24, ge=1, le=8760, description="Time window in hours (max 1y for tiered)"),
     # Per-server params (Task 4) — all three required to use DB path
-    region:  str | None = Query(None, description="Region, e.g. 'EU'. Required for per-server DB query."),
-    version: str | None = Query(None, description="Version, e.g. 'Classic Era'. Required for per-server DB query."),
+    region:     str | None = Query(None, description="Region, e.g. 'EU'. Required for per-server DB query."),
+    version:    str | None = Query(None, description="Version, e.g. 'Classic Era'. Required for per-server DB query."),
+    # Tiered storage opt-in (safe rollout — no effect on legacy modes)
+    use_tiered: bool = Query(
+        False,
+        description=(
+            "When true, serve history from the 4-tier rolling storage "
+            "(snapshots_1m/5m/1h/1d) instead of the legacy per-server tables. "
+            "Requires server + region + version. Falls back to legacy if tiered "
+            "returns no data."
+        ),
+    ),
 ):
     """
-    Two modes:
+    Three modes (evaluated in priority order):
 
-    1. Legacy in-memory (default, ?server=all or group label):
-       Returns current snapshot from in-memory cache.
-       Same as before — backward compatible.
+    **Mode 3 — Tiered storage** (?use_tiered=true, requires server + region + version):
+      Routes to the finest tier that covers the requested hours window:
+        ≤ 24h  → snapshots_1m (1-min resolution)
+        ≤ 30d  → snapshots_5m (5-min resolution)
+        ≤ 2y   → snapshots_1h (1-hour resolution)
+        else   → snapshots_1d (1-day resolution)
+      Falls back to Mode 2 if tiered returns no data.
 
-    2. Per-server from DB (Task 4): requires server + region + version:
-       GET /price-history?server=Firemaw&region=EU&version=Classic+Era&faction=Horde
-       Returns real price history for that realm (short HF table if hours≤6, else long).
+    **Mode 2 — Legacy per-server DB** (server + region + version, no use_tiered):
+      Queries server_price_history / server_price_history_short.
+      Same as before — backward compatible.
+
+    **Mode 1 — Legacy in-memory** (default, ?server=all or group label):
+      Returns current snapshot from in-memory cache. Backward compatible.
     """
-    # Mode 2: per-server DB query
+    # Mode 3: tiered storage (opt-in, safe rollout)
+    if use_tiered and server != "all" and region and version:
+        from db.tiered_snapshots import query_tiered_history_by_name
+        tiered_rows = await query_tiered_history_by_name(
+            server_name=server,
+            region=region.upper(),
+            version=version,
+            faction=faction,
+            hours=hours,
+            max_points=last,
+        )
+        if tiered_rows:
+            return {
+                "server":  server,
+                "region":  region.upper(),
+                "version": version,
+                "faction": faction,
+                "count":   len(tiered_rows),
+                "points":  tiered_rows,
+                "source":  "tiered",
+            }
+        # Tiered returned nothing (tables not yet populated) — fall through to Mode 2
+
+    # Mode 2: legacy per-server DB query (backward compatible)
     if server != "all" and region and version:
         from db.writer import query_server_history, query_server_history_short
         if hours <= 6:
@@ -169,19 +209,19 @@ async def get_price_history_handler(
             )
         if rows:
             return {
-                "server": server,
-                "region": region.upper(),
+                "server":  server,
+                "region":  region.upper(),
                 "version": version,
                 "faction": faction,
-                "count": len(rows),
-                "points": rows,
+                "count":   len(rows),
+                "points":  rows,
             }
         # DB empty / unavailable — fall through to in-memory
 
     # Mode 1: legacy in-memory
     points = get_price_history(server, faction, last)
     return {
-        "count": len(points),
+        "count":  len(points),
         "points": points,
     }
 

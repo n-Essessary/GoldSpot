@@ -28,6 +28,11 @@ async def lifespan(_app: FastAPI):
     # Первые данные появятся через ~5-30 сек (G2G быстрее, FunPay дольше).
     await start_background_parsers()
 
+    # 4-tier rolling snapshot storage (snapshots_1m / 5m / 1h / 1d).
+    # Writes every 60 s, downsamples every 5 min, cleans up every 6 h.
+    from service.tiered_snapshot_loop import start_tiered_snapshot_loop
+    asyncio.create_task(start_tiered_snapshot_loop())
+
     # Ежесуточная очистка снимков старше 1 года.
     # Безопасен: если DATABASE_URL не задан — просто спит.
     from db.writer import cleanup_old_snapshots
