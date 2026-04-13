@@ -120,8 +120,11 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         rightOffset:    0,
         minBarSpacing:  0.5,
         barSpacing:     6,
+        lockVisibleTimeRangeOnResize: true,
       },
     })
+
+    chart.timeScale().applyOptions({ rightOffset: 0 })
 
     // index_price — основная зелёная area
     seriesRef.current.index = chart.addAreaSeries({
@@ -410,8 +413,9 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       const conv = v => applyPriceUnit(v, showPer1)
 
       // Save visible range before setData (only if user has already zoomed)
-      const timeScale = chartRef.current?.timeScale()
-      const savedRange = fittedRef.current ? timeScale?.getVisibleLogicalRange() : null
+      const savedRange = fittedRef.current
+        ? chartRef.current?.timeScale()?.getVisibleLogicalRange()
+        : null
 
       const indexData = points.map(p => ({
         time:  toTS(p),
@@ -444,20 +448,20 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       const allSrc = new Set(points.flatMap(p => p.sources || []))
       setSources([...allSrc])
 
-      if (!fittedRef.current) {
-        // First load — fit all data
+      const timeScale = chartRef.current?.timeScale()
+
+      if (!fittedRef.current || !savedRange) {
         timeScale?.fitContent()
         fittedRef.current = true
-      } else if (savedRange) {
-        // Background refresh — restore user's zoom, clamped to data bounds
-        const totalPoints = points.length
-        const clampedRange = {
-          from: Math.max(0, savedRange.from),
-          to:   Math.min(totalPoints - 1, savedRange.to),
-        }
-        // Only restore if range is valid
-        if (clampedRange.to > clampedRange.from) {
-          timeScale?.setVisibleLogicalRange(clampedRange)
+      } else {
+        const firstTs = indexData[0]?.time
+        const lastTs  = indexData[indexData.length - 1]?.time
+        if (firstTs && lastTs) {
+          const visible = timeScale?.getVisibleRange()
+          timeScale?.setVisibleRange({
+            from: Math.max(visible?.from ?? firstTs, firstTs),
+            to:   Math.min(visible?.to   ?? lastTs,  lastTs),
+          })
         }
       }
     } catch {
