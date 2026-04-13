@@ -445,6 +445,18 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       seriesRef.current.index?.setData(indexData)
       seriesRef.current.ask?.setData(askData)
 
+      // Pin last point to now — prevents right-side gap caused by
+      // time scale stretching to current time beyond last data point.
+      const nowTs = Math.floor(Date.now() / 1000)
+      const latestIndex = indexData[indexData.length - 1]
+      const latestAsk   = askData[askData.length - 1]
+      if (latestIndex && nowTs > latestIndex.time) {
+        seriesRef.current.index?.update({ time: nowTs, value: latestIndex.value })
+      }
+      if (latestAsk && nowTs > latestAsk.time) {
+        seriesRef.current.ask?.update({ time: nowTs, value: latestAsk.value })
+      }
+
       const allSrc = new Set(points.flatMap(p => p.sources || []))
       setSources([...allSrc])
 
