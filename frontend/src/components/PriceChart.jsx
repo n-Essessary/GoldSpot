@@ -90,6 +90,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
     if (!containerRef.current) return
 
     const chart = createChart(containerRef.current, {
+      width: containerRef.current.offsetWidth,
       layout: {
         background:  { type: ColorType.Solid, color: 'transparent' },
         textColor:   'rgba(156,154,146,0.8)',
@@ -108,7 +109,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       rightPriceScale: {
         borderColor:   'rgba(156,154,146,0.15)',
         scaleMargins:  { top: 0.12, bottom: 0.12 },
-        minimumWidth:  80,
+        minimumWidth:  60,
       },
       timeScale: {
         borderColor:    'rgba(156,154,146,0.15)',
@@ -137,7 +138,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         formatter: p => `$${Number(p).toFixed(2)}`,
         minMove:   0.01,
       },
-      title:                  'Market Price',
+      title:                  '',
     })
 
     // best_ask — тонкая жёлтая точечная
@@ -154,7 +155,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         formatter: p => `$${Number(p).toFixed(2)}`,
         minMove:   0.01,
       },
-      title:                  'Cheapest',
+      title:                  '',
     })
 
     // Floating crosshair tooltip — follows cursor
@@ -164,15 +165,10 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       pointer-events: none;
       display: none;
       z-index: 10;
-      background: rgba(14,16,22,0.96);
-      border: 1px solid rgba(156,154,146,0.18);
-      border-radius: 6px;
-      padding: 6px 10px;
-      gap: 12px;
-      white-space: nowrap;
-      display: none;
+      display: flex;
       flex-direction: column;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      gap: 4px;
+      white-space: nowrap;
     `
     containerRef.current.style.position = 'relative'
     containerRef.current.appendChild(tooltip)
@@ -199,31 +195,39 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       const rows = []
       if (indexData) rows.push({
         label: 'Market Price',
-        color: '#1D9E75',
+        bg: '#1D9E75',
         value: `$${Number(indexData.value).toFixed(2)}`,
       })
       if (askData) rows.push({
         label: 'Cheapest',
-        color: '#BA7517',
+        bg: '#9A6010',
         value: `$${Number(askData.value).toFixed(2)}`,
       })
 
       tooltip.innerHTML = rows.map(r => `
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:16px;">
+        <div style="
+          display: flex;
+          align-items: center;
+          background: ${r.bg};
+          border-radius: 4px;
+          overflow: hidden;
+          font-family: var(--font-mono, monospace);
+          font-size: 11px;
+          font-weight: 600;
+          color: #fff;
+          height: 20px;
+          line-height: 20px;
+        ">
           <span style="
-            font-family: var(--font-sans, sans-serif);
-            font-size: 10px;
+            padding: 0 7px;
+            opacity: 0.75;
             font-weight: 500;
-            letter-spacing: 0.06em;
-            text-transform: uppercase;
-            color: ${r.color};
-            opacity: 0.8;
+            letter-spacing: 0.04em;
+            border-right: 1px solid rgba(255,255,255,0.25);
           ">${r.label}</span>
           <span style="
-            font-family: var(--font-mono, monospace);
-            font-size: 13px;
-            font-weight: 600;
-            color: ${r.color};
+            padding: 0 7px;
+            font-weight: 700;
             letter-spacing: 0.02em;
           ">${r.value}</span>
         </div>
