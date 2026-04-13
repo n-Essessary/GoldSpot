@@ -8,14 +8,14 @@ Adds:
   - servers rows: (Flamegor, RU, Classic) and (Harbinger of Doom, RU, Classic)
   - g2g aliases for all observed faction variants
 
-Revision ID: 003
-Revises: 002
+Revision ID: 003b
+Revises: 003
 Create Date: 2026-04-07
 """
 from alembic import op
 
-revision = "003"
-down_revision = "002"
+revision = "003b"
+down_revision = "003"
 branch_labels = None
 depends_on = None
 
