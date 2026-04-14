@@ -258,9 +258,11 @@ def _parse_title(title: str) -> tuple[str, str, str, str]:
     return server_name, region, version, faction
 
 
+_watched: dict[str, dict[str, list[str]]] = {}
+# _watched[game_key][server_title] = [seller1, seller2, ...]  max 5 per entry
+_MAX_WATCHED: int = 5
+# Keep _seller_registry for backward compat (used in phase1 logging)
 _seller_registry: dict[str, set[str]] = {}
-# key = game_key e.g. "wow_classic_era_seasonal_anniversary"
-# value = set of seller usernames discovered via grouped search (phase 1)
 
 
 class G2GClient:
@@ -576,21 +578,21 @@ async def fetch_g2g_game(
     max_regions: Optional[int] = None,
 ) -> list[G2GOffer]:
     """
-    3-step seller-based pipeline (Task 1):
-      1) fetch_regions      — get all region_id / relation_id
-      2) fetch_all_sellers  — discover all sellers via full pagination of all regions
-      3) fetch_seller_offers (parallel, semaphore=5) — individual offers
-         is_group_display=false, stable offer_id, real available_qty
+    4-step watched-seller pipeline:
+      1) Grouped search → cheapest seller per server×faction; populate _watched
+      2) Fetch all unique watched sellers (batches of 10, 0.3s between)
+      3) Prune _watched — remove sellers with 0 offers for that server title
+      4) Combine + dedup by offer_id (seller offers first, grouped as fallback)
     """
     if game_key not in GAME_CONFIG:
         raise ValueError(f"Unknown game: {game_key}. Available: {list(GAME_CONFIG)}")
     cfg = GAME_CONFIG[game_key]
     brand_id = cfg["brand_id"]
     service_id = cfg["service_id"]
-    delay = 0.3  # polite inter-region delay for phase 1
+    watched = _watched.setdefault(game_key, {})
 
-    # ── Phase 1: grouped discovery ────────────────────────────────────────
-    phase1_offers: list[G2GOffer] = []
+    # ── Step 1: grouped search → discover cheapest seller per server×faction ──
+    grouped_offers: list[G2GOffer] = []
     async with G2GClient(country=country) as client:
         regions = await client.fetch_regions(brand_id, service_id)
         if max_regions:
@@ -603,46 +605,76 @@ async def fetch_g2g_game(
                     relation_id=region.relation_id,
                     sort=sort,
                 )
-                phase1_offers.extend(offers)
-                for o in offers:
-                    if o.seller:
-                        _seller_registry.setdefault(game_key, set()).add(o.seller)
+                grouped_offers.extend(offers)
             except httpx.HTTPStatusError as e:
-                logger.warning("G2G phase1 HTTP error region %s: %s", region.region_id, e)
+                logger.warning(
+                    "G2G grouped HTTP error region %s: %s", region.region_id, e
+                )
             if i < len(regions) - 1:
-                await asyncio.sleep(delay)
+                await asyncio.sleep(0.3)
+
+    # Update watched: add new cheapest seller if not already in list
+    for o in grouped_offers:
+        if not o.seller or not o.title:
+            continue
+        watched_list = watched.setdefault(o.title, [])
+        if o.seller not in watched_list and len(watched_list) < _MAX_WATCHED:
+            watched_list.append(o.seller)
     logger.info(
-        "G2G phase1: %d offers, registry=%d sellers",
-        len(phase1_offers), len(_seller_registry.get(game_key, set())),
+        "G2G step1: %d grouped offers, %d server×faction watched",
+        len(grouped_offers), len(watched),
     )
 
-    # ── Phase 2: seller fetch (skipped on cold start — registry empty) ────
-    sellers = list(_seller_registry.get(game_key, set()))
-    phase2_offers: list[G2GOffer] = []
-    BATCH = 10
-    BATCH_DELAY = 0.3
-    if sellers:
-        async with G2GClient(country=country) as client:
-            for i in range(0, len(sellers), BATCH):
-                batch = sellers[i:i + BATCH]
-                results = await asyncio.gather(
-                    *[client.fetch_seller_offers(brand_id, service_id, s)
-                      for s in batch],
-                    return_exceptions=True,
-                )
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.warning("G2G seller fetch error: %s", result)
-                        continue
-                    phase2_offers.extend(result)
-                if i + BATCH < len(sellers):
-                    await asyncio.sleep(BATCH_DELAY)
-        logger.info("G2G phase2: %d sellers → %d offers", len(sellers), len(phase2_offers))
+    # ── Step 2: fetch all unique watched sellers ──────────────────────────────
+    all_sellers = list({s for sellers in watched.values() for s in sellers})
+    seller_offers_map: dict[str, list[G2GOffer]] = {}
+    async with G2GClient(country=country) as client:
+        for i in range(0, len(all_sellers), 10):
+            batch = all_sellers[i:i + 10]
+            results = await asyncio.gather(
+                *[client.fetch_seller_offers(brand_id, service_id, s)
+                  for s in batch],
+                return_exceptions=True,
+            )
+            for seller, result in zip(batch, results):
+                if isinstance(result, Exception):
+                    logger.warning("G2G seller=%s fetch error: %s", seller, result)
+                    seller_offers_map[seller] = []
+                else:
+                    seller_offers_map[seller] = result
+            if i + 10 < len(all_sellers):
+                await asyncio.sleep(0.3)
+    logger.info(
+        "G2G step2: %d sellers → %d offers",
+        len(all_sellers),
+        sum(len(v) for v in seller_offers_map.values()),
+    )
 
-    # ── Dedup: phase2 first (has correct seller URLs), phase1 fills gaps ──
+    # ── Step 3: prune watched — remove sellers with no offer for that server ──
+    for server_title, watched_list in list(watched.items()):
+        for seller in list(watched_list):
+            has_offer = any(
+                o.title == server_title
+                for o in seller_offers_map.get(seller, [])
+            )
+            if not has_offer:
+                watched_list.remove(seller)
+                logger.debug(
+                    "G2G pruned %s from watched[%.50s]", seller, server_title
+                )
+        if not watched_list:
+            del watched[server_title]
+
+    # ── Step 4: combine, dedup by offer_id ───────────────────────────────────
     seen: set[str] = set()
     combined: list[G2GOffer] = []
-    for o in phase2_offers + phase1_offers:
+    for offers in seller_offers_map.values():
+        for o in offers:
+            key = o.offer_id if o.offer_id else f"{o.seller}:{o.title}"
+            if key not in seen:
+                seen.add(key)
+                combined.append(o)
+    for o in grouped_offers:
         key = o.offer_id if o.offer_id else f"{o.seller}:{o.title}"
         if key not in seen:
             seen.add(key)
