@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -258,11 +259,22 @@ def _parse_title(title: str) -> tuple[str, str, str, str]:
     return server_name, region, version, faction
 
 
-_watched: dict[str, dict[str, list[str]]] = {}
-# _watched[game_key][server_title] = [seller1, seller2, ...]  max 5 per entry
-_MAX_WATCHED: int = 5
-# Keep _seller_registry for backward compat (used in phase1 logging)
-_seller_registry: dict[str, set[str]] = {}
+@dataclass
+class TrackedOffer:
+    offer_id:      str
+    server_title:  str    # raw G2G title e.g. "Spineshatter [EU - Anniversary] - Horde"
+    seller:        str
+    region_id:     str
+    price_usd:     float  # updated each cycle by System 2
+    available_qty: int
+    added_at:      float  # time.monotonic() when added
+    brand_id:      str
+    service_id:    str
+
+
+# key = game_key → server_title → list of TrackedOffer, max 5, sorted price ASC
+_pool: dict[str, dict[str, list[TrackedOffer]]] = {}
+_MAX_POOL = 5
 
 
 class G2GClient:
@@ -388,6 +400,32 @@ class G2GClient:
             await asyncio.sleep(0.2)
 
         return all_offers
+
+    async def fetch_offer_status(
+        self,
+        offer_id: str,
+    ) -> dict | None:
+        """
+        Fetch current status of a single offer by offer_id.
+        Returns payload dict if offer is live, None if deleted or error.
+        """
+        try:
+            resp = await _http_get_retry(
+                self._client,
+                f"{BASE}/offer/{offer_id}",
+                params={"country": self.country, "currency": self.currency},
+            )
+            data = resp.json()
+            # Deleted offer returns code 4041
+            if data.get("code") == 4041:
+                return None
+            payload = data.get("payload", data)
+            if not payload or not payload.get("offer_id"):
+                return None
+            return payload
+        except Exception as e:
+            logger.debug("G2G offer_status offer_id=%s error: %s", offer_id, e)
+            return None
 
     async def fetch_all_sellers(
         self,
@@ -578,20 +616,22 @@ async def fetch_g2g_game(
     max_regions: Optional[int] = None,
 ) -> list[G2GOffer]:
     """
-    4-step watched-seller pipeline:
-      1) Grouped search → cheapest seller per server×faction; populate _watched
-      2) Fetch all unique watched sellers (batches of 10, 0.3s between)
-      3) Prune _watched — remove sellers with 0 offers for that server title
-      4) Combine + dedup by offer_id (seller offers first, grouped as fallback)
+    Two-system architecture:
+      System 1 — Scout: grouped search → cheapest online offer per server×faction
+                        → hand off new offer_ids to pool (max 5 per slot).
+      System 2 — Tracker: GET /offer/{offer_id} for each tracked offer in parallel;
+                          refresh price/qty, evict deleted/offline offers, sort ASC.
     """
     if game_key not in GAME_CONFIG:
         raise ValueError(f"Unknown game: {game_key}. Available: {list(GAME_CONFIG)}")
     cfg = GAME_CONFIG[game_key]
     brand_id = cfg["brand_id"]
     service_id = cfg["service_id"]
-    watched = _watched.setdefault(game_key, {})
+    server_pool = _pool.setdefault(game_key, {})
 
-    # ── Step 1: grouped search → discover cheapest seller per server×faction ──
+    # ══════════════════════════════════════════════════════════════
+    # SYSTEM 1 — Scout: grouped search → discover cheapest per slot
+    # ══════════════════════════════════════════════════════════════
     grouped_offers: list[G2GOffer] = []
     async with G2GClient(country=country) as client:
         regions = await client.fetch_regions(brand_id, service_id)
@@ -607,79 +647,141 @@ async def fetch_g2g_game(
                 )
                 grouped_offers.extend(offers)
             except httpx.HTTPStatusError as e:
-                logger.warning(
-                    "G2G grouped HTTP error region %s: %s", region.region_id, e
-                )
+                logger.warning("G2G scout HTTP error region %s: %s", region.region_id, e)
             if i < len(regions) - 1:
                 await asyncio.sleep(0.3)
+    logger.info("G2G system1 scout: %d grouped offers", len(grouped_offers))
 
-    # Update watched: add new cheapest seller if not already in list
+    # Hand off new cheapest offers to pool
     for o in grouped_offers:
-        if not o.seller or not o.title:
+        if not o.offer_id or not o.title or not o.seller:
             continue
-        watched_list = watched.setdefault(o.title, [])
-        if o.seller not in watched_list and len(watched_list) < _MAX_WATCHED:
-            watched_list.append(o.seller)
-    logger.info(
-        "G2G step1: %d grouped offers, %d server×faction watched",
-        len(grouped_offers), len(watched),
-    )
+        slot = server_pool.setdefault(o.title, [])
+        # Add only if offer_id not already tracked in this slot
+        tracked_ids = {t.offer_id for t in slot}
+        if o.offer_id not in tracked_ids:
+            if len(slot) >= _MAX_POOL:
+                # Evict oldest entry to make room
+                slot.sort(key=lambda t: t.added_at)
+                evicted = slot.pop(0)
+                logger.debug(
+                    "G2G pool evict oldest %s from slot %.50s",
+                    evicted.seller, o.title,
+                )
+            slot.append(TrackedOffer(
+                offer_id=o.offer_id,
+                server_title=o.title,
+                seller=o.seller,
+                region_id=o.region_id,
+                price_usd=o.price_usd,
+                available_qty=o.available_qty,
+                added_at=time.monotonic(),
+                brand_id=brand_id,
+                service_id=service_id,
+            ))
+            logger.debug("G2G pool add %s to slot %.50s", o.seller, o.title)
 
-    # ── Step 2: fetch all unique watched sellers ──────────────────────────────
-    all_sellers = list({s for sellers in watched.values() for s in sellers})
-    seller_offers_map: dict[str, list[G2GOffer]] = {}
+    # ══════════════════════════════════════════════════════════════
+    # SYSTEM 2 — Tracker: monitor each tracked offer individually
+    # ══════════════════════════════════════════════════════════════
+    all_tracked: list[TrackedOffer] = [
+        t for slot in server_pool.values() for t in slot
+    ]
+    # Fetch status for all tracked offers in parallel batches
+    BATCH = 10
+    BATCH_DELAY = 0.3
+    status_map: dict[str, dict | None] = {}
     async with G2GClient(country=country) as client:
-        for i in range(0, len(all_sellers), 10):
-            batch = all_sellers[i:i + 10]
+        for i in range(0, len(all_tracked), BATCH):
+            batch = all_tracked[i:i + BATCH]
             results = await asyncio.gather(
-                *[client.fetch_seller_offers(brand_id, service_id, s)
-                  for s in batch],
+                *[client.fetch_offer_status(t.offer_id) for t in batch],
                 return_exceptions=True,
             )
-            for seller, result in zip(batch, results):
+            for tracked, result in zip(batch, results):
                 if isinstance(result, Exception):
-                    logger.warning("G2G seller=%s fetch error: %s", seller, result)
-                    seller_offers_map[seller] = []
+                    logger.warning(
+                        "G2G tracker offer_id=%s error: %s",
+                        tracked.offer_id, result,
+                    )
+                    status_map[tracked.offer_id] = tracked.__dict__  # keep as-is on error
                 else:
-                    seller_offers_map[seller] = result
-            if i + 10 < len(all_sellers):
-                await asyncio.sleep(0.3)
-    logger.info(
-        "G2G step2: %d sellers → %d offers",
-        len(all_sellers),
-        sum(len(v) for v in seller_offers_map.values()),
-    )
+                    status_map[tracked.offer_id] = result
+            if i + BATCH < len(all_tracked):
+                await asyncio.sleep(BATCH_DELAY)
+    logger.info("G2G system2 tracker: %d offers monitored", len(all_tracked))
 
-    # ── Step 3: prune watched — remove sellers with no offer for that server ──
-    for server_title, watched_list in list(watched.items()):
-        for seller in list(watched_list):
-            has_offer = any(
-                o.title == server_title
-                for o in seller_offers_map.get(seller, [])
-            )
-            if not has_offer:
-                watched_list.remove(seller)
+    # Update pool: refresh prices, remove dead offers
+    for server_title, slot in list(server_pool.items()):
+        for tracked in list(slot):
+            payload = status_map.get(tracked.offer_id)
+            if payload is None:
+                # Offer deleted or error — remove
+                slot.remove(tracked)
                 logger.debug(
-                    "G2G pruned %s from watched[%.50s]", seller, server_title
+                    "G2G pool remove %s from slot %.50s — deleted/gone",
+                    tracked.seller, server_title,
                 )
-        if not watched_list:
-            del watched[server_title]
+                continue
+            is_online = payload.get("is_online", True)
+            status = payload.get("status", "live")
+            if not is_online or status != "live":
+                slot.remove(tracked)
+                logger.debug(
+                    "G2G pool remove %s from slot %.50s — offline/inactive",
+                    tracked.seller, server_title,
+                )
+                continue
+            # Update live price and qty
+            tracked.price_usd = float(payload.get("unit_price_in_usd") or tracked.price_usd)
+            tracked.available_qty = int(payload.get("available_qty") or tracked.available_qty)
+        # Sort slot by price ASC
+        slot.sort(key=lambda t: t.price_usd)
+        # Clean up empty slots
+        if not slot:
+            del server_pool[server_title]
 
-    # ── Step 4: combine, dedup by offer_id ───────────────────────────────────
+    # ══════════════════════════════════════════════════════════════
+    # Build output: convert pool to G2GOffer list
+    # Grouped offers fill gaps for any server not yet in pool
+    # ══════════════════════════════════════════════════════════════
     seen: set[str] = set()
     combined: list[G2GOffer] = []
-    for offers in seller_offers_map.values():
-        for o in offers:
-            key = o.offer_id if o.offer_id else f"{o.seller}:{o.title}"
-            if key not in seen:
-                seen.add(key)
-                combined.append(o)
+    # Pool offers first — these have live-updated prices
+    for server_title, slot in server_pool.items():
+        for tracked in slot:
+            if tracked.offer_id in seen:
+                continue
+            seen.add(tracked.offer_id)
+            combined.append(G2GOffer(
+                offer_id=tracked.offer_id,
+                title=tracked.server_title,
+                server_name=tracked.server_title,
+                region_id=tracked.region_id,
+                relation_id="",
+                price_usd=tracked.price_usd,
+                min_qty=1,
+                available_qty=tracked.available_qty,
+                seller=tracked.seller,
+                brand_id=tracked.brand_id,
+                service_id=tracked.service_id,
+                offer_url=_build_offer_url(
+                    offer_id=tracked.offer_id,
+                    region_id=tracked.region_id,
+                    seller=tracked.seller,
+                ),
+            ))
+    # Grouped fallback for servers not yet in pool
     for o in grouped_offers:
         key = o.offer_id if o.offer_id else f"{o.seller}:{o.title}"
         if key not in seen:
             seen.add(key)
             combined.append(o)
-    logger.info("G2G total after dedup: %d offers", len(combined))
+    pool_offer_count = sum(len(s) for s in server_pool.values())
+    logger.info(
+        "G2G total: %d offers (%d from pool, %d from grouped fallback)",
+        len(combined), pool_offer_count, len(combined) - pool_offer_count,
+    )
     return combined
 
 
