@@ -307,12 +307,40 @@ async def test_pool_prune_deleted():
 # 7. test_price_update
 # ─────────────────────────────────────────────────────────────────────────────
 async def test_price_update():
-    """Price in pool is updated from fetch_offer_status response."""
-    _pool.clear()
-    tracked = _make_tracked("OID_P", price_usd=0.01)
-    _pool[GAME_KEY] = {SERVER_TITLE: [tracked]}
+    """Price is set by System 1 (grouped converted_unit_price) and NOT overwritten by System 2.
 
-    updated_payload = _live_payload("OID_P", price=0.009)
+    System 2 (/offer/{id}) returns a different price context — only available_qty is
+    taken from it. The price set at pool-add time (from grouped search) must be preserved.
+    """
+    _pool.clear()
+    cfg = GAME_CONFIG[GAME_KEY]
+
+    # System 1 grouped offer carries the correct price via converted_unit_price
+    grouped_offer = G2GOffer(
+        offer_id="OID_P",
+        title=SERVER_TITLE,
+        server_name=SERVER_TITLE,
+        region_id="abc",
+        relation_id="rel1",
+        price_usd=0.018699,   # correct grouped converted_unit_price
+        min_qty=1,
+        available_qty=5000,
+        seller="SellerP",
+        brand_id=cfg["brand_id"],
+        service_id=cfg["service_id"],
+    )
+
+    # System 2 returns a DIFFERENT (wrong) price — must NOT be applied to price_usd
+    status_payload = {
+        "offer_id": "OID_P",
+        "converted_unit_price": "0.040087",   # wrong context — ignored for price
+        "unit_price_in_usd": "0.040087",
+        "available_qty": 4800,                # qty update IS applied
+        "is_online": True,
+        "status": "live",
+        "region_id": "abc",
+        "username": "SellerP",
+    }
 
     with (
         patch.object(G2GClient, "fetch_regions", new_callable=AsyncMock) as mock_regions,
@@ -320,15 +348,19 @@ async def test_price_update():
         patch.object(G2GClient, "fetch_offer_status", new_callable=AsyncMock) as mock_status,
     ):
         mock_regions.return_value = [MagicMock(region_id="r1", relation_id="rel1")]
-        mock_offers.return_value = []
-        mock_status.return_value = updated_payload
+        mock_offers.return_value = [grouped_offer]
+        mock_status.return_value = status_payload
 
         await fetch_g2g_game(GAME_KEY, max_regions=1)
 
     slot = _pool[GAME_KEY].get(SERVER_TITLE, [])
     assert slot, "Slot should not be empty"
-    assert slot[0].price_usd == pytest.approx(0.009), (
-        f"Expected updated price 0.009, got {slot[0].price_usd}"
+    t = next(x for x in slot if x.offer_id == "OID_P")
+    assert t.price_usd == pytest.approx(0.018699), (
+        f"Price must stay at grouped value 0.018699, got {t.price_usd}"
+    )
+    assert t.available_qty == 4800, (
+        f"available_qty should be updated from System 2 to 4800, got {t.available_qty}"
     )
 
 

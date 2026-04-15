@@ -538,7 +538,7 @@ class G2GClient:
                         server_name=server_name_parsed,
                         region_id=o.get("region_id", ""),
                         relation_id=o.get("relation_id", ""),
-                        price_usd=float(o.get("unit_price_in_usd") or 0),
+                        price_usd=float(o.get("converted_unit_price") or o.get("unit_price_in_usd") or 0),
                         min_qty=int(o.get("min_qty") or 1),
                         available_qty=qty,
                         seller=(o.get("username") or "").strip(),
@@ -732,8 +732,9 @@ async def fetch_g2g_game(
                     tracked.seller, server_title,
                 )
                 continue
-            # Update live price and qty
-            tracked.price_usd = float(payload.get("unit_price_in_usd") or tracked.price_usd)
+            # Price intentionally NOT updated from /offer/{id} —
+            # that endpoint returns a different price context than grouped search.
+            # Price is set correctly by System 1 (grouped converted_unit_price) and kept.
             tracked.available_qty = int(payload.get("available_qty") or tracked.available_qty)
         # Sort slot by price ASC
         slot.sort(key=lambda t: t.price_usd)
