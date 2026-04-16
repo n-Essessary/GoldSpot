@@ -86,6 +86,7 @@ class StickyOffer:
     lot_size: int
     last_seen_cycle: int
     fetched_at: datetime
+    server_name: str = ""
 
 
 _sticky_slots: dict[tuple[str, str], list[StickyOffer]] = {}
@@ -339,6 +340,7 @@ def _update_sticky_slots(new_offers: list[Offer]) -> None:
                 slots.insert(0, StickyOffer(
                     offer_id=oid,
                     display_server=o.display_server,
+                    server_name=o.server_name,
                     faction=o.faction,
                     price_per_1k=o.price_per_1k,
                     amount_gold=o.amount_gold,
@@ -365,6 +367,7 @@ def _sticky_to_offer(s: StickyOffer) -> Offer:
         source="g2g",
         server=s.display_server.lower(),
         display_server=s.display_server,
+        server_name=s.server_name,
         faction=s.faction,
         raw_price=s.raw_price,
         raw_price_unit=s.raw_price_unit,
