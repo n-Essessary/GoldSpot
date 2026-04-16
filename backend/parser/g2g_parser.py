@@ -443,6 +443,7 @@ class G2GClient:
                             "country":     self.country,
                             "currency":    self.currency,
                             "sort":        "lowest_price",
+                            "include_offline": "0",
                             "page":        page,
                             "page_size":   page_size,
                         },
