@@ -89,6 +89,11 @@ HEADERS = {
 GAME_CONFIG: dict[str, dict[str, str]] = {
     # Верифицировано: https://www.g2g.com/categories/wow-classic-era-vanilla-gold
     # Покрывает Classic Era, Seasonal, TBC Anniversary — один brand_id
+    "wow_classic_era": {
+        "brand_id": "lgc_game_27816",
+        "service_id": "lgc_service_1",
+        "label": "WoW Classic Era",
+    },
     "wow_classic_era_seasonal_anniversary": {
         "brand_id":   "lgc_game_27816",
         "service_id": "lgc_service_1",
