@@ -383,15 +383,60 @@ async def query_server_history(
     Response shape is identical to the legacy version:
       [{recorded_at, index_price, index_price_per_1k, best_ask, sample_size}, ...]
     """
-    from db.tiered_snapshots import query_tiered_history_by_name
-    return await query_tiered_history_by_name(
-        server_name=server_name,
-        region=region,
-        version=version,
-        faction=faction,
-        hours=hours,
-        max_points=last,
-    )
+    pool = await get_pool()
+    if pool is None:
+        return []
+
+    try:
+        rows = await pool.fetch(
+            """
+            SELECT
+                h.recorded_at,
+                h.index_price,
+                h.best_ask,
+                h.sample_size
+            FROM server_price_history h
+            JOIN servers s ON s.id = h.server_id
+            WHERE s.name = $1
+              AND s.region = $2
+              AND s.version = $3
+              AND h.faction = $4
+              AND h.recorded_at >= NOW() - ($5::integer * INTERVAL '1 hour')
+            ORDER BY h.recorded_at DESC
+            LIMIT $6
+            """,
+            server_name, region, version, faction, hours, last,
+        )
+    except Exception:
+        # Non-fatal fallback for deployments where legacy history table is absent.
+        from db.tiered_snapshots import query_tiered_history_by_name
+        return await query_tiered_history_by_name(
+            server_name=server_name,
+            region=region,
+            version=version,
+            faction=faction,
+            hours=hours,
+            max_points=last,
+        )
+
+    out: list[dict] = []
+    for r in rows:
+        idx_per_1k = float(r["index_price"] or 0) * 1000.0
+        best_ask_per_1k = (
+            float(r["best_ask"]) * 1000.0
+            if r["best_ask"] is not None
+            else idx_per_1k
+        )
+        out.append(
+            {
+                "recorded_at": r["recorded_at"].isoformat(),
+                "index_price": float(r["index_price"] or 0),
+                "index_price_per_1k": round(idx_per_1k, 4),
+                "best_ask": round(best_ask_per_1k, 4),
+                "sample_size": int(r["sample_size"] or 0),
+            }
+        )
+    return out
 
 
 async def query_server_history_short(

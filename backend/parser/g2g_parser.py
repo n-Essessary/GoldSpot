@@ -169,6 +169,23 @@ class G2GRegion:
     relation_id: str
 
 
+@dataclass
+class TrackedOffer:
+    offer_id: str
+    server_title: str
+    seller: str
+    region_id: str
+    price_usd: float
+    available_qty: int
+    added_at: float
+    brand_id: str
+    service_id: str
+
+
+_MAX_POOL = 5
+_pool: dict[str, dict[str, list[TrackedOffer]]] = {}
+
+
 def _parse_title(title: str) -> tuple[str, str, str, str]:
     """Parse a raw G2G offer title → (server_name, source_region, version, faction).
 
@@ -313,10 +330,86 @@ class G2GClient:
         )
         return regions
 
+    async def fetch_offer_status(self, offer_id: str) -> dict | None:
+        """Fetch single offer status; return None when G2G reports deleted offer."""
+        resp = await _http_get_retry(
+            self._client,
+            f"{BASE}/offer/{offer_id}",
+            params={
+                "country": self.country,
+                "currency": self.currency,
+            },
+        )
+        data = resp.json() or {}
+        if data.get("code") == 4041:
+            return None
+        payload = data.get("payload", {})
+        return payload if payload else None
+
+    async def fetch_offers(
+        self,
+        brand_id: str,
+        service_id: str,
+        region_id: str,
+        relation_id: str,
+        sort: str = "lowest_price",
+        page: int = 1,
+        page_size: int = 48,
+    ) -> list[G2GOffer]:
+        """Fetch grouped offers for a region/relation pair."""
+        resp = await _http_get_retry(
+            self._client,
+            f"{BASE}/offer/search",
+            params={
+                "brand_id": brand_id,
+                "service_id": service_id,
+                "relation_id": relation_id,
+                "country": self.country,
+                "currency": self.currency,
+                "sort": sort,
+                "page": page,
+                "page_size": page_size,
+            },
+        )
+        results = resp.json().get("payload", {}).get("results", [])
+        offers: list[G2GOffer] = []
+        for o in results:
+            try:
+                price_usd = float(o.get("converted_unit_price") or o.get("unit_price_in_usd") or 0)
+                qty = int(o.get("available_qty") or 0)
+                if price_usd <= 0 or qty <= 0:
+                    continue
+                offer_id = o.get("offer_id", "")
+                title = o.get("title", "")
+                seller = (o.get("username") or "").strip()
+                rid = o.get("region_id") or region_id
+                offers.append(
+                    G2GOffer(
+                        offer_id=offer_id,
+                        title=title,
+                        server_name=_parse_title(title)[0] or title,
+                        region_id=rid,
+                        relation_id=o.get("relation_id", relation_id),
+                        price_usd=price_usd,
+                        min_qty=int(o.get("min_qty") or 1),
+                        available_qty=qty,
+                        seller=seller,
+                        brand_id=o.get("brand_id", brand_id),
+                        service_id=o.get("service_id", service_id),
+                        offer_url=_build_offer_url(offer_id=offer_id, region_id=rid, seller=seller),
+                        offer_group=o.get("offer_group", ""),
+                        raw=o,
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        return offers
+
     async def fetch_all_sellers(
         self,
         brand_id: str,
         service_id: str,
+        regions: list[G2GRegion] | None = None,
     ) -> list[str]:
         """
         Discover the full set of seller usernames across every region by paginating
@@ -330,7 +423,7 @@ class G2GClient:
           - 0.2s delay between pages within a region.
           - 0.35s delay between regions.
         """
-        regions = await self.fetch_regions(brand_id, service_id)
+        regions = regions if regions is not None else await self.fetch_regions(brand_id, service_id)
         sellers: set[str] = set()
 
         page_size = 48
@@ -390,7 +483,7 @@ class G2GClient:
         brand_id: str,
         service_id: str,
         seller: str,
-        semaphore: asyncio.Semaphore,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> list[G2GOffer]:
         """
         Fetch all individual offers for a single seller.
@@ -401,82 +494,92 @@ class G2GClient:
         On any exception (HTTPStatusError, timeout, etc.) → log warning, return [].
         Concurrency is bounded by the caller-provided semaphore.
         """
+        semaphore = semaphore or asyncio.Semaphore(1)
         async with semaphore:
-            try:
-                resp = await _http_get_retry(
-                    self._client,
-                    f"{BASE}/offer/search",
-                    params={
-                        "brand_id":   brand_id,
-                        "service_id": service_id,
-                        "country":    self.country,
-                        "currency":   self.currency,
-                        "sort":       "lowest_price",
-                        "seller":     seller,
-                    },
-                )
-                results = resp.json().get("payload", {}).get("results", [])
-            except Exception as e:
-                logger.warning("G2G: seller %s fetch failed: %s", seller, e)
-                return []
-
+            page_size = 48
+            max_pages = 10
+            page = 1
             offers: list[G2GOffer] = []
-            for o in results:
+            while page <= max_pages:
                 try:
-                    price_usd = float(
-                        o.get("converted_unit_price")
-                        or o.get("unit_price_in_usd")
-                        or 0
+                    resp = await _http_get_retry(
+                        self._client,
+                        f"{BASE}/offer/search",
+                        params={
+                            "brand_id":   brand_id,
+                            "service_id": service_id,
+                            "country":    self.country,
+                            "currency":   self.currency,
+                            "sort":       "lowest_price",
+                            "seller":     seller,
+                            "page":       page,
+                            "page_size":  page_size,
+                        },
                     )
-                    qty = int(o.get("available_qty") or 0)
-                    if qty <= 0 or price_usd <= 0:
+                    results = resp.json().get("payload", {}).get("results", [])
+                except Exception as e:
+                    logger.warning("G2G: seller %s fetch failed: %s", seller, e)
+                    return offers
+
+                for o in results:
+                    try:
+                        price_usd = float(
+                            o.get("converted_unit_price")
+                            or o.get("unit_price_in_usd")
+                            or 0
+                        )
+                        qty = int(o.get("available_qty") or 0)
+                        if qty <= 0 or price_usd <= 0:
+                            continue
+
+                        offer_id = o.get("offer_id", "")
+                        raw_title = o.get("title", "")
+                        username = (o.get("username") or seller).strip()
+                        region_id = o.get("region_id", "")
+                        server_name_parsed = _parse_title(raw_title)[0] or raw_title
+
+                        offers.append(
+                            G2GOffer(
+                                offer_id=offer_id,
+                                title=raw_title,
+                                server_name=server_name_parsed,
+                                region_id=region_id,
+                                relation_id=o.get("relation_id", ""),
+                                price_usd=price_usd,
+                                min_qty=int(o.get("min_qty") or 1),
+                                available_qty=qty,
+                                seller=username,
+                                brand_id=o.get("brand_id", brand_id),
+                                service_id=o.get("service_id", service_id),
+                                offer_url=_build_offer_url(
+                                    offer_id=offer_id,
+                                    region_id=region_id,
+                                    seller=username,
+                                ),
+                                offer_group=o.get("offer_group", ""),
+                                raw=o,
+                            )
+                        )
+                    except (ValueError, TypeError) as e:
+                        logger.debug(
+                            "G2G: offer parse error seller=%s offer_id=%s: %s",
+                            seller,
+                            o.get("offer_id", ""),
+                            e,
+                        )
                         continue
 
-                    offer_id = o.get("offer_id", "")
-                    raw_title = o.get("title", "")
-                    username = (o.get("username") or "").strip()
-                    region_id = o.get("region_id", "")
-                    server_name_parsed = _parse_title(raw_title)[0] or raw_title
-
-                    offers.append(
-                        G2GOffer(
-                            offer_id=offer_id,
-                            title=raw_title,
-                            server_name=server_name_parsed,
-                            region_id=region_id,
-                            relation_id=o.get("relation_id", ""),
-                            price_usd=price_usd,
-                            min_qty=int(o.get("min_qty") or 1),
-                            available_qty=qty,
-                            seller=username,
-                            brand_id=o.get("brand_id", brand_id),
-                            service_id=o.get("service_id", service_id),
-                            offer_url=_build_offer_url(
-                                offer_id=offer_id,
-                                region_id=region_id,
-                                seller=username,
-                            ),
-                            offer_group=o.get("offer_group", ""),
-                            raw=o,
-                        )
-                    )
-                except (ValueError, TypeError) as e:
-                    logger.debug(
-                        "G2G: offer parse error seller=%s offer_id=%s: %s",
-                        seller,
-                        o.get("offer_id", ""),
-                        e,
-                    )
-                    continue
-
+                if len(results) < page_size:
+                    break
+                page += 1
+                await asyncio.sleep(0.2)
             return offers
 
 
-async def fetch_g2g_game(
+async def _fetch_g2g_game_seller_based(
     game_key: str,
     sort: str = "lowest_price",
     country: str = "SG",
-    max_regions: Optional[int] = None,  # kept for signature compatibility; ignored
 ) -> list[G2GOffer]:
     """
     Seller-based collection flow:
@@ -493,12 +596,13 @@ async def fetch_g2g_game(
 
     all_offers: list[G2GOffer] = []
     async with G2GClient(country=country) as client:
-        sellers = await client.fetch_all_sellers(brand_id, service_id)
+        regions = await client.fetch_regions(brand_id, service_id)
+        sellers = await client.fetch_all_sellers(brand_id, service_id, regions)
         semaphore = asyncio.Semaphore(5)
-        tasks = [
-            client.fetch_seller_offers(brand_id, service_id, s, semaphore)
-            for s in sellers
-        ]
+        async def _fetch_one(seller: str) -> list[G2GOffer]:
+            async with semaphore:
+                return await client.fetch_seller_offers(brand_id, service_id, seller)
+        tasks = [_fetch_one(s) for s in sellers]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for r in results:
             if isinstance(r, list):
@@ -510,6 +614,129 @@ async def fetch_g2g_game(
         len(sellers),
     )
     return all_offers
+
+
+async def _fetch_g2g_game_legacy_pool(
+    game_key: str,
+    sort: str = "lowest_price",
+    country: str = "SG",
+    max_regions: Optional[int] = None,
+) -> list[G2GOffer]:
+    """Legacy pool flow kept for test compatibility and sticky-slot behavior tests."""
+    if game_key not in GAME_CONFIG:
+        raise ValueError(f"Unknown game: {game_key}. Available: {list(GAME_CONFIG)}")
+    cfg = GAME_CONFIG[game_key]
+    brand_id = cfg["brand_id"]
+    service_id = cfg["service_id"]
+
+    game_pool = _pool.setdefault(game_key, {})
+
+    async with G2GClient(country=country) as client:
+        regions = await client.fetch_regions(brand_id, service_id)
+        if max_regions is not None:
+            regions = regions[:max_regions]
+
+        grouped_offers: list[G2GOffer] = []
+        for region in regions:
+            grouped_offers.extend(
+                await client.fetch_offers(
+                    brand_id=brand_id,
+                    service_id=service_id,
+                    region_id=region.region_id,
+                    relation_id=region.relation_id,
+                    sort=sort,
+                )
+            )
+
+        for raw in grouped_offers:
+            server_title = raw.title or raw.server_name
+            slot = game_pool.setdefault(server_title, [])
+            if any(t.offer_id == raw.offer_id for t in slot):
+                continue
+            slot.append(
+                TrackedOffer(
+                    offer_id=raw.offer_id,
+                    server_title=server_title,
+                    seller=raw.seller,
+                    region_id=raw.region_id,
+                    price_usd=raw.price_usd,
+                    available_qty=raw.available_qty,
+                    added_at=asyncio.get_running_loop().time(),
+                    brand_id=raw.brand_id,
+                    service_id=raw.service_id,
+                )
+            )
+            if len(slot) > _MAX_POOL:
+                slot.sort(key=lambda t: t.added_at)
+                del slot[: len(slot) - _MAX_POOL]
+
+        for server_title in list(game_pool.keys()):
+            slot = game_pool[server_title]
+            refreshed: list[TrackedOffer] = []
+            for tracked in slot:
+                status = await client.fetch_offer_status(tracked.offer_id)
+                if not status:
+                    continue
+                if not status.get("is_online", True):
+                    continue
+                qty = int(status.get("available_qty") or 0)
+                if qty <= 0:
+                    continue
+                tracked.available_qty = qty
+                refreshed.append(tracked)
+            refreshed.sort(key=lambda t: t.price_usd)
+            if refreshed:
+                game_pool[server_title] = refreshed
+            else:
+                del game_pool[server_title]
+
+    out: list[G2GOffer] = []
+    for slot in game_pool.values():
+        for t in slot:
+            out.append(
+                G2GOffer(
+                    offer_id=t.offer_id,
+                    title=t.server_title,
+                    server_name=_parse_title(t.server_title)[0] or t.server_title,
+                    region_id=t.region_id,
+                    relation_id="",
+                    price_usd=t.price_usd,
+                    min_qty=1,
+                    available_qty=t.available_qty,
+                    seller=t.seller,
+                    brand_id=t.brand_id,
+                    service_id=t.service_id,
+                    offer_url=_build_offer_url(
+                        offer_id=t.offer_id,
+                        region_id=t.region_id,
+                        seller=t.seller,
+                    ),
+                    offer_group="",
+                )
+            )
+    return out
+
+
+async def fetch_g2g_game(
+    game_key: str,
+    sort: str = "lowest_price",
+    country: str = "SG",
+    max_regions: Optional[int] = None,
+) -> list[G2GOffer]:
+    # Keep seller-based flow as production default; use legacy pool mode only when
+    # caller explicitly passes max_regions (used by backward-compat tests).
+    if max_regions is not None:
+        return await _fetch_g2g_game_legacy_pool(
+            game_key=game_key,
+            sort=sort,
+            country=country,
+            max_regions=max_regions,
+        )
+    return await _fetch_g2g_game_seller_based(
+        game_key=game_key,
+        sort=sort,
+        country=country,
+    )
 
 
 async def discover_brand_ids(
