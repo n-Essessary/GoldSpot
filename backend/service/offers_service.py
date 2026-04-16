@@ -328,6 +328,17 @@ def _update_sticky_slots(new_offers: list[Offer]) -> None:
         for slot in slots:
             if slot.offer_id in incoming_ids:
                 slot.last_seen_cycle = current_cycle
+                # Also update price and fetched_at from latest data
+                matching = next(
+                    (o for o in incoming.get(key, [])
+                     if o.id.removeprefix("g2g_") == slot.offer_id),
+                    None
+                )
+                if matching:
+                    slot.price_per_1k = matching.price_per_1k
+                    slot.amount_gold = matching.amount_gold
+                    slot.raw_price = matching.raw_price
+                    slot.fetched_at = matching.fetched_at
 
         # Evict stale slots
         slots = [s for s in slots if (current_cycle - s.last_seen_cycle) < STICKY_TTL_CYCLES]
