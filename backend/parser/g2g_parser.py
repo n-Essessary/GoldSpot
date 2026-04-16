@@ -1,16 +1,15 @@
 """
 g2g_parser.py — Production-ready G2G parser.
 
-Verified pipeline:
-  1) /offer/keyword_relation/region  -> region_id + relation_id
-  2) /offer/search                   -> offers (username, unit_price_in_usd, qty)
+Seller-based strategy:
+  1) /offer/keyword_relation/region  -> regions (region_id, relation_id)
+  2) /offer/search (all regions, paginated) -> unique seller usernames
+  3) /offer/search?seller={username}  -> individual offers per seller
 """
 
 import asyncio
-import json
 import logging
 import re
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -259,24 +258,6 @@ def _parse_title(title: str) -> tuple[str, str, str, str]:
     return server_name, region, version, faction
 
 
-@dataclass
-class TrackedOffer:
-    offer_id:      str
-    server_title:  str    # raw G2G title e.g. "Spineshatter [EU - Anniversary] - Horde"
-    seller:        str
-    region_id:     str
-    price_usd:     float  # updated each cycle by System 2
-    available_qty: int
-    added_at:      float  # time.monotonic() when added
-    brand_id:      str
-    service_id:    str
-
-
-# key = game_key → server_title → list of TrackedOffer, max 5, sorted price ASC
-_pool: dict[str, dict[str, list[TrackedOffer]]] = {}
-_MAX_POOL = 5
-
-
 class G2GClient:
     def __init__(self, country: str = "SG", currency: str = "USD"):
         self.country = country
@@ -327,134 +308,45 @@ class G2GClient:
         )
         return regions
 
-    async def fetch_offers(
-        self,
-        brand_id: str,
-        service_id: str,
-        relation_id: str,
-        sort: str = "lowest_price",
-        page_size: int = 48,
-    ) -> list[G2GOffer]:
-        all_offers: list[G2GOffer] = []
-        page = 1
-        max_pages = 20  # increased from 10; grouped view has more pages per region
-
-        while page <= max_pages:
-            resp = await self._client.get(
-                f"{BASE}/offer/search",
-                params={
-                    "brand_id": brand_id,
-                    "service_id": service_id,
-                    "relation_id": relation_id,
-                    "country": self.country,
-                    "currency": self.currency,
-                    "sort": sort,
-                    "page": page,
-                    "page_size": page_size,
-                    "include_offline": "0",    # online sellers only
-                    "group_by": "keyword_id",  # one best-price offer per server×faction
-                },
-            )
-            resp.raise_for_status()
-
-            results = resp.json().get("payload", {}).get("results", [])
-
-            if not results:
-                break
-
-            for o in results:
-                try:
-                    # grouped response: use converted_unit_price (per-unit),
-                    # NOT unit_price_in_usd (which is per-lot in grouped mode)
-                    price_usd = float(o.get("converted_unit_price") or 0)
-                    if price_usd <= 0:
-                        continue
-                    all_offers.append(
-                        G2GOffer(
-                            offer_id=o.get("offer_id", ""),
-                            title=o.get("title", ""),
-                            server_name=o.get("title", ""),
-                            region_id=o.get("region_id", ""),
-                            relation_id=o.get("relation_id", ""),
-                            price_usd=price_usd,
-                            min_qty=int(o.get("min_qty") or 1),
-                            available_qty=int(o.get("available_qty") or 0),
-                            seller=(o.get("username") or "").strip(),
-                            brand_id=o.get("brand_id", ""),
-                            service_id=o.get("service_id", ""),
-                            raw=o,
-                        )
-                    )
-                except (ValueError, TypeError):
-                    continue
-
-            logger.debug(
-                "G2G grouped: relation_id=%s page=%d → %d offers (total %d)",
-                relation_id, page, len(results), len(all_offers),
-            )
-
-            if len(results) < page_size:
-                break
-
-            page += 1
-            await asyncio.sleep(0.2)
-
-        return all_offers
-
-    async def fetch_offer_status(
-        self,
-        offer_id: str,
-    ) -> dict | None:
-        """
-        Fetch current status of a single offer by offer_id.
-        Returns payload dict if offer is live, None if deleted or error.
-        """
-        try:
-            resp = await _http_get_retry(
-                self._client,
-                f"{BASE}/offer/{offer_id}",
-                params={"country": self.country, "currency": self.currency},
-            )
-            data = resp.json()
-            # Deleted offer returns code 4041
-            if data.get("code") == 4041:
-                return None
-            payload = data.get("payload", data)
-            if not payload or not payload.get("offer_id"):
-                return None
-            return payload
-        except Exception as e:
-            logger.debug("G2G offer_status offer_id=%s error: %s", offer_id, e)
-            return None
-
     async def fetch_all_sellers(
         self,
         brand_id: str,
         service_id: str,
-        regions: list[G2GRegion],
     ) -> list[str]:
         """
-        Собирает ВСЕХ продавцов — с пагинацией по всем страницам каждого региона.
-        Без include_offline=0 — офлайн-продавцы тоже нужны для полного списка.
+        Discover the full set of seller usernames across every region by paginating
+        /offer/search for each region's relation_id and collecting `username` values.
+
+        Behavior:
+          - Calls fetch_regions() internally to obtain the region list.
+          - For each region: paginate ALL pages (page_size=48, max_pages=10).
+          - Extract `o.get("username")` from each offer result.
+          - Deduplicate across all regions → return list[str] of unique usernames.
+          - 0.2s delay between pages within a region.
+          - 0.35s delay between regions.
         """
+        regions = await self.fetch_regions(brand_id, service_id)
         sellers: set[str] = set()
 
-        for region in regions:
+        page_size = 48
+        max_pages = 10
+
+        for i, region in enumerate(regions):
             page = 1
-            while True:
+            while page <= max_pages:
                 try:
                     resp = await _http_get_retry(
                         self._client,
                         f"{BASE}/offer/search",
                         params={
-                            "brand_id":   brand_id,
-                            "service_id": service_id,
+                            "brand_id":    brand_id,
+                            "service_id":  service_id,
                             "relation_id": region.relation_id,
-                            "country":    self.country,
-                            "currency":   self.currency,
-                            "sort":       "lowest_price",
-                            "page":       page,
-                            "page_size":  48,
+                            "country":     self.country,
+                            "currency":    self.currency,
+                            "sort":        "lowest_price",
+                            "page":        page,
+                            "page_size":   page_size,
                         },
                     )
                     results = resp.json().get("payload", {}).get("results", [])
@@ -472,12 +364,20 @@ class G2GClient:
                     if u:
                         sellers.add(u)
 
-                if len(results) < 48:
+                if len(results) < page_size:
                     break
-                page += 1
-                await asyncio.sleep(0.2)  # Task 1 delay policy: 0.2s between region page requests
 
-        logger.info("G2G discovered %d unique sellers", len(sellers))
+                page += 1
+                await asyncio.sleep(0.2)
+
+            if i < len(regions) - 1:
+                await asyncio.sleep(0.35)
+
+        logger.info(
+            "G2G: discovered %d unique sellers across %d regions",
+            len(sellers),
+            len(regions),
+        )
         return sorted(sellers)
 
     async def fetch_seller_offers(
@@ -485,305 +385,126 @@ class G2GClient:
         brand_id: str,
         service_id: str,
         seller: str,
-        page_size: int = 48,
+        semaphore: asyncio.Semaphore,
     ) -> list[G2GOffer]:
         """
-        Возвращает все индивидуальные офферы конкретного продавца.
+        Fetch all individual offers for a single seller.
 
-        ?seller={username} → is_group_display=false, stable offer_id,
-        реальный available_qty > 0, URL = /offer/{offer_id}.
+        GET /offer/search?seller={username} — no relation_id filter (the seller knows
+        their own servers). Returns only offers with available_qty > 0 and price_usd > 0.
+
+        On any exception (HTTPStatusError, timeout, etc.) → log warning, return [].
+        Concurrency is bounded by the caller-provided semaphore.
         """
-        all_offers: list[G2GOffer] = []
-        page = 1
-        max_pages = 10
-
-        while page <= max_pages:
+        async with semaphore:
             try:
                 resp = await _http_get_retry(
                     self._client,
                     f"{BASE}/offer/search",
                     params={
-                        "brand_id":        brand_id,
-                        "service_id":      service_id,
-                        "country":         self.country,
-                        "currency":        self.currency,
-                        "sort":            "lowest_price",
-                        "include_offline": "0",
-                        "seller":          seller,
-                        "page":            page,
-                        "page_size":       page_size,
+                        "brand_id":   brand_id,
+                        "service_id": service_id,
+                        "country":    self.country,
+                        "currency":   self.currency,
+                        "sort":       "lowest_price",
+                        "seller":     seller,
                     },
                 )
                 results = resp.json().get("payload", {}).get("results", [])
             except Exception as e:
-                logger.warning("G2G seller=%s page=%d error: %s", seller, page, e)
-                break
+                logger.warning("G2G: seller %s fetch failed: %s", seller, e)
+                return []
 
-            if not results:
-                break
-
+            offers: list[G2GOffer] = []
             for o in results:
                 try:
-                    offer_id  = o.get("offer_id", "")
-                    raw_title = o.get("title", "")
+                    price_usd = float(
+                        o.get("converted_unit_price")
+                        or o.get("unit_price_in_usd")
+                        or 0
+                    )
                     qty = int(o.get("available_qty") or 0)
-                    if qty <= 0:
-                        qty = int(o.get("min_qty") or 1)
-                    # _parse_title returns (server_name, source_region, faction);
-                    # only server_name is needed here for G2GOffer.server_name.
+                    if qty <= 0 or price_usd <= 0:
+                        continue
+
+                    offer_id = o.get("offer_id", "")
+                    raw_title = o.get("title", "")
+                    username = (o.get("username") or "").strip()
+                    region_id = o.get("region_id", "")
                     server_name_parsed = _parse_title(raw_title)[0] or raw_title
-                    all_offers.append(G2GOffer(
-                        offer_id=offer_id,
-                        title=raw_title,
-                        server_name=server_name_parsed,
-                        region_id=o.get("region_id", ""),
-                        relation_id=o.get("relation_id", ""),
-                        price_usd=float(o.get("converted_unit_price") or o.get("unit_price_in_usd") or 0),
-                        min_qty=int(o.get("min_qty") or 1),
-                        available_qty=qty,
-                        seller=(o.get("username") or "").strip(),
-                        brand_id=o.get("brand_id", brand_id),
-                        service_id=o.get("service_id", service_id),
-                        offer_url=_build_offer_url(
+
+                    offers.append(
+                        G2GOffer(
                             offer_id=offer_id,
-                            region_id=o.get("region_id", ""),
-                            seller=(o.get("username") or "").strip(),
-                        ),
-                        offer_group=o.get("offer_group", ""),
-                        raw=o,
-                    ))
-                except (ValueError, TypeError):
+                            title=raw_title,
+                            server_name=server_name_parsed,
+                            region_id=region_id,
+                            relation_id=o.get("relation_id", ""),
+                            price_usd=price_usd,
+                            min_qty=int(o.get("min_qty") or 1),
+                            available_qty=qty,
+                            seller=username,
+                            brand_id=o.get("brand_id", brand_id),
+                            service_id=o.get("service_id", service_id),
+                            offer_url=_build_offer_url(
+                                offer_id=offer_id,
+                                region_id=region_id,
+                                seller=username,
+                            ),
+                            offer_group=o.get("offer_group", ""),
+                            raw=o,
+                        )
+                    )
+                except (ValueError, TypeError) as e:
+                    logger.debug(
+                        "G2G: offer parse error seller=%s offer_id=%s: %s",
+                        seller,
+                        o.get("offer_id", ""),
+                        e,
+                    )
                     continue
 
-            if len(results) < page_size:
-                break
-
-            page += 1
-            await asyncio.sleep(0.2)
-
-        return all_offers
-
-
-async def _discover_sellers(
-    client: "G2GClient",
-    brand_id: str,
-    service_id: str,
-    regions: list[G2GRegion],
-    delay: float = 0.3,
-) -> list[str]:
-    """
-    Собирает уникальные имена продавцов из group-display офферов по всем регионам.
-
-    По каждому region.relation_id делает один запрос page_size=48 (group entries).
-    Каждый group entry содержит поле username продавца с cheapest ценой.
-    Полученный список используется для последующего fetch_seller_offers().
-    """
-    sellers: set[str] = set()
-    for region in regions:
-        try:
-            resp = await _http_get_retry(
-                client._client,
-                f"{BASE}/offer/search",
-                params={
-                    "brand_id":        brand_id,
-                    "service_id":      service_id,
-                    "relation_id":     region.relation_id,
-                    "country":         client.country,
-                    "currency":        client.currency,
-                    "sort":            "lowest_price",
-                    "include_offline": "0",
-                    "page":            1,
-                    "page_size":       48,
-                },
-            )
-            results = resp.json().get("payload", {}).get("results", [])
-            for o in results:
-                u = (o.get("username") or "").strip()
-                if u:
-                    sellers.add(u)
-        except Exception as e:
-            logger.warning("G2G discover sellers region=%s: %s", region.region_id, e)
-        await asyncio.sleep(delay)
-
-    logger.info("G2G discovered %d unique sellers", len(sellers))
-    return sorted(sellers)
+            return offers
 
 
 async def fetch_g2g_game(
     game_key: str,
     sort: str = "lowest_price",
     country: str = "SG",
-    max_regions: Optional[int] = None,
+    max_regions: Optional[int] = None,  # kept for signature compatibility; ignored
 ) -> list[G2GOffer]:
     """
-    Two-system architecture:
-      System 1 — Scout: grouped search → cheapest online offer per server×faction
-                        → hand off new offer_ids to pool (max 5 per slot).
-      System 2 — Tracker: GET /offer/{offer_id} for each tracked offer in parallel;
-                          refresh price/qty, evict deleted/offline offers, sort ASC.
+    Seller-based collection flow:
+      1) Discover all unique seller usernames across every region.
+      2) For each seller → fetch their individual offers in parallel,
+         bounded by asyncio.Semaphore(5).
+      3) Aggregate all offers; drop failed seller tasks silently.
     """
     if game_key not in GAME_CONFIG:
         raise ValueError(f"Unknown game: {game_key}. Available: {list(GAME_CONFIG)}")
     cfg = GAME_CONFIG[game_key]
     brand_id = cfg["brand_id"]
     service_id = cfg["service_id"]
-    server_pool = _pool.setdefault(game_key, {})
 
-    # ══════════════════════════════════════════════════════════════
-    # SYSTEM 1 — Scout: grouped search → discover cheapest per slot
-    # ══════════════════════════════════════════════════════════════
-    grouped_offers: list[G2GOffer] = []
+    all_offers: list[G2GOffer] = []
     async with G2GClient(country=country) as client:
-        regions = await client.fetch_regions(brand_id, service_id)
-        if max_regions:
-            regions = regions[:max_regions]
-        for i, region in enumerate(regions):
-            try:
-                offers = await client.fetch_offers(
-                    brand_id=brand_id,
-                    service_id=service_id,
-                    relation_id=region.relation_id,
-                    sort=sort,
-                )
-                grouped_offers.extend(offers)
-            except httpx.HTTPStatusError as e:
-                logger.warning("G2G scout HTTP error region %s: %s", region.region_id, e)
-            if i < len(regions) - 1:
-                await asyncio.sleep(0.3)
-    logger.info("G2G system1 scout: %d grouped offers", len(grouped_offers))
+        sellers = await client.fetch_all_sellers(brand_id, service_id)
+        semaphore = asyncio.Semaphore(5)
+        tasks = [
+            client.fetch_seller_offers(brand_id, service_id, s, semaphore)
+            for s in sellers
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, list):
+                all_offers.extend(r)
 
-    # Hand off new cheapest offers to pool
-    for o in grouped_offers:
-        if not o.offer_id or not o.title or not o.seller:
-            continue
-        slot = server_pool.setdefault(o.title, [])
-        # Add only if offer_id not already tracked in this slot
-        tracked_ids = {t.offer_id for t in slot}
-        if o.offer_id not in tracked_ids:
-            if len(slot) >= _MAX_POOL:
-                # Evict oldest entry to make room
-                slot.sort(key=lambda t: t.added_at)
-                evicted = slot.pop(0)
-                logger.debug(
-                    "G2G pool evict oldest %s from slot %.50s",
-                    evicted.seller, o.title,
-                )
-            slot.append(TrackedOffer(
-                offer_id=o.offer_id,
-                server_title=o.title,
-                seller=o.seller,
-                region_id=o.region_id,
-                price_usd=o.price_usd,
-                available_qty=o.available_qty,
-                added_at=time.monotonic(),
-                brand_id=brand_id,
-                service_id=service_id,
-            ))
-            logger.debug("G2G pool add %s to slot %.50s", o.seller, o.title)
-
-    # ══════════════════════════════════════════════════════════════
-    # SYSTEM 2 — Tracker: monitor each tracked offer individually
-    # ══════════════════════════════════════════════════════════════
-    all_tracked: list[TrackedOffer] = [
-        t for slot in server_pool.values() for t in slot
-    ]
-    # Fetch status for all tracked offers in parallel batches
-    BATCH = 10
-    BATCH_DELAY = 0.3
-    status_map: dict[str, dict | None] = {}
-    async with G2GClient(country=country) as client:
-        for i in range(0, len(all_tracked), BATCH):
-            batch = all_tracked[i:i + BATCH]
-            results = await asyncio.gather(
-                *[client.fetch_offer_status(t.offer_id) for t in batch],
-                return_exceptions=True,
-            )
-            for tracked, result in zip(batch, results):
-                if isinstance(result, Exception):
-                    logger.warning(
-                        "G2G tracker offer_id=%s error: %s",
-                        tracked.offer_id, result,
-                    )
-                    status_map[tracked.offer_id] = tracked.__dict__  # keep as-is on error
-                else:
-                    status_map[tracked.offer_id] = result
-            if i + BATCH < len(all_tracked):
-                await asyncio.sleep(BATCH_DELAY)
-    logger.info("G2G system2 tracker: %d offers monitored", len(all_tracked))
-
-    # Update pool: refresh prices, remove dead offers
-    for server_title, slot in list(server_pool.items()):
-        for tracked in list(slot):
-            payload = status_map.get(tracked.offer_id)
-            if payload is None:
-                # Offer deleted or error — remove
-                slot.remove(tracked)
-                logger.debug(
-                    "G2G pool remove %s from slot %.50s — deleted/gone",
-                    tracked.seller, server_title,
-                )
-                continue
-            is_online = payload.get("is_online", True)
-            status = payload.get("status", "live")
-            if not is_online or status != "live":
-                slot.remove(tracked)
-                logger.debug(
-                    "G2G pool remove %s from slot %.50s — offline/inactive",
-                    tracked.seller, server_title,
-                )
-                continue
-            # Price intentionally NOT updated from /offer/{id} —
-            # that endpoint returns a different price context than grouped search.
-            # Price is set correctly by System 1 (grouped converted_unit_price) and kept.
-            tracked.available_qty = int(payload.get("available_qty") or tracked.available_qty)
-        # Sort slot by price ASC
-        slot.sort(key=lambda t: t.price_usd)
-        # Clean up empty slots
-        if not slot:
-            del server_pool[server_title]
-
-    # ══════════════════════════════════════════════════════════════
-    # Build output: convert pool to G2GOffer list
-    # Grouped offers fill gaps for any server not yet in pool
-    # ══════════════════════════════════════════════════════════════
-    seen: set[str] = set()
-    combined: list[G2GOffer] = []
-    # Pool offers first — these have live-updated prices
-    for server_title, slot in server_pool.items():
-        for tracked in slot:
-            if tracked.offer_id in seen:
-                continue
-            seen.add(tracked.offer_id)
-            combined.append(G2GOffer(
-                offer_id=tracked.offer_id,
-                title=tracked.server_title,
-                server_name=tracked.server_title,
-                region_id=tracked.region_id,
-                relation_id="",
-                price_usd=tracked.price_usd,
-                min_qty=1,
-                available_qty=tracked.available_qty,
-                seller=tracked.seller,
-                brand_id=tracked.brand_id,
-                service_id=tracked.service_id,
-                offer_url=_build_offer_url(
-                    offer_id=tracked.offer_id,
-                    region_id=tracked.region_id,
-                    seller=tracked.seller,
-                ),
-            ))
-    # Grouped fallback for servers not yet in pool
-    for o in grouped_offers:
-        key = o.offer_id if o.offer_id else f"{o.seller}:{o.title}"
-        if key not in seen:
-            seen.add(key)
-            combined.append(o)
-    pool_offer_count = sum(len(s) for s in server_pool.values())
     logger.info(
-        "G2G total: %d offers (%d from pool, %d from grouped fallback)",
-        len(combined), pool_offer_count, len(combined) - pool_offer_count,
+        "G2G: %d raw offers collected from %d sellers",
+        len(all_offers),
+        len(sellers),
     )
-    return combined
+    return all_offers
 
 
 async def discover_brand_ids(
@@ -889,38 +610,11 @@ def _dedupe(offers: list[Offer]) -> list[Offer]:
 
 
 async def fetch_offers() -> list[Offer]:
-    """
-    Entrypoint для offers_service._run_g2g_loop().
-    Парсит WoW Classic Era / Seasonal / TBC Anniversary (один brand_id).
-    """
     fetched_at = datetime.now(timezone.utc)
     try:
-        raw_offers = await fetch_g2g_game("wow_classic_era_seasonal_anniversary")
-
-        total         = len(raw_offers)
-        skipped_price = 0
-        skipped_qty   = 0
-        ok            = 0
-        converted: list[Offer] = []
-
-        for r in raw_offers:
-            if r.price_usd <= 0:
-                skipped_price += 1
-                continue
-            # Seller-based path may still occasionally return qty=0 for edge sellers.
-            # Keep these offers with minimal amount to avoid dropping valid URLs.
-            offer = _to_offer(r, fetched_at, skip_qty_check=True)
-            if offer is None:
-                skipped_qty += 1
-            else:
-                ok += 1
-                converted.append(offer)
-
-        logger.info(
-            "G2G _to_offer: total=%d skipped_price=%d skipped_qty=%d ok=%d",
-            total, skipped_price, skipped_qty, ok,
-        )
-        return _dedupe(converted)
+        raw_offers = await fetch_g2g_game("wow_classic_era")
+        offers = [o for o in (_to_offer(r, fetched_at) for r in raw_offers) if o is not None]
+        return _dedupe(offers)
     except Exception:
         logger.exception("G2G parser failed")
         return []
