@@ -70,6 +70,12 @@ _cache_initialized: dict[str, bool]          = {"funpay": False, "g2g": False}
 _quarantine:     list[dict] = []
 _QUARANTINE_MAX: int        = 500
 
+# ── Sticky slot tracker — G2G only ────────────────────────────────────────────
+# Key: "server_name::faction" (e.g. "Spineshatter::Alliance")
+# Value: ordered list of Offer, index 0 = top-1, up to 5 total
+_realm_slots: dict[str, list[Offer]] = {}
+_SLOT_MAX = 5
+
 FUNPAY_INTERVAL = 60
 G2G_INTERVAL    = 30
 
@@ -152,6 +158,55 @@ def _add_to_quarantine(items: list) -> None:
 def get_quarantine() -> list[dict]:
     """Return quarantine log (newest-first) for /admin/quarantine endpoint."""
     return list(reversed(_quarantine))
+
+
+# ── Sticky slot tracker helpers (G2G only) ────────────────────────────────────
+
+def _update_realm_slots(fresh_offers: list[Offer]) -> None:
+    """
+    Update sticky slot tracker from fresh G2G offers.
+    Only processes offers with non-empty server_name (realm-level offers).
+    FunPay offers never enter this function.
+    """
+    # 1. Build lookup: offer_id → Offer from fresh data
+    fresh_by_id: dict[str, Offer] = {o.id: o for o in fresh_offers}
+
+    # 2. Find top-1 cheapest per "server_name::faction" key
+    top1: dict[str, Offer] = {}
+    for o in fresh_offers:
+        if not o.server_name:
+            continue
+        key = f"{o.server_name}::{o.faction}"
+        if key not in top1 or o.price_per_1k < top1[key].price_per_1k:
+            top1[key] = o
+
+    # 3. For each key with a top-1 offer:
+    for key, new_top in top1.items():
+        slots = _realm_slots.get(key, [])
+        # Refresh existing sticky slots from fresh data (update price/qty)
+        # If offer_id no longer exists in fresh data → remove slot
+        refreshed = [fresh_by_id[s.id] for s in slots if s.id in fresh_by_id]
+
+        # Check if top-1 changed
+        if refreshed and refreshed[0].id == new_top.id:
+            # Top-1 unchanged — just refresh prices
+            _realm_slots[key] = refreshed
+        else:
+            # New top-1 appeared
+            # Remove new_top from sticky slots if it was already tracked
+            refreshed = [s for s in refreshed if s.id != new_top.id]
+            # Push new_top to front, trim to _SLOT_MAX
+            _realm_slots[key] = [new_top] + refreshed[:_SLOT_MAX - 1]
+
+    # 4. Clean up keys that no longer have any offers in fresh data
+    dead_keys = [k for k in _realm_slots if k not in top1]
+    for k in dead_keys:
+        del _realm_slots[k]
+
+
+def get_realm_slots() -> dict[str, list[Offer]]:
+    """Return current sticky slot state. Read-only copy."""
+    return dict(_realm_slots)
 
 
 def _detect_version(text: str) -> str:
@@ -685,6 +740,7 @@ async def _run_g2g_loop() -> None:
                     )
                 else:
                     _cache["g2g"] = offers
+                    _update_realm_slots(offers)
                     _cache_initialized["g2g"] = True
                     _cache_version["g2g"] += 1
                     _last_update["g2g"] = datetime.now(timezone.utc)
@@ -832,6 +888,15 @@ def get_offers(
             o for o in result
             if _clean(o.server_name) == _clean(server_name)
         ]
+        # Inject sticky slots for this realm
+        seen_ids = {o.id for o in result}
+        factions_filter = [faction.capitalize()] if faction else ["Alliance", "Horde"]
+        for f in factions_filter:
+            key = f"{server_name}::{f}"
+            for slot_offer in _realm_slots.get(key, []):
+                if slot_offer.id not in seen_ids:
+                    result.append(slot_offer)
+                    seen_ids.add(slot_offer.id)
 
     if faction:
         result = [o for o in result if o.faction.lower() == faction.lower()]
