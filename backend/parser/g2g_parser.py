@@ -71,16 +71,18 @@ async def _http_get_retry(client: httpx.AsyncClient, url: str, **kwargs) -> http
     raise RuntimeError("_http_get_retry: exhausted without response")
 
 
-def _build_offer_url(
-    offer_id: str,
-    region_id: str,
-    seller: str,
-) -> str:
-    if not offer_id:
+def _build_offer_url(offer_group: str, region_id: str, sort: str) -> str:
+    """Build G2G group buy page URL from offer_group, region and sort."""
+    if not offer_group or not region_id:
         return ""
+    og = offer_group.lstrip("/")
+    prefix = re.sub(r"_\d+$", "", og)
+    fa = f"{prefix}:{og}"
+    from urllib.parse import quote
+    fa_encoded = quote(fa, safe="")
     return (
-        "https://www.g2g.com/categories/wow-classic-era-vanilla-gold"
-        f"/offer/{offer_id}?region_id={region_id}&seller={seller}"
+        "https://www.g2g.com/categories/wow-classic-era-vanilla-gold/offer/group"
+        f"?fa={fa_encoded}&region_id={region_id}&sort={sort}&include_offline=0"
     )
 
 
@@ -142,6 +144,7 @@ class G2GOffer:
     seller: str
     brand_id: str
     service_id: str
+    sort: str = ""
     offer_url: str | None = None
     offer_group: str = ""
     raw: dict = field(default_factory=dict, repr=False)
@@ -319,9 +322,9 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
                 raw_title = o.get("title", "")
 
                 offer_url = _build_offer_url(
-                    offer_id=offer_id,
+                    offer_group=o.get("offer_group", ""),
                     region_id=region_id,
-                    seller=seller,
+                    sort=sort,
                 )
 
                 offers.append(G2GOffer(
@@ -336,8 +339,9 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
                     seller=seller,
                     brand_id=o.get("brand_id", _BRAND_ID),
                     service_id=o.get("service_id", _SERVICE_ID),
+                    sort=sort,
                     offer_url=offer_url,
-                    offer_group="",
+                    offer_group=o.get("offer_group", ""),
                     raw=dict(o),
                 ))
             except (ValueError, TypeError):
@@ -403,9 +407,7 @@ def _to_offer(
     # Extract only server_name and faction — NOT version (canonical resolves that)
     server_name, _source_region, _raw_version, faction = _parse_title(raw.title)
 
-    # Unique ID: offer_group (strip leading "/") + seller
-    raw_id = raw.offer_group.lstrip("/") if raw.offer_group else raw.offer_id
-    offer_id_key = f"g2g_{raw_id}_{raw.seller}" if raw_id else f"g2g_{raw.offer_id}"
+    offer_id_key = f"g2g_{raw.offer_id}"
 
     try:
         return Offer(
@@ -426,7 +428,7 @@ def _to_offer(
             lot_size=1,
             # ── amount & metadata ─────────────────────────────────────────────
             amount_gold=raw.available_qty if raw.available_qty > 0 else 1,
-            seller=raw.seller or "unknown",
+            seller="Lowest Price" if raw.sort == "lowest_price" else "Recommended",
             offer_url=raw.offer_url or None,
             updated_at=fetched_at,
             fetched_at=fetched_at,
