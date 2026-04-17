@@ -254,15 +254,17 @@ _MAX_PAGES = 10
 
 
 async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
-    """Paginate /offer/search for a single sort mode and return all G2GOffer objects.
+    """Fetch offers via two-phase strategy for a single sort mode.
 
-    Stops when a page returns fewer than _PAGE_SIZE results, an empty result,
-    or after _MAX_PAGES pages (safety cap).
-    Price is always taken from unit_price_in_usd.
+    Phase 1 (discovery): paginate grouped /offer/search and collect unique
+    (offer_group, region_id) pairs.
+    Phase 2 (real price): request concrete offers per discovered pair using
+    filter_attr+region_id with group=0, include_offline=0, page_size=1.
     """
-    offers: list[G2GOffer] = []
+    discovered_pairs: dict[tuple[str, str], None] = {}
     page = 1
 
+    # Phase 1: discovery (grouped results, price is not trusted)
     while page <= _MAX_PAGES:
         params = {
             "seo_term":   _SEO_TERM,
@@ -313,39 +315,11 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
             break
 
         for o in results:
-            try:
-                # ALWAYS use unit_price_in_usd — never converted_unit_price
-                price_usd = float(o.get("unit_price_in_usd") or 0)
-                offer_id  = o.get("offer_id", "")
-                region_id = o.get("region_id", "")
-                seller    = (o.get("username") or "").strip()
-                raw_title = o.get("title", "")
-
-                offer_url = _build_offer_url(
-                    offer_group=o.get("offer_group", ""),
-                    region_id=region_id,
-                    sort=sort,
-                )
-
-                offers.append(G2GOffer(
-                    offer_id=offer_id,
-                    title=raw_title,
-                    server_name=_parse_title(raw_title)[0] or raw_title,
-                    region_id=region_id,
-                    relation_id=o.get("relation_id", ""),
-                    price_usd=price_usd if price_usd > 0 else 0,
-                    min_qty=int(o.get("min_qty") or 1),
-                    available_qty=int(o.get("available_qty") or 0),
-                    seller=seller,
-                    brand_id=o.get("brand_id", _BRAND_ID),
-                    service_id=o.get("service_id", _SERVICE_ID),
-                    sort=sort,
-                    offer_url=offer_url,
-                    offer_group=o.get("offer_group", ""),
-                    raw=dict(o),
-                ))
-            except (ValueError, TypeError):
+            offer_group = (o.get("offer_group") or "").strip()
+            region_id = (o.get("region_id") or "").strip()
+            if not offer_group or not region_id:
                 continue
+            discovered_pairs[(offer_group, region_id)] = None
 
         logger.debug("G2G sort=%s page=%d → %d results", sort, page, len(results))
 
@@ -355,6 +329,104 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
         page += 1
         await asyncio.sleep(0.2)
 
+    # Phase 2: fetch real offers concurrently (correct prices)
+    sem = asyncio.Semaphore(20)
+    pair_list = list(discovered_pairs.keys())
+
+    async def _fetch_real_offer(offer_group: str, region_id: str) -> Optional[G2GOffer]:
+        og = offer_group.lstrip("/")
+        prefix = re.sub(r"_\d+$", "", og)
+        fa = f"{prefix}:{og}"
+
+        params = {
+            "seo_term":        _SEO_TERM,
+            "filter_attr":     fa,
+            "region_id":       region_id,
+            "sort":            sort,
+            "group":           "0",
+            "include_offline": "0",
+            "page_size":       1,
+            "page":            1,
+            "service_id":      _SERVICE_ID,
+            "brand_id":        _BRAND_ID,
+            "currency":        "USD",
+            "country":         "SG",
+            "v":               "v2",
+        }
+
+        async with sem:
+            try:
+                resp = await _http_get_retry(client, f"{BASE}/offer/search", params=params)
+                items = resp.json().get("payload", {}).get("results", [])
+            except Exception as exc:
+                logger.warning(
+                    "G2G phase2 fetch failed sort=%s offer_group=%s region_id=%s: %s",
+                    sort,
+                    offer_group,
+                    region_id,
+                    exc,
+                )
+                return None
+
+        if not items:
+            return None
+
+        item = items[0]
+        try:
+            price_usd = float(item.get("unit_price_in_usd") or 0)
+            offer_id = item.get("offer_id", "")
+            seller = (item.get("username") or "").strip()
+            raw_title = item.get("title", "")
+            relation_id = item.get("relation_id", "")
+            real_region_id = (item.get("region_id") or region_id or "").strip()
+            real_offer_group = (item.get("offer_group") or offer_group or "").strip()
+
+            offer_url = _build_offer_url(
+                offer_group=real_offer_group,
+                region_id=real_region_id,
+                sort=sort,
+            )
+
+            return G2GOffer(
+                offer_id=offer_id,
+                title=raw_title,
+                server_name=_parse_title(raw_title)[0] or raw_title,
+                region_id=real_region_id,
+                relation_id=relation_id,
+                price_usd=price_usd if price_usd > 0 else 0,
+                min_qty=int(item.get("min_qty") or 1),
+                available_qty=int(item.get("available_qty") or 0),
+                seller=seller,
+                brand_id=item.get("brand_id", _BRAND_ID),
+                service_id=item.get("service_id", _SERVICE_ID),
+                sort=sort,
+                offer_url=offer_url,
+                offer_group=real_offer_group,
+                raw=dict(item),
+            )
+        except (ValueError, TypeError):
+            return None
+
+    phase2_results = await asyncio.gather(
+        *[_fetch_real_offer(offer_group, region_id) for offer_group, region_id in pair_list],
+        return_exceptions=True,
+    )
+
+    offers: list[G2GOffer] = []
+    for result in phase2_results:
+        if isinstance(result, Exception):
+            logger.warning("G2G phase2 task exception sort=%s: %s", sort, result)
+            continue
+        if result is None:
+            continue
+        offers.append(result)
+
+    logger.info(
+        "G2G phase2 sort=%s discovered=%d resolved=%d",
+        sort,
+        len(pair_list),
+        len(offers),
+    )
     return offers
 
 
