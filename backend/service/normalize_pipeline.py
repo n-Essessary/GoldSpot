@@ -467,10 +467,17 @@ async def normalize_offer_batch(
                 if alias_key is not None:
                     lk = alias_key.lower().strip()
                     server_id = alias_map.get(lk)
+                    if server_id is not None and getattr(offer, "game_version", ""):
+                        sd = get_server_data(server_id)
+                        if sd and sd.get("version", "").lower() != offer.game_version.lower():
+                            server_id = None  # version mismatch — fall through to fuzzy
                     if server_id is None:
                         # Fallback: single resolve (fuzzy parse → DB lookup)
                         server_id = await resolve_server(
-                            alias_key, offer.source, pool
+                            alias_key,
+                            offer.source,
+                            pool,
+                            game_version=getattr(offer, "game_version", ""),
                         )
                     if server_id is not None:
                         offer.server_id = server_id
