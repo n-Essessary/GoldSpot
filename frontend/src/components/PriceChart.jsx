@@ -106,6 +106,13 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         vertLine: { color: 'rgba(156,154,146,0.4)', style: LineStyle.Dashed, labelVisible: true },
         horzLine: { color: 'rgba(156,154,146,0.4)', style: LineStyle.Dashed, labelVisible: true },
       },
+      localization: {
+        timeFormatter: (utcTimestamp) => {
+          const d = new Date(utcTimestamp * 1000)
+          const pad = n => String(n).padStart(2, '0')
+          return `${pad(d.getDate())}.${pad(d.getMonth()+1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+        },
+      },
       rightPriceScale: {
         borderColor:   'rgba(156,154,146,0.15)',
         scaleMargins:  { top: 0.12, bottom: 0.12 },
@@ -121,16 +128,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         minBarSpacing:  0.5,
         barSpacing:     6,
         lockVisibleTimeRangeOnResize: true,
-        tickMarkFormatter: (time, tickMarkType, locale) => {
-          const d = new Date((time) * 1000)
-          // time is already local-shifted, so display as-is using UTC methods
-          const hh = String(d.getUTCHours()).padStart(2, '0')
-          const mm = String(d.getUTCMinutes()).padStart(2, '0')
-          const dd = String(d.getUTCDate()).padStart(2, '0')
-          const mo = String(d.getUTCMonth() + 1).padStart(2, '0')
-          if (tickMarkType <= 1) return `${dd}.${mo}`   // day/month label
-          return `${hh}:${mm}`
-        },
       },
     })
 
@@ -330,8 +327,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
     isFirstLoadRef.current = false
   }, [])
 
-  const userOffsetSec = -new Date().getTimezoneOffset() * 60
-
   // ── Загрузка данных ────────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
     if (!serverSlug || serverSlug === 'all') return
@@ -340,10 +335,10 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       const factionApi = normalizeFactionForApi(faction)
       let points = []
 
-      const toTSLocal = p => {
+      const toTS = p => {
         const raw = p.time ?? p.recorded_at
-        const utcSec = typeof raw === 'number' ? raw : Math.floor(new Date(raw).getTime() / 1000)
-        return utcSec + userOffsetSec
+        if (typeof raw === 'number') return raw
+        return Math.floor(new Date(raw).getTime() / 1000)
       }
 
       const parsed = _parseGroupLabel(serverSlug)
@@ -366,7 +361,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
           const raw = data.points ?? []
           if (raw.length > 0) {
             points = raw.map(p => ({
-              time:      toTSLocal(p),
+              time:      toTS(p),
               avg_price: p.index_price_per_1k,
               best_ask:  p.best_ask ?? p.index_price_per_1k,
               sources:   [],
@@ -397,9 +392,9 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       if (realmName && parsed) {
         const live = await fetchLivePrice(realmName, parsed.region, parsed.version, factionApi)
         if (live) {
-          const nowTs = Math.floor(Date.now() / 1000) + userOffsetSec
+          const nowTs = Math.floor(Date.now() / 1000)
           const lastTs = points.length > 0
-            ? toTSLocal(points[points.length - 1])
+            ? toTS(points[points.length - 1])
             : 0
           if (nowTs > lastTs) {
             points = [
@@ -430,7 +425,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         : null
 
       const indexData = points.map(p => ({
-        time:  toTSLocal(p),
+        time:  toTS(p),
         value: conv(p.avg_price || p.close || 0),
       }))
 
@@ -441,12 +436,12 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       const lastIndex = indexData[indexData.length - 1]
       const lastAsk   = askPoints[askPoints.length - 1]
       const askData   = askPoints.map(p => ({
-        time:  toTSLocal(p),
+        time:  toTS(p),
         value: conv(p.best_ask),
       }))
 
       // Extend ask line to match index last timestamp if they differ
-      if (lastIndex && (!lastAsk || toTSLocal(lastAsk) < lastIndex.time)) {
+      if (lastIndex && (!lastAsk || toTS(lastAsk) < lastIndex.time)) {
         // Use last known best_ask value for the extension point
         const lastBestAsk = askPoints.length > 0
           ? conv(askPoints[askPoints.length - 1].best_ask)
@@ -459,14 +454,14 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
 
       // Pin last point to now — prevents right-side gap caused by
       // time scale stretching to current time beyond last data point.
-      const nowTsLocal = Math.floor(Date.now() / 1000) + userOffsetSec
+      const nowTs = Math.floor(Date.now() / 1000)
       const latestIndex = indexData[indexData.length - 1]
       const latestAsk   = askData[askData.length - 1]
-      if (latestIndex && nowTsLocal > latestIndex.time) {
-        seriesRef.current.index?.update({ time: nowTsLocal, value: latestIndex.value })
+      if (latestIndex && nowTs > latestIndex.time) {
+        seriesRef.current.index?.update({ time: nowTs, value: latestIndex.value })
       }
-      if (latestAsk && nowTsLocal > latestAsk.time) {
-        seriesRef.current.ask?.update({ time: nowTsLocal, value: latestAsk.value })
+      if (latestAsk && nowTs > latestAsk.time) {
+        seriesRef.current.ask?.update({ time: nowTs, value: latestAsk.value })
       }
 
       const allSrc = new Set(points.flatMap(p => p.sources || []))
@@ -493,7 +488,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
     } finally {
       setLoading(false)
     }
-  }, [serverSlug, realmName, faction, period, showPer1, userOffsetSec])
+  }, [serverSlug, realmName, faction, period, showPer1])
 
   useEffect(() => { loadData() }, [loadData, refreshSignal])
 
