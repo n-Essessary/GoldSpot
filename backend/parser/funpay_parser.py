@@ -40,7 +40,7 @@ class ChipConfig:
 
 CHIP_CONFIGS: list[ChipConfig] = [
     ChipConfig(114, "EU+US+RU", "Classic Era",  "WoW Classic Era"),
-    ChipConfig(145, "RU",       "MoP Classic",  "WoW MoP Classic RU"),
+    # ChipConfig(145, "RU", "MoP Classic", "WoW MoP Classic RU"),  # blocked: Railway EU IP → 404
     ChipConfig(146, "EU",       "MoP Classic",  "WoW MoP Classic EU"),
     ChipConfig(147, "US",       "MoP Classic",  "WoW MoP Classic US"),
 ]

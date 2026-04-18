@@ -156,6 +156,8 @@ def _detect_version(text: str) -> str:
         return "Season of Discovery"
     if "anniversary" in t:
         return "Anniversary"
+    if "mop classic" in t or "mists of pandaria" in t:
+        return "MoP Classic"
     if "classic era" in t:
         return "Classic Era"
     if "hardcore" in t:
