@@ -469,17 +469,11 @@ async def normalize_offer_batch(
                     server_id = alias_map.get(lk)
 
                     if server_id is None:
-                        # Fallback: single resolve (fuzzy parse → DB lookup).
-                        # Pass game_version only for MoP Classic to disambiguate
-                        # colliding server names — Classic Era config covers multiple
-                        # DB versions (Anniversary, SoD, Classic) so game_version
-                        # must NOT be passed for it (would cause version mismatch).
-                        gv = getattr(offer, "game_version", "")
                         server_id = await resolve_server(
                             alias_key,
                             offer.source,
                             pool,
-                            game_version=gv if gv == "MoP Classic" else "",
+                            game_version=getattr(offer, "game_version", "") if getattr(offer, "game_version", "") == "MoP Classic" else "",
                         )
                     if server_id is not None:
                         offer.server_id = server_id
