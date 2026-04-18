@@ -232,7 +232,7 @@ def _parse_title(title: str) -> tuple[str, str, str, str]:
 
     lt = t.lower()
     if "classic era" in lt:
-        version = "Classic Era"
+        version = "Classic"
     elif "seasonal" in lt or "season of discovery" in lt or " sod " in f" {lt} ":
         version = "Seasonal"
     elif "anniversary" in lt:

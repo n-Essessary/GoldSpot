@@ -262,7 +262,7 @@ class TestReconstructDisplayServer(unittest.TestCase):
     def test_classic_era_title(self):
         o = self._g2g_offer("Firemaw [EU - Classic Era] - Alliance")
         self.assertTrue(self.fn(o))
-        self.assertEqual(o.display_server, "(EU) Classic Era")
+        self.assertEqual(o.display_server, "(EU) Classic")
 
     def test_classic_title(self):
         o = self._g2g_offer("Noggenfogger [EU - Classic] - Horde")
@@ -674,10 +674,10 @@ class TestNormalizeFunPayOffer(unittest.TestCase):
         self.assertEqual(result.server_name, "Spineshatter")
 
     def test_group_only(self):
-        """'(EU) Classic Era' → display_server='(EU) Classic Era'."""
+        """'(EU) Classic Era' → display_server='(EU) Classic'."""
         o = self._offer(display_server="(EU) Classic Era")
         result = self.fn(o)
-        self.assertEqual(result.display_server, "(EU) Classic Era")
+        self.assertEqual(result.display_server, "(EU) Classic")
 
     def test_bare_server_name_cleared(self):
         """No '(REGION)' prefix → display_server cleared."""
@@ -1237,9 +1237,9 @@ class TestCanonicalizeVersion(unittest.TestCase):
         self.assertEqual(self.fn("anniversary gold"), "Anniversary")
 
     def test_classic_era(self):
-        self.assertEqual(self.fn("classic era"), "Classic Era")
-        self.assertEqual(self.fn("vanilla"), "Classic Era")
-        self.assertEqual(self.fn("era"), "Classic Era")
+        self.assertEqual(self.fn("classic era"), "Classic")
+        self.assertEqual(self.fn("vanilla"), "Classic")
+        self.assertEqual(self.fn("era"), "Classic")
 
     def test_classic(self):
         self.assertEqual(self.fn("classic"), "Classic")

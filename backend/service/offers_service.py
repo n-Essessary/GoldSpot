@@ -34,7 +34,6 @@ import logging
 import random
 import re
 from dataclasses import dataclass
-from dataclasses import dataclass as _dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -71,28 +70,6 @@ _cache_initialized: dict[str, bool]          = {"funpay": False, "g2g": False}
 _quarantine:     list[dict] = []
 _QUARANTINE_MAX: int        = 500
 
-# ── Sticky Slot Tracker (G2G only) ────────────────────────────────────────────
-@_dataclass
-class StickyOffer:
-    offer_id: str
-    display_server: str
-    faction: str
-    price_per_1k: float
-    amount_gold: int
-    seller: str
-    offer_url: str | None
-    raw_price: float
-    raw_price_unit: str
-    lot_size: int
-    last_seen_cycle: int
-    fetched_at: datetime
-    server_name: str = ""
-
-
-_sticky_slots: dict[tuple[str, str], list[StickyOffer]] = {}
-STICKY_MAX_SLOTS = 5
-STICKY_TTL_CYCLES = 3
-
 FUNPAY_INTERVAL = 60
 G2G_INTERVAL    = 30
 
@@ -111,13 +88,11 @@ _VERSION_ORDER: dict[str, int] = {
     # Normal realms sorted by version
     "Anniversary":         0,
     "Season of Discovery": 1,
-    "Classic Era":         2,
     "Classic":             3,
     # Hardcore variants come after their Normal counterpart
     # (e.g. "(EU) Anniversary · Hardcore" sorts after "(EU) Anniversary")
     "Anniversary · Hardcore":         10,
     "Season of Discovery · Hardcore": 11,
-    "Classic Era · Hardcore":         12,
     "Classic · Hardcore":             13,
 }
 
@@ -309,101 +284,6 @@ def _version_rank(display_server: str) -> int:
 
 
 # ── Public cache read ─────────────────────────────────────────────────────────
-
-def _update_sticky_slots(new_offers: list[Offer]) -> None:
-    current_cycle = _cache_version["g2g"]
-    incoming: dict[tuple[str, str], list[Offer]] = {}
-    for o in new_offers:
-        if o.source != "g2g":
-            continue
-        key = (o.display_server, o.faction)
-        incoming.setdefault(key, []).append(o)
-
-    all_keys = set(_sticky_slots.keys()) | set(incoming.keys())
-    for key in all_keys:
-        slots = _sticky_slots.get(key, [])
-
-        # Update last_seen_cycle for offers still present
-        incoming_ids = {o.id.removeprefix("g2g_") for o in incoming.get(key, [])}
-        for slot in slots:
-            if slot.offer_id in incoming_ids:
-                slot.last_seen_cycle = current_cycle
-                # Also update price and fetched_at from latest data
-                matching = next(
-                    (o for o in incoming.get(key, [])
-                     if o.id.removeprefix("g2g_") == slot.offer_id),
-                    None
-                )
-                if matching:
-                    slot.price_per_1k = matching.price_per_1k
-                    slot.amount_gold = matching.amount_gold
-                    slot.raw_price = matching.raw_price
-                    slot.fetched_at = matching.fetched_at
-
-        # Evict stale slots
-        slots = [s for s in slots if (current_cycle - s.last_seen_cycle) < STICKY_TTL_CYCLES]
-
-        # Add new offers not yet tracked
-        existing_ids = {s.offer_id for s in slots}
-        for o in incoming.get(key, []):
-            oid = o.id.removeprefix("g2g_")
-            if oid not in existing_ids:
-                slots.insert(0, StickyOffer(
-                    offer_id=oid,
-                    display_server=o.display_server,
-                    server_name=o.server_name,
-                    faction=o.faction,
-                    price_per_1k=o.price_per_1k,
-                    amount_gold=o.amount_gold,
-                    seller=o.seller,
-                    offer_url=o.offer_url,
-                    raw_price=o.raw_price,
-                    raw_price_unit=o.raw_price_unit,
-                    lot_size=o.lot_size,
-                    last_seen_cycle=current_cycle,
-                    fetched_at=o.fetched_at,
-                ))
-
-        # Trim to max slots
-        _sticky_slots[key] = slots[:STICKY_MAX_SLOTS]
-
-        # Clean up empty keys
-        if not _sticky_slots[key]:
-            del _sticky_slots[key]
-
-
-def _sticky_to_offer(s: StickyOffer) -> Offer:
-    return Offer(
-        id=f"g2g_{s.offer_id}",
-        source="g2g",
-        server=s.display_server.lower(),
-        display_server=s.display_server,
-        server_name=s.server_name,
-        faction=s.faction,
-        raw_price=s.raw_price,
-        raw_price_unit=s.raw_price_unit,
-        lot_size=s.lot_size,
-        amount_gold=s.amount_gold,
-        seller=s.seller,
-        offer_url=s.offer_url,
-        updated_at=s.fetched_at,
-        fetched_at=s.fetched_at,
-    )
-
-
-def get_sticky_offers(
-    server: str | None = None,
-    faction: str | None = None,
-) -> list[Offer]:
-    result = []
-    for (ds, f), slots in _sticky_slots.items():
-        if server and _clean(ds) != _clean(server):
-            continue
-        if faction and f.lower() != faction.lower():
-            continue
-        result.extend(_sticky_to_offer(s) for s in slots)
-    return result
-
 
 def get_all_offers() -> list[Offer]:
     return _cache["funpay"] + _cache["g2g"]
@@ -803,7 +683,6 @@ async def _run_g2g_loop() -> None:
                     )
                 else:
                     _cache["g2g"] = offers
-                    _update_sticky_slots(offers)
                     _cache_initialized["g2g"] = True
                     _cache_version["g2g"] += 1
                     _last_update["g2g"] = datetime.now(timezone.utc)
@@ -941,8 +820,7 @@ def get_offers(
     sort_by: str = "price",
     server_name: str | None = None,
 ) -> list[Offer]:
-    sticky = get_sticky_offers()
-    result = _cache["funpay"] + (sticky if sticky else _cache["g2g"])
+    result = _cache["funpay"] + _cache["g2g"]
 
     if server:
         result = [o for o in result if _clean(o.display_server) == _clean(server)]

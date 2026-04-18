@@ -52,8 +52,8 @@ def test_hardcore_servers_exist():
 
 
 def test_version_aliases_canonical():
-    assert _VERSION_ALIASES["vanilla"] == "Classic Era"
-    assert _VERSION_ALIASES["era"] == "Classic Era"
+    assert _VERSION_ALIASES["vanilla"] == "Classic"
+    assert _VERSION_ALIASES["era"] == "Classic"
     assert _VERSION_ALIASES["tbc"] == "TBC Classic"
     assert _VERSION_ALIASES["seasonal"] == "Season of Discovery"
     assert _VERSION_ALIASES["classic anniversary"] == "Anniversary"

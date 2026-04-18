@@ -15,11 +15,11 @@ def test_region_filter_does_not_mix(make_offer):
 
 def test_version_filter_does_not_mix(make_offer):
     osvc._cache["g2g"] = [
-        make_offer(id="era", display_server="(EU) Classic Era", server="(EU) Classic Era"),
+        make_offer(id="era", display_server="(EU) Classic", server="(EU) Classic"),
         make_offer(id="sod", display_server="(EU) Season of Discovery", server="(EU) Season of Discovery"),
     ]
     osvc._cache["funpay"] = []
-    out = osvc.get_offers(server="(EU) Classic Era")
+    out = osvc.get_offers(server="(EU) Classic")
     assert {o.id for o in out} == {"era"}
 
 

@@ -601,7 +601,7 @@ class TestParseTitle(unittest.TestCase):
     def test_fallback_classic_era_text(self):
         _, r, v, _ = _parse_title("Classic Era Gold EU")
         self.assertEqual(r, "EU")
-        self.assertEqual(v, "Classic Era")
+        self.assertEqual(v, "Classic")
 
     @unittest.skipUnless(_G2G_AVAILABLE, "_parse_title недоступна")
     def test_empty_string(self):
@@ -738,7 +738,7 @@ class TestOffersServiceUtils(unittest.TestCase):
 
     @unittest.skipUnless(_SVC_AVAILABLE, "offers_service utils недоступны")
     def test_canonicalize_classic_era(self):
-        self.assertEqual(_canonicalize("classic era"), "Classic Era")
+        self.assertEqual(_canonicalize("classic era"), "Classic")
 
     @unittest.skipUnless(_SVC_AVAILABLE, "offers_service utils недоступны")
     def test_canonicalize_unknown_passthrough(self):

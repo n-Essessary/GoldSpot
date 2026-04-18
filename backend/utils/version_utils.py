@@ -32,10 +32,10 @@ _VERSION_ALIASES: dict[str, str] = {
     "anniversary gold":    "Anniversary",
     # Hardcore
     "hardcore":            "Hardcore",
-    # Classic Era variants (Task 3D: canonical = "Classic Era")
-    "classic era":         "Classic Era",
-    "vanilla":             "Classic Era",
-    "era":                 "Classic Era",
+    # Classic Era variants → canonical "Classic"
+    "classic era":         "Classic",
+    "vanilla":             "Classic",
+    "era":                 "Classic",
     # Plain "Classic" (G2G uses this in title brackets for Era servers)
     "classic":             "Classic",
     # TBC Classic variants
