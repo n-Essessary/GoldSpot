@@ -347,6 +347,8 @@ def _parse_html(html: str, fetched_at: datetime) -> tuple[list[Offer], str]:
     if first_unit:
         currency_symbol = first_unit.get_text(strip=True)
 
+    # Filter out "Any" server — not a real realm, FunPay-specific catch-all
+    unique = [o for o in unique if (o.server_name or o.display_server or "").strip().lower() != "any"]
     logger.info(
         "FunPay: servers=%d offers=%d currency=%s",
         len(grouped), len(unique), currency_symbol,
