@@ -37,6 +37,71 @@ async def test_resolution_is_deterministic(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_game_version_alias_match_returns_when_versions_align(monkeypatch):
+    monkeypatch.setattr(sr, "_cache_loaded_at", 10**9)
+    monkeypatch.setattr(sr, "_alias_cache", {"firemaw [eu - classic era] - horde".lower(): 101})
+    monkeypatch.setattr(
+        sr,
+        "_server_data_cache",
+        {101: {"id": 101, "name": "Firemaw", "region": "EU", "version": "Classic Era"}},
+    )
+
+    async def _no_fuzzy(*_a, **_k):
+        raise AssertionError("_fuzzy_resolve should not run when alias version matches")
+
+    monkeypatch.setattr(sr, "_fuzzy_resolve", _no_fuzzy)
+    sid = await sr.resolve_server(
+        "Firemaw [EU - Classic Era] - Horde",
+        "g2g",
+        pool=object(),
+        game_version="Classic Era",
+    )
+    assert sid == 101
+
+
+@pytest.mark.asyncio
+async def test_game_version_skips_alias_and_uses_fuzzy_with_config_version(monkeypatch):
+    monkeypatch.setattr(sr, "_cache_loaded_at", 10**9)
+    monkeypatch.setattr(sr, "_alias_cache", {"firemaw [eu - classic era] - horde".lower(): 101})
+    monkeypatch.setattr(
+        sr,
+        "_server_data_cache",
+        {101: {"id": 101, "name": "Firemaw", "region": "EU", "version": "Classic Era"}},
+    )
+
+    async def _fuzzy(*_a, **_k):
+        return 202
+
+    monkeypatch.setattr(sr, "_fuzzy_resolve", _fuzzy)
+    sid = await sr.resolve_server(
+        "Firemaw [EU - Classic Era] - Horde",
+        "g2g",
+        pool=object(),
+        game_version="MoP Classic",
+    )
+    assert sid == 202
+
+
+@pytest.mark.asyncio
+async def test_fuzzy_resolve_g2g_uses_game_version_over_bracket(monkeypatch):
+    calls: list[tuple[str, str, str]] = []
+
+    async def _track_lookup(name: str, region: str, version: str, pool):
+        calls.append((name, region, version))
+        return 303
+
+    monkeypatch.setattr(sr, "_lookup_server", _track_lookup)
+    sid = await sr._fuzzy_resolve(
+        "Firemaw [EU - Classic Era] - Horde",
+        "g2g",
+        pool=object(),
+        game_version="MoP Classic",
+    )
+    assert sid == 303
+    assert calls == [("Firemaw", "EU", "MoP Classic")]
+
+
+@pytest.mark.asyncio
 async def test_conflicting_raw_versions_resolve_to_canonical_registry(make_offer, monkeypatch):
     offer = make_offer(server_id=55, display_server="(EU) Seasonal", server="(EU) Seasonal")
     monkeypatch.setattr(

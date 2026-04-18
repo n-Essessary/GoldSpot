@@ -65,6 +65,7 @@ class Offer(BaseModel):
     # Parsers MUST NOT guess version from this; canonical registry owns that.
     # Not included in OfferRow / OffersResponse (internal pipeline field only).
     raw_title: str = ""
+    game_version: str = ""  # "Classic Era" | "MoP Classic" | set by parser
 
     faction: str
 
@@ -151,6 +152,7 @@ class OfferRow(BaseModel):
     price_display: float         # respects price_unit
     amount_gold: int
     seller: str
+    game_version: str = ""
     is_suspicious: bool = False
     offer_url: str | None = None
     updated_at: datetime
@@ -174,6 +176,7 @@ class OfferRow(BaseModel):
             server_name=offer.server_name,
             server_id=offer.server_id,
             faction=offer.faction,
+            game_version=offer.game_version,
             price_per_1k=round(p1k, 4),
             price_display=price_display,
             amount_gold=offer.amount_gold,

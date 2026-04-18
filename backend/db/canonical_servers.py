@@ -95,6 +95,7 @@ VALID_VERSIONS: frozenset[str] = frozenset({
     "Seasonal",          # G2G alias for Season of Discovery
     "Season of Discovery",
     "Season of Mastery", # DEPRECATED
+    "MoP Classic",      # Mists of Pandaria Classic (2025)
 })
 
 VALID_REALM_TYPES: frozenset[str] = frozenset({"Normal", "Hardcore"})
@@ -340,6 +341,84 @@ CANONICAL_SERVERS: tuple[CanonicalServer, ...] = (
     CanonicalServer("Dreadnaught",   "US", "Season of Mastery", is_active=False),
     CanonicalServer("Shadowstrike",  "EU", "Season of Mastery", is_active=False,
                     notes="Different from AU Shadowstrike (SoD); SoM closed Mar 2022"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # MISTS OF PANDARIA CLASSIC (launched 2025)
+    # G2G: seo_term=wow-classic-gold, brand_id=lgc_game_29076
+    # FunPay: chip 145 (RU), chip 146 (EU/DE/ES/FR), chip 147 (US/OCE)
+    # NOTE: many server names collide with Classic Era — they are distinct
+    # servers disambiguated at resolution time via game_version from parser config.
+    # G2G region labels DE/ES/FR → canonical region EU.
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # ── EU MoP Classic ───────────────────────────────────────────────────
+    CanonicalServer("Ashbringer",           "EU", "MoP Classic"),
+    CanonicalServer("Earthshaker",          "EU", "MoP Classic"),
+    CanonicalServer("Firemaw",              "EU", "MoP Classic"),
+    CanonicalServer("Garalon",              "EU", "MoP Classic"),
+    CanonicalServer("Gehennas",             "EU", "MoP Classic"),
+    CanonicalServer("Giantstalker",         "EU", "MoP Classic"),
+    CanonicalServer("Golemagg",             "EU", "MoP Classic"),
+    CanonicalServer("Hoptallus",            "EU", "MoP Classic"),
+    CanonicalServer("Hydraxian Waterlords", "EU", "MoP Classic"),
+    CanonicalServer("Jin'do",               "EU", "MoP Classic"),
+    CanonicalServer("Mirage Raceway",       "EU", "MoP Classic"),
+    CanonicalServer("Mograine",             "EU", "MoP Classic"),
+    CanonicalServer("Nethergarde Keep",     "EU", "MoP Classic"),
+    CanonicalServer("Norushen",             "EU", "MoP Classic"),
+    CanonicalServer("Ook Ook",              "EU", "MoP Classic"),
+    CanonicalServer("Pyrewood Village",     "EU", "MoP Classic"),
+    CanonicalServer("Shek'zeer",            "EU", "MoP Classic"),
+    CanonicalServer("Thekal",               "EU", "MoP Classic"),
+    # DE-localised realms — G2G label [DE], FunPay chip 146
+    CanonicalServer("Everlook",      "EU", "MoP Classic", notes="DE"),
+    CanonicalServer("Lakeshire",     "EU", "MoP Classic", notes="DE"),
+    CanonicalServer("Patchwerk",     "EU", "MoP Classic", notes="DE"),
+    CanonicalServer("Razorfen",      "EU", "MoP Classic", notes="DE"),
+    CanonicalServer("Transcendence", "EU", "MoP Classic", notes="DE"),
+    CanonicalServer("Venoxis",       "EU", "MoP Classic", notes="DE"),
+    # ES/FR-localised realms — G2G labels [ES]/[FR], FunPay chip 146
+    CanonicalServer("Mandokir", "EU", "MoP Classic", notes="ES"),
+    CanonicalServer("Amnennar",  "EU", "MoP Classic", notes="FR"),
+    CanonicalServer("Auberdine", "EU", "MoP Classic", notes="FR"),
+    CanonicalServer("Sulfuron",  "EU", "MoP Classic", notes="FR"),
+
+    # ── US MoP Classic ───────────────────────────────────────────────────
+    CanonicalServer("Angerforge",           "US", "MoP Classic"),
+    CanonicalServer("Ashkandi",             "US", "MoP Classic"),
+    CanonicalServer("Atiesh",               "US", "MoP Classic"),
+    CanonicalServer("Azuresong",            "US", "MoP Classic"),
+    CanonicalServer("Benediction",          "US", "MoP Classic"),
+    CanonicalServer("Bloodsail Buccaneers", "US", "MoP Classic"),
+    CanonicalServer("Earthfury",            "US", "MoP Classic"),
+    CanonicalServer("Eranikus",             "US", "MoP Classic"),
+    CanonicalServer("Faerlina",             "US", "MoP Classic"),
+    CanonicalServer("Galakras",             "US", "MoP Classic"),
+    CanonicalServer("Grobbulus",            "US", "MoP Classic"),
+    CanonicalServer("Immerseus",            "US", "MoP Classic"),
+    CanonicalServer("Lei Shen",             "US", "MoP Classic"),
+    CanonicalServer("Maladath",             "US", "MoP Classic",
+                    notes="US MoP (distinct from AU Anniversary Maladath)"),
+    CanonicalServer("Mankrik",              "US", "MoP Classic"),
+    CanonicalServer("Myzrael",              "US", "MoP Classic"),
+    CanonicalServer("Nazgrim",              "US", "MoP Classic"),
+    CanonicalServer("Old Blanchy",          "US", "MoP Classic"),
+    CanonicalServer("Pagle",                "US", "MoP Classic"),
+    CanonicalServer("Ra-den",               "US", "MoP Classic"),
+    CanonicalServer("Skyfury",              "US", "MoP Classic"),
+    CanonicalServer("Sulfuras",             "US", "MoP Classic"),
+    CanonicalServer("Westfall",             "US", "MoP Classic"),
+    CanonicalServer("Whitemane",            "US", "MoP Classic"),
+    CanonicalServer("Windseeker",           "US", "MoP Classic"),
+
+    # ── OCE MoP Classic (G2G: [OCE], FunPay chip 147) ────────────────────
+    CanonicalServer("Arugal",  "OCE", "MoP Classic"),
+    CanonicalServer("Remulos", "OCE", "MoP Classic"),
+    CanonicalServer("Yojamba", "OCE", "MoP Classic"),
+
+    # ── RU MoP Classic (FunPay chip 145 only) ────────────────────────────
+    CanonicalServer("Chromie",  "RU", "MoP Classic"),
+    CanonicalServer("Flamegor", "RU", "MoP Classic"),
 )
 
 

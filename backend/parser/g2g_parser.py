@@ -5,7 +5,7 @@ Sort-based strategy (simple, verified):
   1. /offer/search?sort=lowest_price    → cheapest offer per server×faction (~221 offers)
   2. /offer/search?sort=recommended_v2  → recommended offer per server×faction (~221 offers)
   Both sorts run concurrently via asyncio.gather(); results combined and deduplicated.
-  Total expected: ~300–440 unique offers.
+  Total expected: ~300–440 unique offers per game config.
 """
 
 import asyncio
@@ -71,7 +71,7 @@ async def _http_get_retry(client: httpx.AsyncClient, url: str, **kwargs) -> http
     raise RuntimeError("_http_get_retry: exhausted without response")
 
 
-def _build_offer_url(offer_group: str, region_id: str, sort: str) -> str:
+def _build_offer_url(offer_group: str, region_id: str, sort: str, seo_term: str = "wow-classic-era-vanilla-gold") -> str:
     """Build G2G group buy page URL from offer_group, region and sort."""
     if not offer_group or not region_id:
         return ""
@@ -81,7 +81,7 @@ def _build_offer_url(offer_group: str, region_id: str, sort: str) -> str:
     from urllib.parse import quote
     fa_encoded = quote(fa, safe="")
     return (
-        "https://www.g2g.com/categories/wow-classic-era-vanilla-gold/offer/group"
+        f"https://www.g2g.com/categories/{seo_term}/offer/group"
         f"?fa={fa_encoded}&region_id={region_id}&sort={sort}&include_offline=0"
     )
 
@@ -102,20 +102,34 @@ HEADERS = {
     "Origin": "https://www.g2g.com",
 }
 
-GAME_CONFIG: dict[str, dict[str, str]] = {
-    # Верифицировано: https://www.g2g.com/categories/wow-classic-era-vanilla-gold
-    # Покрывает Classic Era, Seasonal, TBC Anniversary — один brand_id
-    "wow_classic_era": {
-        "brand_id": "lgc_game_27816",
-        "service_id": "lgc_service_1",
-        "label": "WoW Classic Era",
-    },
-    "wow_classic_era_seasonal_anniversary": {
-        "brand_id":   "lgc_game_27816",
-        "service_id": "lgc_service_1",
-        "label":      "WoW Classic Era / Seasonal / TBC Anniversary",
-    },
-}
+
+@dataclass(frozen=True)
+class GameConfig:
+    key: str
+    seo_term: str
+    brand_id: str
+    game_version: str
+    service_id: str = "lgc_service_1"
+    label: str = ""
+
+
+GAME_CONFIGS: list[GameConfig] = [
+    GameConfig(
+        key="wow_classic_era",
+        seo_term="wow-classic-era-vanilla-gold",
+        brand_id="lgc_game_27816",
+        game_version="Classic Era",
+        label="WoW Classic Era / Seasonal / TBC Anniversary",
+    ),
+    GameConfig(
+        key="wow_mop_classic",
+        seo_term="wow-classic-gold",
+        brand_id="lgc_game_29076",
+        game_version="MoP Classic",
+        label="WoW Mists of Pandaria Classic",
+    ),
+]
+
 
 # ── Title parsing regex ───────────────────────────────────────────────────────
 # Strict format: "Server [Region - Version] - Faction"
@@ -145,6 +159,7 @@ class G2GOffer:
     brand_id: str
     service_id: str
     sort: str = ""
+    game_version: str = ""
     offer_url: str | None = None
     offer_group: str = ""
     raw: dict = field(default_factory=dict, repr=False)
@@ -246,15 +261,12 @@ def _parse_title(title: str) -> tuple[str, str, str, str]:
 
 # ── Sort-based fetcher ────────────────────────────────────────────────────────
 
-_SEO_TERM  = "wow-classic-era-vanilla-gold"
-_BRAND_ID  = "lgc_game_27816"
-_SERVICE_ID = "lgc_service_1"
 _PAGE_SIZE = 48
 _MAX_PAGES = 10
 
 
-async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
-    """Fetch offers via two-phase strategy for a single sort mode.
+async def _fetch_sort(sort: str, client: httpx.AsyncClient, config: GameConfig) -> list[G2GOffer]:
+    """Fetch offers via two-phase strategy for a single sort mode and game config.
 
     Phase 1 (discovery): paginate grouped /offer/search and collect unique
     (offer_group, region_id) pairs.
@@ -267,10 +279,10 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
     # Phase 1: discovery (grouped results, price is not trusted)
     while page <= _MAX_PAGES:
         params = {
-            "seo_term":   _SEO_TERM,
+            "seo_term":   config.seo_term,
             "sort":       sort,
-            "service_id": _SERVICE_ID,
-            "brand_id":   _BRAND_ID,
+            "service_id": config.service_id,
+            "brand_id":   config.brand_id,
             "currency":   "USD",
             "country":    "SG",
             "v":          "v2",
@@ -286,29 +298,29 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
                 retry_after = _parse_retry_after_seconds(
                     exc.response.headers.get("Retry-After"), 60
                 )
-                logger.warning("G2G 429 on sort=%s page=%d — sleeping %ds", sort, page, retry_after)
+                logger.warning("G2G 429 on config=%s sort=%s page=%d — sleeping %ds", config.key, sort, page, retry_after)
                 await asyncio.sleep(retry_after)
                 # retry once
                 try:
                     resp = await _http_get_retry(client, f"{BASE}/offer/search", params=params)
                     results = resp.json().get("payload", {}).get("results", [])
                 except Exception as retry_exc:
-                    logger.warning("G2G retry failed sort=%s page=%d: %s", sort, page, retry_exc)
+                    logger.warning("G2G retry failed config=%s sort=%s page=%d: %s", config.key, sort, page, retry_exc)
                     break
             elif status >= 500:
-                logger.warning("G2G 5xx sort=%s page=%d — sleeping 2s", sort, page)
+                logger.warning("G2G 5xx config=%s sort=%s page=%d — sleeping 2s", config.key, sort, page)
                 await asyncio.sleep(2)
                 try:
                     resp = await _http_get_retry(client, f"{BASE}/offer/search", params=params)
                     results = resp.json().get("payload", {}).get("results", [])
                 except Exception as retry_exc:
-                    logger.warning("G2G retry failed sort=%s page=%d: %s", sort, page, retry_exc)
+                    logger.warning("G2G retry failed config=%s sort=%s page=%d: %s", config.key, sort, page, retry_exc)
                     break
             else:
-                logger.warning("G2G HTTP error sort=%s page=%d: %s", sort, page, exc)
+                logger.warning("G2G HTTP error config=%s sort=%s page=%d: %s", config.key, sort, page, exc)
                 break
         except Exception as exc:
-            logger.warning("G2G fetch error sort=%s page=%d: %s", sort, page, exc)
+            logger.warning("G2G fetch error config=%s sort=%s page=%d: %s", config.key, sort, page, exc)
             break
 
         if not results:
@@ -321,7 +333,7 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
                 continue
             discovered_pairs[(offer_group, region_id)] = None
 
-        logger.debug("G2G sort=%s page=%d → %d results", sort, page, len(results))
+        logger.debug("G2G config=%s sort=%s page=%d → %d results", config.key, sort, page, len(results))
 
         if len(results) < _PAGE_SIZE:
             break
@@ -339,7 +351,7 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
         fa = f"{prefix}:{og}"
 
         params = {
-            "seo_term":        _SEO_TERM,
+            "seo_term":        config.seo_term,
             "filter_attr":     fa,
             "region_id":       region_id,
             "sort":            sort,
@@ -347,8 +359,8 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
             "include_offline": "0",
             "page_size":       1,
             "page":            1,
-            "service_id":      _SERVICE_ID,
-            "brand_id":        _BRAND_ID,
+            "service_id":      config.service_id,
+            "brand_id":        config.brand_id,
             "currency":        "USD",
             "country":         "SG",
             "v":               "v2",
@@ -360,7 +372,8 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
                 items = resp.json().get("payload", {}).get("results", [])
             except Exception as exc:
                 logger.warning(
-                    "G2G phase2 fetch failed sort=%s offer_group=%s region_id=%s: %s",
+                    "G2G phase2 fetch failed config=%s sort=%s offer_group=%s region_id=%s: %s",
+                    config.key,
                     sort,
                     offer_group,
                     region_id,
@@ -385,6 +398,7 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
                 offer_group=real_offer_group,
                 region_id=real_region_id,
                 sort=sort,
+                seo_term=config.seo_term,
             )
 
             return G2GOffer(
@@ -397,9 +411,10 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
                 min_qty=int(item.get("min_qty") or 1),
                 available_qty=int(item.get("available_qty") or 0),
                 seller=seller,
-                brand_id=item.get("brand_id", _BRAND_ID),
-                service_id=item.get("service_id", _SERVICE_ID),
+                brand_id=item.get("brand_id", config.brand_id),
+                service_id=item.get("service_id", config.service_id),
                 sort=sort,
+                game_version=config.game_version,
                 offer_url=offer_url,
                 offer_group=real_offer_group,
                 raw=dict(item),
@@ -415,14 +430,15 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient) -> list[G2GOffer]:
     offers: list[G2GOffer] = []
     for result in phase2_results:
         if isinstance(result, Exception):
-            logger.warning("G2G phase2 task exception sort=%s: %s", sort, result)
+            logger.warning("G2G phase2 task exception config=%s sort=%s: %s", config.key, sort, result)
             continue
         if result is None:
             continue
         offers.append(result)
 
     logger.info(
-        "G2G phase2 sort=%s discovered=%d resolved=%d",
+        "G2G phase2 config=%s sort=%s discovered=%d resolved=%d",
+        config.key,
         sort,
         len(pair_list),
         len(offers),
@@ -494,6 +510,7 @@ def _to_offer(
             faction=faction,
             # raw_title stored for alias lookup in normalize_pipeline._build_alias_key()
             raw_title=raw.title,
+            game_version=raw.game_version,
             # ── Raw price (Task 2) ────────────────────────────────────────────
             raw_price=raw.price_usd,      # unit_price_in_usd: price per 1 gold
             raw_price_unit="per_unit",
@@ -523,11 +540,11 @@ def _dedupe(offers: list[Offer]) -> list[Offer]:
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def fetch_offers() -> list[Offer]:
-    """Fetch all G2G offers across two sort modes concurrently.
+    """Fetch all G2G offers across all game configs and two sort modes concurrently.
 
-    Runs _fetch_sort("lowest_price") and _fetch_sort("recommended_v2") in
-    parallel, combines results, converts to Offer objects, and deduplicates
-    by offer id.  Expected: ~300–440 unique offers in under 20s.
+    Runs _fetch_sort for every (config, sort) combination in parallel,
+    combines results, converts to Offer objects, and deduplicates by offer id.
+    Expected: ~300–440 unique offers per config in under 20s.
     """
     t0 = asyncio.get_event_loop().time()
     fetched_at = datetime.now(timezone.utc)
@@ -538,25 +555,34 @@ async def fetch_offers() -> list[Offer]:
             timeout=httpx.Timeout(30.0),
             follow_redirects=True,
         ) as client:
-            lowest_raw, recommended_raw = await asyncio.gather(
-                _fetch_sort("lowest_price", client),
-                _fetch_sort("recommended_v2", client),
-            )
+            tasks = [
+                _fetch_sort(sort, client, config)
+                for config in GAME_CONFIGS
+                for sort in ("lowest_price", "recommended_v2")
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        all_raw = lowest_raw + recommended_raw
+        all_raw: list[G2GOffer] = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                config = GAME_CONFIGS[i // 2]
+                sort = ("lowest_price", "recommended_v2")[i % 2]
+                logger.warning("G2G fetch_sort task exception config=%s sort=%s: %s", config.key, sort, result)
+                continue
+            all_raw.extend(result)
+
         offers = [o for o in (_to_offer(r, fetched_at) for r in all_raw) if o is not None]
-        result = _dedupe(offers)
+        result_offers = _dedupe(offers)
 
         elapsed = asyncio.get_event_loop().time() - t0
         logger.info(
-            "G2G updated: %d offers in %.1fs (lowest=%d recommended=%d raw=%d)",
-            len(result),
+            "G2G updated: %d offers in %.1fs (configs=%d raw=%d)",
+            len(result_offers),
             elapsed,
-            len(lowest_raw),
-            len(recommended_raw),
+            len(GAME_CONFIGS),
             len(all_raw),
         )
-        return result
+        return result_offers
 
     except Exception:
         logger.exception("G2G parser failed")

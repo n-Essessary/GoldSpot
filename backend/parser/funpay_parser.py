@@ -4,7 +4,7 @@ from __future__ import annotations
 FunPay HTML-парсер офферов WoW Classic gold.
 
 Стратегия:
-  GET https://funpay.com/en/chips/114/
+  Для каждого ChipConfig → GET https://funpay.com/en/chips/{chip_id}/
   → HTML уже содержит ВСЕ офферы (.tc-item) для всех серверов
   → парсим, группируем по серверу, дедуплицируем, возвращаем flat list
 
@@ -16,6 +16,7 @@ import logging
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import httpx
@@ -27,8 +28,22 @@ logger = logging.getLogger(__name__)
 
 SOURCE = "funpay"
 
-# ── URL ─────────────────────────────────────────────────────────────────────
-_URL = "https://funpay.com/en/chips/114/"
+# ── Chip configs ─────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ChipConfig:
+    chip_id: int
+    region: str
+    game_version: str
+    label: str
+
+
+CHIP_CONFIGS: list[ChipConfig] = [
+    ChipConfig(114, "EU+US+RU", "Classic Era",  "WoW Classic Era"),
+    ChipConfig(145, "RU",       "MoP Classic",  "WoW MoP Classic RU"),
+    ChipConfig(146, "EU",       "MoP Classic",  "WoW MoP Classic EU"),
+    ChipConfig(147, "US",       "MoP Classic",  "WoW MoP Classic US"),
+]
 
 # ── Online-фильтр ────────────────────────────────────────────────────────────
 # Значения data-online, которые считаются «онлайн»
@@ -399,14 +414,15 @@ async def _get_usd_rate(currency_symbol: str) -> float:
     return 1.0
 
 
-# ── Публичная точка входа ────────────────────────────────────────────────────
+# ── Per-chip fetcher ─────────────────────────────────────────────────────────
 
-async def fetch_funpay_offers() -> list[Offer]:
+async def _fetch_chip(config: ChipConfig) -> list[Offer]:
+    """Fetch and parse a single FunPay chip page.
+
+    Retry/backoff logic mirrors fetch_funpay_offers().
+    Sets offer.game_version = config.game_version on every returned offer.
     """
-    GET https://funpay.com/en/chips/114/
-    Парсит все .tc-item из полного HTML, группирует по серверу,
-    дедуплицирует по offer.id, возвращает flat list[Offer].
-    """
+    url = f"https://funpay.com/en/chips/{config.chip_id}/"
     fetched_at = datetime.now(timezone.utc)
     html = ""
 
@@ -417,7 +433,7 @@ async def fetch_funpay_offers() -> list[Offer]:
                 timeout=_TIMEOUT,
                 follow_redirects=True,
             ) as client:
-                resp = await client.get(_URL)
+                resp = await client.get(url)
                 if resp.status_code == 429:
                     ra = resp.headers.get("Retry-After", "60")
                     try:
@@ -426,7 +442,8 @@ async def fetch_funpay_offers() -> list[Offer]:
                         retry_after = 60
                     if attempt < 2:
                         logger.warning(
-                            "FunPay 429 rate limited — backing off %ds",
+                            "FunPay 429 rate limited chip=%d — backing off %ds",
+                            config.chip_id,
                             retry_after,
                         )
                         await asyncio.sleep(retry_after)
@@ -442,17 +459,17 @@ async def fetch_funpay_offers() -> list[Offer]:
             if attempt < 2:
                 await asyncio.sleep(2**attempt)
                 continue
-            logger.error("FunPay: таймаут при запросе %s", _URL)
+            logger.error("FunPay: таймаут при запросе chip=%d %s", config.chip_id, url)
             return []
         except httpx.HTTPStatusError as exc:
             sc = exc.response.status_code
             if sc >= 500 and attempt < 2:
                 await asyncio.sleep(2**attempt)
                 continue
-            logger.error("FunPay: HTTP %d при запросе %s", sc, _URL)
+            logger.error("FunPay: HTTP %d при запросе chip=%d %s", sc, config.chip_id, url)
             return []
         except Exception as exc:
-            logger.error("FunPay: ошибка запроса — %s", exc, exc_info=True)
+            logger.error("FunPay: ошибка запроса chip=%d — %s", config.chip_id, exc, exc_info=True)
             return []
 
     if not html:
@@ -467,11 +484,45 @@ async def fetch_funpay_offers() -> list[Offer]:
                 offer.raw_price = round(offer.raw_price * rate, 8)
                 offer.price_per_1k = round(offer.raw_price * 1000.0, 6)
             logger.info(
-                "FunPay: converted %d offers %s→USD rate=%.4f",
-                len(raw_offers), currency_symbol, rate,
+                "FunPay: converted %d offers %s→USD rate=%.4f chip=%d",
+                len(raw_offers), currency_symbol, rate, config.chip_id,
             )
 
+    # Stamp game_version on every offer
+    for offer in raw_offers:
+        offer.game_version = config.game_version
+
     return raw_offers
+
+
+# ── Публичная точка входа ────────────────────────────────────────────────────
+
+async def fetch_funpay_offers() -> list[Offer]:
+    """
+    Fetches all CHIP_CONFIGS concurrently, combines and deduplicates by offer.id.
+    """
+    results = await asyncio.gather(
+        *[_fetch_chip(c) for c in CHIP_CONFIGS],
+        return_exceptions=True,
+    )
+
+    seen: set[str] = set()
+    all_offers: list[Offer] = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.warning(
+                "FunPay: chip=%d task exception — %s",
+                CHIP_CONFIGS[i].chip_id,
+                result,
+            )
+            continue
+        for offer in result:
+            if offer.id not in seen:
+                seen.add(offer.id)
+                all_offers.append(offer)
+
+    logger.info("FunPay: total unique offers=%d across %d chips", len(all_offers), len(CHIP_CONFIGS))
+    return all_offers
 
 
 async def fetch_offers() -> list[Offer]:

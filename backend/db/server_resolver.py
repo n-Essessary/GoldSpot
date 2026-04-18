@@ -421,12 +421,17 @@ async def resolve_server(
     raw_title: str,
     source: str,
     pool,
+    game_version: str = "",
 ) -> Optional[int]:
     """
     Resolve raw_title → server_id.
 
     Level 1: exact alias match (case-insensitive) in server_aliases.
     Level 2: parse title → look up servers(name, region, version).
+
+    When ``game_version`` is non-empty, Level 1 must match that version
+    (via ``get_server_data``); otherwise resolution falls through to Level 2
+    with ``game_version`` passed for disambiguation (e.g. Classic Era vs MoP).
 
     If unresolvable → log warning, add to _unresolved registry, return None.
     """
@@ -435,18 +440,28 @@ async def resolve_server(
 
     await _ensure_cache(pool)
 
+    gv = game_version.strip() if game_version else ""
+
     # ── Level 1: exact alias ──────────────────────────────────────────────────
     lower = raw_title.lower().strip()
     server_id = _alias_cache.get(lower)
     if server_id is not None:
-        return server_id
+        if not gv:
+            return server_id
+        data = get_server_data(server_id)
+        if data is not None and data.get("version", "").lower() == gv.lower():
+            return server_id
+        # Version mismatch or server not in data cache — try Level 2
 
     # ── Level 2: fuzzy parse ──────────────────────────────────────────────────
-    server_id = await _fuzzy_resolve(raw_title, source, pool)
+    server_id = await _fuzzy_resolve(raw_title, source, pool, game_version=game_version)
     if server_id is not None:
         # Cache the new mapping in memory (DB is updated by the caller
-        # or admin via /admin/unresolved-servers + manual seed)
-        _alias_cache[lower] = server_id
+        # or admin via /admin/unresolved-servers + manual seed).
+        # Do not cache when game_version was used: same raw_title can map to
+        # different server_ids per version (alias key would be ambiguous).
+        if not gv:
+            _alias_cache[lower] = server_id
         return server_id
 
     # ── Unresolved ────────────────────────────────────────────────────────────
@@ -458,6 +473,7 @@ async def _fuzzy_resolve(
     raw_title: str,
     source: str,
     pool,
+    game_version: str = "",
 ) -> Optional[int]:
     """
     Parse title into (server_name, region, version) and look up DB.
@@ -465,16 +481,23 @@ async def _fuzzy_resolve(
     For G2G titles like "Spineshatter [EU - Anniversary] - Alliance":
       server_name = "Spineshatter", region = "EU", version = "Anniversary"
 
+    When ``game_version`` is non-empty, G2G bracket titles use that version
+    instead of the bracket segment (config disambiguates Classic Era vs MoP).
+
     For FunPay titles like "(EU) Classic Era":
       These are GROUP labels — fuzzy resolve won't work here, they need
       expansion logic (handled separately in offers_service).
     """
+    gv = game_version.strip() if game_version else ""
+
     # G2G strict format
     m = _BRACKET_TITLE_RE.match(raw_title.strip())
     if m:
         server_name = m.group("server").strip()
         region      = _normalise_region(m.group("region"))
-        version     = _normalise_version(m.group("version"))
+        if gv:
+            return await _lookup_server(server_name, region, gv, pool)
+        version = _normalise_version(m.group("version"))
         return await _lookup_server(server_name, region, version, pool)
 
     # FunPay group format: "(EU) Anniversary", "(US) Classic Era - Firemaw"
@@ -488,8 +511,10 @@ async def _fuzzy_resolve(
         # Check if " - ServerName" suffix is present
         parts = rest.rsplit(" - ", 1)
         if len(parts) == 2:
-            version     = _normalise_version(parts[0])
             server_name = parts[1].strip()
+            if gv:
+                return await _lookup_server(server_name, region, gv, pool)
+            version = _normalise_version(parts[0])
             return await _lookup_server(server_name, region, version, pool)
         # Just a version label → can't resolve to single server
         return None
@@ -501,6 +526,8 @@ async def _fuzzy_resolve(
         # Try to find server_name as the part before the region token
         before = raw_title[:rm.start()].strip().rstrip("-").strip()
         if before:
+            if gv:
+                return await _lookup_server(before, region, gv, pool)
             for pattern, version in _VERSION_NORMALISE:
                 if pattern.search(raw_title):
                     return await _lookup_server(before, region, version, pool)
