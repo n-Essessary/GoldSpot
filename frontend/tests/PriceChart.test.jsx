@@ -7,10 +7,16 @@ vi.mock('lightweight-charts', () => ({
   CrosshairMode: { Normal: 0 },
   createChart: vi.fn(() => ({
     remove: vi.fn(),
-    addAreaSeries: vi.fn(() => ({ setData: vi.fn() })),
-    addLineSeries: vi.fn(() => ({ setData: vi.fn() })),
+    addAreaSeries: vi.fn(() => ({ setData: vi.fn(), update: vi.fn() })),
+    addLineSeries: vi.fn(() => ({ setData: vi.fn(), update: vi.fn() })),
     subscribeCrosshairMove: vi.fn(),
-    timeScale: vi.fn(() => ({ fitContent: vi.fn() })),
+    timeScale: vi.fn(() => ({
+      fitContent: vi.fn(),
+      applyOptions: vi.fn(),
+      getVisibleLogicalRange: vi.fn(),
+      getVisibleRange: vi.fn(),
+      setVisibleRange: vi.fn(),
+    })),
     applyOptions: vi.fn(),
   })),
 }))
