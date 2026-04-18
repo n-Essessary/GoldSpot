@@ -436,6 +436,8 @@ async def query_server_history(
                 "sample_size": int(r["sample_size"] or 0),
             }
         )
+    # rows are DESC from DB (newest first) — reverse to ASC for chart
+    out.reverse()
     return out
 
 

@@ -323,7 +323,7 @@ async def query_tiered_history(
             WHERE server_id   = $1
               AND faction      = $2
               AND recorded_at  > NOW() - ($3::integer * INTERVAL '1 hour')
-            ORDER BY recorded_at ASC
+            ORDER BY recorded_at DESC
             LIMIT $4
             """,
             server_id, faction_db, hours, max_points,
@@ -342,7 +342,8 @@ async def query_tiered_history(
             return round(base * 1000, 4)
         return round(float(v) * 1000, 4)
 
-    return [
+    # rows are DESC from DB (newest first) — reverse to ASC for chart
+    result = [
         {
             "recorded_at":        r["recorded_at"].isoformat(),
             "index_price":        float(r["index_price"]),
@@ -352,6 +353,8 @@ async def query_tiered_history(
         }
         for r in rows
     ]
+    result.reverse()
+    return result
 
 
 async def query_tiered_history_by_name(
