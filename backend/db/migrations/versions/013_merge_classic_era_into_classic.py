@@ -19,9 +19,7 @@ depends_on = None
 
 
 def upgrade():
-    # Step 1: Re-point server_aliases from Classic Era server_id → Classic server_id
-    # For each (name, region) pair that exists in both versions,
-    # update aliases pointing to the Classic Era row to point to the Classic row instead.
+    # Step 1: Re-point server_aliases
     op.execute("""
         UPDATE server_aliases sa
         SET server_id = s_classic.id
@@ -34,8 +32,7 @@ def upgrade():
           AND s_era.version = 'Classic Era'
     """)
 
-    # Step 2: For Classic Era servers with NO Classic counterpart (no collision),
-    # just rename version in-place — no deletion needed.
+    # Step 2: Rename non-colliding Classic Era → Classic in-place
     op.execute("""
         UPDATE servers
         SET version = 'Classic'
@@ -48,12 +45,41 @@ def upgrade():
           )
     """)
 
-    # Step 3: Delete Classic Era rows that now have a Classic counterpart.
-    # price_snapshots/server_price_index will cascade-delete (acceptable).
-    # server_aliases were already re-pointed in Step 1 — no data loss there.
+    # Step 2.5: Delete snapshots referencing colliding Classic Era server_ids
     op.execute("""
-        DELETE FROM servers
-        WHERE version = 'Classic Era'
+        DELETE FROM price_snapshots
+        WHERE server_id IN (
+            SELECT id FROM servers WHERE version = 'Classic Era'
+        )
+    """)
+
+    # Step 2.6: Same for other snapshot tables
+    op.execute("""
+        DELETE FROM server_price_index
+        WHERE server_id IN (
+            SELECT id FROM servers WHERE version = 'Classic Era'
+        )
+    """)
+
+    op.execute("""
+        DELETE FROM price_index_snapshots
+        WHERE server_id IN (
+            SELECT id FROM servers WHERE version = 'Classic Era'
+        )
+    """)
+
+    # Tier index snapshots (012): FK to servers without CASCADE — must clear before DELETE servers
+    for tbl in ("snapshots_1m", "snapshots_5m", "snapshots_1h", "snapshots_1d"):
+        op.execute(f"""
+            DELETE FROM {tbl}
+            WHERE server_id IN (
+                SELECT id FROM servers WHERE version = 'Classic Era'
+            )
+        """)
+
+    # Step 3: Now safe to delete
+    op.execute("""
+        DELETE FROM servers WHERE version = 'Classic Era'
     """)
 
 
