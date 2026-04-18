@@ -351,8 +351,8 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
           region:  parsed.region,
           version: parsed.version,
           faction: factionApi,
-          last:    String(period.points),
           hours:   String(period.hours),
+          last:    String(period.points),
         })
         const res = await fetch(`${API_BASE}/price-history?${params}`)
         if (res.ok) {
@@ -366,6 +366,10 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
               best_ask:  p.best_ask ?? p.index_price_per_1k,
               sources:   [],
             }))
+            const spanHours = points.length > 1
+              ? (toTS(points[points.length - 1]) - toTS(points[0])) / 3600
+              : 0
+            if (spanHours < period.hours * 0.3) points = []
           }
         }
         // If DB empty or unavailable, fall through to OHLC below

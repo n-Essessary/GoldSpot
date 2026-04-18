@@ -206,7 +206,13 @@ describe('PriceChart — faction & controls', () => {
         return {
           ok: true,
           json: async () => ({
+            // Two samples ≥8h apart so span ≥ 30% of default 24H window (guard keeps per-server path)
             points: [
+              {
+                recorded_at: '2026-06-01T04:00:00.000Z',
+                index_price_per_1k: 10,
+                best_ask: 9.5,
+              },
               {
                 recorded_at: '2026-06-01T12:00:00.000Z',
                 index_price_per_1k: 10,
@@ -250,6 +256,11 @@ describe('PriceChart — faction & controls', () => {
           ok: true,
           json: async () => ({
             points: [
+              {
+                recorded_at: '2026-06-01T04:00:00.000Z',
+                index_price_per_1k: 10,
+                best_ask: 9,
+              },
               {
                 recorded_at: '2026-06-01T12:00:00.000Z',
                 index_price_per_1k: 10,
