@@ -468,24 +468,18 @@ async def normalize_offer_batch(
                     lk = alias_key.lower().strip()
                     server_id = alias_map.get(lk)
 
-                    # Version mismatch check: if offer has game_version set,
-                    # verify the batch-resolved server_id matches it.
-                    # Mismatch means alias points to wrong version (e.g. Classic Era
-                    # Firemaw resolved instead of MoP Classic Firemaw).
-                    offer_gv = getattr(offer, "game_version", "")
-                    if server_id is not None and offer_gv:
-                        sd = get_server_data(server_id)
-                        if sd and sd.get("version", "").lower() != offer_gv.lower():
-                            server_id = None  # fall through to fuzzy with game_version
-
                     if server_id is None:
-                        # Fallback: single resolve (fuzzy parse → DB lookup)
-                        # Pass game_version so colliding servers resolve to correct version
+                        # Fallback: single resolve (fuzzy parse → DB lookup).
+                        # Pass game_version only for MoP Classic to disambiguate
+                        # colliding server names — Classic Era config covers multiple
+                        # DB versions (Anniversary, SoD, Classic) so game_version
+                        # must NOT be passed for it (would cause version mismatch).
+                        gv = getattr(offer, "game_version", "")
                         server_id = await resolve_server(
                             alias_key,
                             offer.source,
                             pool,
-                            game_version=getattr(offer, "game_version", ""),
+                            game_version=gv if gv == "MoP Classic" else "",
                         )
                     if server_id is not None:
                         offer.server_id = server_id
