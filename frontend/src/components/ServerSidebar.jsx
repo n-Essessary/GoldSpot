@@ -5,13 +5,13 @@ import styles from './ServerSidebar.module.css'
  * Левая панель с двухуровневым деревом серверов.
  *
  * servers        — массив ServerGroup с бэкенда:
- *                  [{ display_server: "(EU) Anniversary", realms: ["Firemaw", "Spineshatter"], min_price: 0.42 }]
+ *                  [{ display_server, realms, min_price, game_version? }]
  * selectedServer — display_server выбранной группы: "(EU) Anniversary"
  * selectedRealm  — реалм внутри группы: "Spineshatter" (или "" если не выбран)
  * onSelect(server, realm) — колбэк при выборе
  *
  * @param {{
- *   servers: { display_server: string, realms: string[], min_price: number }[]
+ *   servers: { display_server: string, realms: string[], min_price: number, game_version?: string }[]
  *   selectedServer: string
  *   selectedRealm?: string
  *   onSelect: (server: string, realm: string) => void
@@ -30,6 +30,12 @@ export function ServerSidebar({
     const initial = {}
     if (selectedServer) initial[selectedServer] = true
     return initial
+  })
+
+  const [openVersions, setOpenVersions] = useState(() => {
+    const init = {}
+    for (const v of ['MoP Classic', 'Classic Era']) init[v] = true
+    return init
   })
 
   const [query, setQuery] = useState('')
@@ -55,6 +61,20 @@ export function ServerSidebar({
 
   const toggle = (displayServer) =>
     setOpenGroups((prev) => ({ ...prev, [displayServer]: !prev[displayServer] }))
+
+  const toggleVersion = (v) =>
+    setOpenVersions((prev) => ({ ...prev, [v]: !prev[v] }))
+
+  const versionGroups = useMemo(() => {
+    const order = ['MoP Classic', 'Classic Era']
+    const map = {}
+    for (const s of servers) {
+      const v = s.game_version || 'Classic Era'
+      if (!map[v]) map[v] = []
+      map[v].push(s)
+    }
+    return order.filter((v) => map[v]).map((v) => ({ version: v, groups: map[v] }))
+  }, [servers])
 
   const filteredRows = useMemo(() => {
     const raw = debouncedQuery.trim()
@@ -123,72 +143,96 @@ export function ServerSidebar({
         aria-label="Поиск сервера"
       />
 
-      <div className={styles.heading}>Серверы</div>
-
-      {filteredRows.map(
-        ({ group: { display_server, realms }, hidden, expanded, realmsToShow, highlightRealms }) => {
-          if (hidden) return null
-
-          const isOpen = searchActive ? !!expanded : !!openGroups[display_server]
-          const isGroupActive = display_server === selectedServer
-          const hasRealms = realms.length > 0
-
-          return (
-            <div key={display_server} className={styles.group}>
-              {/* ── Заголовок группы ── */}
-              <div
-                className={
-                  isGroupActive
-                    ? `${styles.groupTitle} ${styles.groupTitleActive}`
-                    : styles.groupTitle
-                }
-                onClick={() => {
-                  if (hasRealms) {
-                    if (!searchActive) toggle(display_server)
-                  } else {
-                    onSelect(display_server, '')
-                    onNavigate?.()
-                  }
-                }}
-                title={display_server}
-              >
-                <span className={styles.arrow}>
-                  {hasRealms ? (isOpen ? '▼' : '▶') : '·'}
-                </span>
-                {display_server}
-              </div>
-
-              {/* ── Реалмы внутри группы ── */}
-              {isOpen && hasRealms && (
-                <div className={styles.groupItems}>
-                  {realmsToShow.map((realm) => {
-                    const isActive = isGroupActive && realm === selectedRealm
-                    return (
-                      <div
-                        key={realm}
-                        className={[
-                          styles.item,
-                          isActive ? styles.active : '',
-                          highlightRealms ? styles.realmMatch : '',
-                        ]
-                          .filter(Boolean)
-                          .join(' ')}
-                        onClick={() => {
-                          onSelect(display_server, realm)
-                          onNavigate?.()
-                        }}
-                        title={realm}
-                      >
-                        {realm}
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
+      {versionGroups.map(({ version }) => {
+        const isVersionOpen = openVersions[version] ?? true
+        const versionFilteredRows = filteredRows.filter(
+          (row) => (row.group.game_version || 'Classic Era') === version,
+        )
+        if (versionFilteredRows.every((r) => r.hidden)) return null
+        return (
+          <div key={version}>
+            <div
+              className={styles.heading}
+              style={{ cursor: 'pointer', userSelect: 'none' }}
+              onClick={() => toggleVersion(version)}
+            >
+              <span className={styles.arrow}>{isVersionOpen ? '▼' : '▶'}</span>
+              {version}
             </div>
-          )
-        },
-      )}
+            {isVersionOpen &&
+              versionFilteredRows.map(
+                ({
+                  group: { display_server, realms },
+                  hidden,
+                  expanded,
+                  realmsToShow,
+                  highlightRealms,
+                }) => {
+                  if (hidden) return null
+
+                  const isOpen = searchActive ? !!expanded : !!openGroups[display_server]
+                  const isGroupActive = display_server === selectedServer
+                  const hasRealms = realms.length > 0
+
+                  return (
+                    <div key={display_server} className={styles.group}>
+                      {/* ── Заголовок группы ── */}
+                      <div
+                        className={
+                          isGroupActive
+                            ? `${styles.groupTitle} ${styles.groupTitleActive}`
+                            : styles.groupTitle
+                        }
+                        onClick={() => {
+                          if (hasRealms) {
+                            if (!searchActive) toggle(display_server)
+                          } else {
+                            onSelect(display_server, '')
+                            onNavigate?.()
+                          }
+                        }}
+                        title={display_server}
+                      >
+                        <span className={styles.arrow}>
+                          {hasRealms ? (isOpen ? '▼' : '▶') : '·'}
+                        </span>
+                        {display_server}
+                      </div>
+
+                      {/* ── Реалмы внутри группы ── */}
+                      {isOpen && hasRealms && (
+                        <div className={styles.groupItems}>
+                          {realmsToShow.map((realm) => {
+                            const isActive = isGroupActive && realm === selectedRealm
+                            return (
+                              <div
+                                key={realm}
+                                className={[
+                                  styles.item,
+                                  isActive ? styles.active : '',
+                                  highlightRealms ? styles.realmMatch : '',
+                                ]
+                                  .filter(Boolean)
+                                  .join(' ')}
+                                onClick={() => {
+                                  onSelect(display_server, realm)
+                                  onNavigate?.()
+                                }}
+                                title={realm}
+                              >
+                                {realm}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )
+                },
+              )}
+          </div>
+        )
+      })}
     </aside>
   )
 }

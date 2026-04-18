@@ -85,15 +85,13 @@ _SNAP_WRITE_THRESHOLD = 0.005   # 0.5%
 _last_snap_price: dict[str, float] = {}
 
 _VERSION_ORDER: dict[str, int] = {
-    # Normal realms sorted by version
-    "Anniversary":         0,
-    "Season of Discovery": 1,
-    "Classic":             3,
-    # Hardcore variants come after their Normal counterpart
-    # (e.g. "(EU) Anniversary · Hardcore" sorts after "(EU) Anniversary")
-    "Anniversary · Hardcore":         10,
+    "MoP Classic":             0,
+    "Anniversary":             1,
+    "Season of Discovery":     2,
+    "Classic":                 4,
+    "Anniversary · Hardcore":  10,
     "Season of Discovery · Hardcore": 11,
-    "Classic · Hardcore":             13,
+    "Classic · Hardcore":      13,
 }
 
 
@@ -281,6 +279,25 @@ def _version_rank(display_server: str) -> int:
         if ver.lower() in ds:
             return _VERSION_ORDER[ver]
     return 99
+
+
+def _game_version_from_display(display_server: str) -> str:
+    """Extract game_version from display_server string.
+    "(EU) MoP Classic"         → "MoP Classic"
+    "(EU) Anniversary"         → "Classic Era"
+    "(EU) Season of Discovery" → "Classic Era"
+    "(EU) Classic"             → "Classic Era"
+    "(EU) Anniversary · Hardcore" → "Classic Era"
+    """
+    ds = display_server.strip()
+    # Strip "(REGION) " prefix
+    m = re.match(r"^\([A-Za-z]{2,}\)\s*(.+)$", ds)
+    body = m.group(1).strip() if m else ds
+    # Strip Hardcore suffix
+    body = body.replace(" · Hardcore", "").strip()
+    if body == "MoP Classic":
+        return "MoP Classic"
+    return "Classic Era"
 
 
 # ── Public cache read ─────────────────────────────────────────────────────────
@@ -809,6 +826,7 @@ def get_servers() -> list[ServerGroup]:
             display_server=ds,
             realms=sorted(group_realms.get(ds, set())),
             min_price=round(group_min_price[ds], 4),
+            game_version=_game_version_from_display(ds),
         )
         for ds in sorted_groups
     ]

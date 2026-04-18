@@ -200,10 +200,12 @@ class ServerGroup(BaseModel):
     display_server  — group label: "(EU) Anniversary"
     realms          — individual realm names (G2G only; empty for FunPay-only)
     min_price       — best_ask from IndexPrice (realistic buy price), per 1k gold
+    game_version    — "Classic Era" | "MoP Classic" | etc., derived from display_server
     """
     display_server: str
     realms: list[str]
     min_price: float
+    game_version: str = ""
 
 
 class ServersResponse(BaseModel):
