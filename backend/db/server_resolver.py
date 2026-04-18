@@ -121,6 +121,14 @@ _BRACKET_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# G2G bracket with region only: "Galakras [US] - Horde" (no version)
+# Only used when game_version is explicitly provided by parser config.
+_BRACKET_REGION_ONLY_RE = re.compile(
+    r"^(?P<server>.+?)\s*\[(?P<region>[A-Za-z]{2,})\]\s*"
+    r"(?:-\s*(?:Alliance|Horde))?$",
+    re.IGNORECASE,
+)
+
 # NA is treated as US in the canonical registry
 _REGION_MAP = {"NA": "US"}
 
@@ -499,6 +507,14 @@ async def _fuzzy_resolve(
             return await _lookup_server(server_name, region, gv, pool)
         version = _normalise_version(m.group("version"))
         return await _lookup_server(server_name, region, version, pool)
+
+    if not m and gv:
+        # G2G MoP format: "Galakras [US] - Horde" — region only, no version
+        ro = _BRACKET_REGION_ONLY_RE.match(raw_title.strip())
+        if ro:
+            server_name = ro.group("server").strip()
+            region      = _normalise_region(ro.group("region"))
+            return await _lookup_server(server_name, region, gv, pool)
 
     # FunPay group format: "(EU) Anniversary", "(US) Classic Era - Firemaw"
     fp_m = re.match(
