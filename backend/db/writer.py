@@ -9,7 +9,7 @@ Responsibilities:
   query_server_history   — delegates to tiered storage (snapshots_1h / 5m / 1m)
   query_server_history_short — delegates to tiered storage (snapshots_1m)
 
-Migration 012 dropped server_price_history and server_price_history_short.
+Migration 012 dropped the legacy per-server history tables.
 Per-server history is now served from the 4-tier rolling tables via db/tiered_snapshots.py.
 
 All errors are non-fatal: logged, never propagated to parser loop.
@@ -218,7 +218,7 @@ async def upsert_server_index(
     """
     Upsert the *current* index in server_price_index (one row per server+faction).
 
-    History writes (server_price_history / server_price_history_short) have been
+    History writes to the legacy per-server tables have been
     removed — those tables were dropped in migration 012 and replaced by the
     4-tier rolling storage (snapshots_1m / 5m / 1h / 1d) managed by
     service/tiered_snapshot_loop.py.
@@ -360,7 +360,7 @@ async def query_index_history(
 
 
 # ── New (Task 4): per-server history query ────────────────────────────────────
-# server_price_history and server_price_history_short were dropped in migration 012.
+# Legacy per-server history tables were dropped in migration 012.
 # These functions now delegate to the tiered storage (db/tiered_snapshots.py) so
 # existing callers (router Mode 2, tests) continue to work transparently.
 
@@ -374,71 +374,18 @@ async def query_server_history(
 ) -> list[dict]:
     """
     Return price history for a specific real server.
-
     Delegates to tiered storage (query_tiered_history_by_name).
-    The tier selected depends on `hours`:
-      ≤ 24h  → snapshots_1m, ≤ 720h → snapshots_5m, ≤ 17520h → snapshots_1h,
-      else   → snapshots_1d.
-
-    Response shape is identical to the legacy version:
-      [{recorded_at, index_price, index_price_per_1k, best_ask, sample_size}, ...]
+    Legacy per-server history tables were removed in migration 012.
     """
-    pool = await get_pool()
-    if pool is None:
-        return []
-
-    try:
-        rows = await pool.fetch(
-            """
-            SELECT
-                h.recorded_at,
-                h.index_price,
-                h.best_ask,
-                h.sample_size
-            FROM server_price_history h
-            JOIN servers s ON s.id = h.server_id
-            WHERE s.name = $1
-              AND s.region = $2
-              AND s.version = $3
-              AND h.faction = $4
-              AND h.recorded_at >= NOW() - ($5::integer * INTERVAL '1 hour')
-            ORDER BY h.recorded_at DESC
-            LIMIT $6
-            """,
-            server_name, region, version, faction, hours, last,
-        )
-    except Exception:
-        # Non-fatal fallback for deployments where legacy history table is absent.
-        from db.tiered_snapshots import query_tiered_history_by_name
-        return await query_tiered_history_by_name(
-            server_name=server_name,
-            region=region,
-            version=version,
-            faction=faction,
-            hours=hours,
-            max_points=last,
-        )
-
-    out: list[dict] = []
-    for r in rows:
-        idx_per_1k = float(r["index_price"] or 0) * 1000.0
-        best_ask_per_1k = (
-            float(r["best_ask"]) * 1000.0
-            if r["best_ask"] is not None
-            else idx_per_1k
-        )
-        out.append(
-            {
-                "recorded_at": r["recorded_at"].isoformat(),
-                "index_price": float(r["index_price"] or 0),
-                "index_price_per_1k": round(idx_per_1k, 4),
-                "best_ask": round(best_ask_per_1k, 4),
-                "sample_size": int(r["sample_size"] or 0),
-            }
-        )
-    # rows are DESC from DB (newest first) — reverse to ASC for chart
-    out.reverse()
-    return out
+    from db.tiered_snapshots import query_tiered_history_by_name
+    return await query_tiered_history_by_name(
+        server_name=server_name,
+        region=region,
+        version=version,
+        faction=faction,
+        hours=hours,
+        max_points=last,
+    )
 
 
 async def query_server_history_short(
@@ -533,8 +480,8 @@ async def query_price_index_all(faction: str = "All") -> list[dict]:
 async def cleanup_old_snapshots() -> None:
     """Background task: retention cleanup for legacy tables (runs daily).
 
-    server_price_history and server_price_history_short were dropped in
-    migration 012 — their rolling-retention is now managed by
+    The legacy per-server history tables were dropped in
+    migration 012 — their rolling retention is now managed by
     service/tiered_snapshot_loop.py (cleanup_snapshots_*).
 
     This task retains cleanup for the two remaining legacy tables:
