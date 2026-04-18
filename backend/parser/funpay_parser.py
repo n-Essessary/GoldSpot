@@ -492,6 +492,20 @@ async def _fetch_chip(config: ChipConfig) -> list[Offer]:
     for offer in raw_offers:
         offer.game_version = config.game_version
 
+    # For single-region chips (146 EU, 147 US), .tc-server is often a bare realm
+    # name with no "(REGION) Version" prefix. Build "(REGION) Version - Realm"
+    # so _normalize_funpay_offer can parse group + realm unchanged. chip 114
+    # (region="EU+US+RU") already includes the prefix from HTML.
+    if "+" not in config.region:
+        for offer in raw_offers:
+            bare = (offer.display_server or "").strip()
+            if bare:
+                offer.display_server = (
+                    f"({config.region}) {config.game_version} - {bare}"
+                )
+            else:
+                offer.display_server = f"({config.region}) {config.game_version}"
+
     return raw_offers
 
 
