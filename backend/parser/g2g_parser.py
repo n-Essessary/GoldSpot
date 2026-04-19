@@ -458,7 +458,7 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient, config: GameConfig) 
 
 # ── Offer conversion & deduplication ─────────────────────────────────────────
 
-_MAX_PRICE_PER_1K = 300.0  # Hard ceiling: above this is anomalous, skip
+_MAX_PRICE_PER_1K = 5000.0  # Hard ceiling: above this is anomalous, skip
 
 
 def _to_offer(
