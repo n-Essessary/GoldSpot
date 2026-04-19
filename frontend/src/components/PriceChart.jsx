@@ -325,6 +325,10 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         if (askData) rows.push({ label: 'Cheapest', color: '#9A6010', value: fmt(askData.value) })
       }
 
+      rows.sort((a, b) => {
+        const parse = v => parseFloat(v.replace('$', ''))
+        return parse(b.value) - parse(a.value)
+      })
       tooltip.innerHTML = rows.map(r => `
         <div style="display:flex; align-items:center; gap:6px; line-height:1;">
           <span style="
