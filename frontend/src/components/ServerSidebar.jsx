@@ -162,7 +162,7 @@ export function ServerSidebar({
             {isVersionOpen &&
               versionFilteredRows.map(
                 ({
-                  group: { display_server, realms },
+                  group,
                   hidden,
                   expanded,
                   realmsToShow,
@@ -170,6 +170,8 @@ export function ServerSidebar({
                 }) => {
                   if (hidden) return null
 
+                  const display_server = group.display_server
+                  const realms = group.realms
                   const isOpen = searchActive ? !!expanded : !!openGroups[display_server]
                   const isGroupActive = display_server === selectedServer
                   const hasRealms = realms.length > 0
@@ -204,6 +206,8 @@ export function ServerSidebar({
                         <div className={styles.groupItems}>
                           {realmsToShow.map((realm) => {
                             const isActive = isGroupActive && realm === selectedRealm
+                            const sources = group.realm_sources?.[realm] ?? []
+                            const isMultiSource = sources.length > 1
                             return (
                               <div
                                 key={realm}
@@ -221,6 +225,21 @@ export function ServerSidebar({
                                 title={realm}
                               >
                                 {realm}
+                                {isMultiSource && (
+                                  <span
+                                    style={{
+                                      display: 'inline-block',
+                                      width: 5,
+                                      height: 5,
+                                      borderRadius: '50%',
+                                      background: '#1D9E75',
+                                      marginLeft: 6,
+                                      verticalAlign: 'middle',
+                                      flexShrink: 0,
+                                      opacity: 0.85,
+                                    }}
+                                  />
+                                )}
                               </div>
                             )
                           })}

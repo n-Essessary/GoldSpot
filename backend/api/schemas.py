@@ -204,6 +204,7 @@ class ServerGroup(BaseModel):
     """
     display_server: str
     realms: list[str]
+    realm_sources: dict[str, list[str]] = {}
     min_price: float
     game_version: str = ""
 

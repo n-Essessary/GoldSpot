@@ -810,6 +810,7 @@ def get_servers() -> list[ServerGroup]:
     """
     group_min_price: dict[str, float]    = {}
     group_realms:    dict[str, set[str]] = {}
+    group_realm_sources: dict[str, dict[str, set[str]]] = {}
 
     for offer in get_all_offers():
         ds = offer.display_server
@@ -822,6 +823,9 @@ def get_servers() -> list[ServerGroup]:
         group_realms.setdefault(ds, set())
         if offer.server_name:
             group_realms[ds].add(offer.server_name)
+            group_realm_sources.setdefault(ds, {})
+            group_realm_sources[ds].setdefault(offer.server_name, set())
+            group_realm_sources[ds][offer.server_name].add(offer.source)
         cur = group_min_price.get(ds)
         if cur is None or offer.price_per_1k < cur:
             group_min_price[ds] = offer.price_per_1k
@@ -845,6 +849,10 @@ def get_servers() -> list[ServerGroup]:
         ServerGroup(
             display_server=ds,
             realms=sorted(group_realms.get(ds, set())),
+            realm_sources={
+                realm: sorted(group_realm_sources.get(ds, {}).get(realm, set()))
+                for realm in sorted(group_realms.get(ds, set()))
+            },
             min_price=round(group_min_price[ds], 4),
             game_version=_game_version_from_display(ds),
         )
