@@ -366,17 +366,13 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
               best_ask:  p.best_ask ?? p.index_price_per_1k,
               sources:   [],
             }))
-            const spanHours = points.length > 1
-              ? (toTS(points[points.length - 1]) - toTS(points[0])) / 3600
-              : 0
-            if (spanHours < period.hours * 0.3) points = []
           }
         }
-        // If DB empty or unavailable, fall through to OHLC below
+        // Group-level view may fall through to legacy OHLC below; realm mode does not.
       }
 
-      if (points.length === 0) {
-        // ── Legacy mode (group OHLC) ──────────────────────────────────────────
+      if (points.length === 0 && !(realmName && parsed)) {
+        // ── Legacy mode (group OHLC) — only for group-level view, never for realm ──
         const params = new URLSearchParams({
           server:     serverSlug,
           faction: factionApi,
