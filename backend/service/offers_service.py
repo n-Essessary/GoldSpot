@@ -388,22 +388,24 @@ def compute_server_index(
     if len(matching) < _MIN_OFFERS:
         return None
 
-    # Top-2 per platform
+    # Top-1 per (source, faction) pair
     by_source: dict[str, list[Offer]] = {}
     for o in matching:
         by_source.setdefault(o.source, []).append(o)
 
-    top: list[Offer] = []
-    for source_offers in by_source.values():
-        source_offers.sort(key=lambda o: o.price_per_1k)
-        top.extend(source_offers[:2])
+    top_map: dict[tuple[str, str], Offer] = {}
+    for o in matching:
+        key = (o.source, o.faction)
+        if key not in top_map or o.price_per_1k < top_map[key].price_per_1k:
+            top_map[key] = o
+    top = list(top_map.values())
 
     if len(top) < _MIN_OFFERS:
         return None
 
     top.sort(key=lambda o: o.price_per_1k)
 
-    # Compute average price per platform using the top-2 offers per platform
+    # Compute average price per platform (mean of one offer per (source, faction) per source)
     platform_avgs: dict[str, float] = {}
     for src in by_source:
         src_top = [o for o in top if o.source == src]
