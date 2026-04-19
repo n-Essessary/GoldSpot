@@ -8,6 +8,16 @@ import { createChart, ColorType, LineStyle, CrosshairMode } from 'lightweight-ch
 import { API_BASE } from '../api/offers'
 import styles from './PriceChart.module.css'
 
+function smoothData(data, window = 3) {
+  return data.map((point, i) => {
+    const half = Math.floor(window / 2)
+    const start = Math.max(0, i - half)
+    const end   = Math.min(data.length - 1, i + half)
+    const avg   = data.slice(start, end + 1).reduce((s, p) => s + p.value, 0) / (end - start + 1)
+    return { ...point, value: avg }
+  })
+}
+
 const PERIODS = [
   { label: '1H',  hours: 1,   points: 200 },
   { label: '6H',  hours: 6,   points: 300 },
@@ -654,13 +664,13 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
           .map(p => ({ time: p.time, value: conv(p.value) }))
       )
 
-      seriesRef.current.index?.setData(indexData)
+      seriesRef.current.index?.setData(smoothData(indexData))
       if (allRealmMode) {
         seriesRef.current.ask?.applyOptions({ visible: false })
         seriesRef.current.askAlliance?.applyOptions({ visible: true })
         seriesRef.current.askHorde?.applyOptions({ visible: true })
-        seriesRef.current.askAlliance?.setData(allianceData)
-        seriesRef.current.askHorde?.setData(hordeData)
+        seriesRef.current.askAlliance?.setData(smoothData(allianceData))
+        seriesRef.current.askHorde?.setData(smoothData(hordeData))
       } else {
         // Hide yellow ask always — use colored faction series
         seriesRef.current.ask?.applyOptions({ visible: false })
@@ -675,12 +685,12 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
           seriesRef.current.askAlliance?.applyOptions({ visible: true })
           seriesRef.current.askHorde?.applyOptions({ visible: false })
           seriesRef.current.askHorde?.setData([])
-          seriesRef.current.askAlliance?.setData(extendToNow(askData))
+          seriesRef.current.askAlliance?.setData(smoothData(extendToNow(askData)))
         } else if (factionApi === 'Horde') {
           seriesRef.current.askHorde?.applyOptions({ visible: true })
           seriesRef.current.askAlliance?.applyOptions({ visible: false })
           seriesRef.current.askAlliance?.setData([])
-          seriesRef.current.askHorde?.setData(extendToNow(askData))
+          seriesRef.current.askHorde?.setData(smoothData(extendToNow(askData)))
         } else {
           // fallback — hide all ask series
           seriesRef.current.ask?.applyOptions({ visible: false })
