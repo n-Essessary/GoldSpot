@@ -685,12 +685,31 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         seriesRef.current.askAlliance?.setData(allianceData)
         seriesRef.current.askHorde?.setData(hordeData)
       } else {
-        seriesRef.current.ask?.applyOptions({ visible: true })
-        seriesRef.current.ask?.setData(askData)
-        seriesRef.current.askAlliance?.applyOptions({ visible: false })
-        seriesRef.current.askHorde?.applyOptions({ visible: false })
-        seriesRef.current.askAlliance?.setData([])
-        seriesRef.current.askHorde?.setData([])
+        // Hide yellow ask always — use colored faction series
+        seriesRef.current.ask?.applyOptions({ visible: false })
+
+        const extendToNow = (data) => {
+          if (data.length === 0) return data
+          const last = data[data.length - 1]
+          return nowTs > last.time ? [...data, { time: nowTs, value: last.value }] : data
+        }
+
+        if (factionApi === 'Alliance') {
+          seriesRef.current.askAlliance?.applyOptions({ visible: true })
+          seriesRef.current.askHorde?.applyOptions({ visible: false })
+          seriesRef.current.askHorde?.setData([])
+          seriesRef.current.askAlliance?.setData(extendToNow(askData))
+        } else if (factionApi === 'Horde') {
+          seriesRef.current.askHorde?.applyOptions({ visible: true })
+          seriesRef.current.askAlliance?.applyOptions({ visible: false })
+          seriesRef.current.askAlliance?.setData([])
+          seriesRef.current.askHorde?.setData(extendToNow(askData))
+        } else {
+          // fallback — hide all ask series
+          seriesRef.current.ask?.applyOptions({ visible: false })
+          seriesRef.current.askAlliance?.applyOptions({ visible: false })
+          seriesRef.current.askHorde?.applyOptions({ visible: false })
+        }
       }
 
       const latestIndex = indexData[indexData.length - 1]
