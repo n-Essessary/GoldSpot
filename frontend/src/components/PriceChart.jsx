@@ -321,7 +321,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
 
   useEffect(() => {
     fittedRef.current = false
-  }, [serverSlug, realmName, faction, period])
+  }, [serverSlug, realmName, faction, period, showPer1])
 
   useEffect(() => {
     isFirstLoadRef.current = false
@@ -469,19 +469,13 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
 
       const timeScale = chartRef.current?.timeScale()
 
-      if (!fittedRef.current || !savedRange) {
+      if (!fittedRef.current) {
         timeScale?.fitContent()
         fittedRef.current = true
+      } else if (savedRange) {
+        timeScale?.setVisibleLogicalRange(savedRange)
       } else {
-        const firstTs = indexData[0]?.time
-        const lastTs  = indexData[indexData.length - 1]?.time
-        if (firstTs && lastTs) {
-          const visible = timeScale?.getVisibleRange()
-          timeScale?.setVisibleRange({
-            from: Math.max(visible?.from ?? firstTs, firstTs),
-            to:   Math.min(visible?.to   ?? lastTs,  lastTs),
-          })
-        }
+        timeScale?.fitContent()
       }
     } catch {
       // сетевой сбой — граф остаётся со старыми данными, loading скрывается

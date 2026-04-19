@@ -287,7 +287,7 @@ async def query_tiered_history(
     """Smart router: select the finest tier that still covers `hours`.
 
     Tier selection:
-      hours ≤ 24    → snapshots_1m  (1-min resolution, 24h retention)
+      hours ≤ 6     → snapshots_1m  (1-min resolution, 24h retention)
       hours ≤ 720   → snapshots_5m  (5-min resolution, 30d retention)
       hours ≤ 17520 → snapshots_1h  (1-hour resolution, 2y retention)
       else          → snapshots_1d  (1-day resolution, forever)
@@ -306,7 +306,7 @@ async def query_tiered_history(
 
     faction_db = _faction_to_db(faction)
 
-    if hours <= 24:
+    if hours <= 6:
         table = "snapshots_1m"
     elif hours <= 720:        # 30 days
         table = "snapshots_5m"

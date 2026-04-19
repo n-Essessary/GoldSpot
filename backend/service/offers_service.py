@@ -402,6 +402,10 @@ def compute_server_index(
         return None
 
     top.sort(key=lambda o: o.price_per_1k)
+    cheapest = top[0].price_per_1k
+    top = [o for o in top if o.price_per_1k <= cheapest * 2.0]
+    if len(top) < _MIN_OFFERS:
+        return None
     prices = [o.price_per_1k for o in top]
     mean_per_1k = sum(prices) / len(prices)
 
