@@ -458,8 +458,6 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient, config: GameConfig) 
 
 # ── Offer conversion & deduplication ─────────────────────────────────────────
 
-_MAX_PRICE_PER_1K = 5000.0  # Hard ceiling: above this is anomalous, skip
-
 
 def _to_offer(
     raw: G2GOffer,
@@ -483,8 +481,8 @@ def _to_offer(
       server         — set to server_name.lower() as temporary slug; overwritten.
       realm_type     — default "Normal"; canonicalization sets it from registry.
 
-    Offers with price <= 0 or above ceiling are dropped here (not quarantined)
-    because these are clearly invalid data points, not unresolved servers.
+    Offers with price <= 0 are dropped here (not quarantined) because these are
+    clearly invalid data points, not unresolved servers.
 
     Raw price contract (Task 2):
       raw_price      = unit_price_in_usd  (price per 1 gold unit, USD)
@@ -493,10 +491,6 @@ def _to_offer(
     price_per_1k is derived in Offer.model_validator: raw_price * 1000.
     """
     if raw.price_usd <= 0:
-        return None
-
-    # Validate against ceiling using derived price (raw_price * 1000)
-    if raw.price_usd * 1000.0 > _MAX_PRICE_PER_1K:
         return None
 
     if raw.available_qty <= 0 and not skip_qty_check:

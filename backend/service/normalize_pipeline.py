@@ -4,8 +4,7 @@ service/normalize_pipeline.py — Deterministic offer normalization pipeline.
 Pipeline for every raw offer coming out of a parser:
 
     RAW OFFER → [1. validate] → [2. resolve] → [3. canonicalize]
-              → [4. is_active check] → [5. price validate / reroute]
-              → [6. dedup] → NORMALIZED OFFER or QUARANTINE
+              → [4. is_active check] → [5. dedup] → NORMALIZED OFFER or QUARANTINE
 
 Guarantees:
   1. Deterministic: same input + same DB state → same output, always.
@@ -22,11 +21,7 @@ Guarantees:
      logged with reason="wrong_region_overridden" (informational, not quarantine).
   8. Alias conflicts (two server_ids for same alias) → quarantine with
      reason="alias_conflict". Not auto-resolved.
-  9. Price validation is advisory only — never creates new server records.
-     If an offer's price doesn't fit the resolved server's profile, we attempt
-     to reroute to the same server_name + region with a different version.
-     If no better match → offer is kept with the original resolution.
- 10. Dedup by (source, offer_id) within each batch.
+  9. Dedup by (source, offer_id) within each batch.
 
 What this pipeline does NOT touch:
   • raw_price, raw_price_unit, lot_size, price_per_1k (parser contract)
@@ -62,11 +57,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_FACTION  = "Horde"
 _VALID_FACTIONS   = frozenset({"horde", "alliance"})
-
-# Price-rerouting bounds relative to profile median.
-# Only used when a price profile exists; otherwise validation is skipped.
-_PRICE_LOW_FACTOR  = 0.20   # < 20 % of median  → suspiciously cheap
-_PRICE_HIGH_FACTOR = 5.00   # > 500 % of median → suspiciously expensive
 
 # Source priority for breaking ties when two sources produce the same
 # (server_name, region, version) after canonicalisation.
@@ -243,68 +233,6 @@ def _apply_canonical(offer: "Offer", server_data: dict) -> None:
     offer.realm_type     = canonical_realm_type
 
 
-# ── Step 4: Price validation & rerouting ─────────────────────────────────────
-
-def _price_fits_profile(price_per_1k: float, profile) -> bool:
-    """
-    True if price_per_1k falls within the acceptable range of the profile.
-    True (skip) if profile is None — no data means no rejection.
-    """
-    if profile is None:
-        return True
-    low  = profile.median * _PRICE_LOW_FACTOR
-    high = profile.median * _PRICE_HIGH_FACTOR
-    return low <= price_per_1k <= high
-
-
-async def _try_reroute(offer: "Offer", pool) -> bool:
-    """
-    Attempt price-assisted rerouting.
-
-    If the offer's price doesn't fit the resolved server's profile, look for
-    another server with the same name + region but a different version whose
-    profile the price DOES fit. If found, canonicalize the offer to that
-    server and return True. Otherwise return False (offer unchanged).
-
-    Constraint: never creates new server records — only routes among existing ones.
-    """
-    from db.server_resolver import find_server_versions, get_server_data
-    from service.price_profiles import get_profile
-
-    if not offer.server_name or pool is None:
-        return False
-
-    # Extract region from current display_server
-    m = re.match(r"^\(([A-Z]{2,})\)", (offer.display_server or "").upper())
-    if not m:
-        return False
-    region = m.group(1)
-
-    alternatives = await find_server_versions(offer.server_name, region, pool)
-
-    for alt in alternatives:
-        if alt["id"] == offer.server_id:
-            continue  # skip current assignment
-
-        profile = get_profile(alt["id"], "All")
-        if profile is None:
-            continue   # no profile data for this version yet
-
-        if _price_fits_profile(offer.price_per_1k, profile):
-            logger.debug(
-                "normalize: price reroute offer_id=%s  %r→%r  server_id %s→%d",
-                offer.id,
-                offer.display_server,
-                f"({alt['region']}) {alt['version']}",
-                offer.server_id,
-                alt["id"],
-            )
-            _apply_canonical(offer, alt)
-            return True
-
-    return False
-
-
 # ── Alias key builders ────────────────────────────────────────────────────────
 
 _DISPLAY_RE = re.compile(r"^\((?P<region>[A-Z]{2,})\)\s*(?P<version>.+)$")
@@ -414,7 +342,6 @@ async def normalize_offer_batch(
         resolve_server,
         resolve_server_batch,
     )
-    from service.price_profiles import get_profile
 
     normalized:  list["Offer"]          = []
     quarantined: list[QuarantinedOffer] = []
@@ -517,10 +444,10 @@ async def normalize_offer_batch(
                     ))
                     continue
                 # Offer passes through with server_id=None but valid
-                # display_server — skip canonicalization, is_active check,
-                # and price rerouting (all require server_id).
+                # display_server — skip canonicalization and is_active check
+                # (both require server_id).
 
-            # ── Step 3–5: canonicalize / is_active / price (only with server_id)
+            # ── Step 3–4: canonicalize / is_active (only with server_id)
             if offer.server_id is not None:
                 # Step 3: canonicalize from registry
                 # Version, region, realm_type, name — ALWAYS from canonical
@@ -547,14 +474,7 @@ async def normalize_offer_batch(
                     ))
                     continue
 
-                # Step 5: price validation + optional rerouting
-                # Price never creates servers; it only selects among existing.
-                profile = get_profile(offer.server_id, "All")
-                if not _price_fits_profile(offer.price_per_1k, profile):
-                    await _try_reroute(offer, pool)
-                    # If reroute fails, offer keeps original server — not quarantined.
-
-            # ── Step 6: dedup by (source, offer_id) ──────────────────────────
+            # ── Step 5: dedup by (source, offer_id) ──────────────────────────
             dedup_key = f"{offer.source}:{offer.id}"
             if dedup_key in seen_ids:
                 logger.debug(

@@ -12,14 +12,14 @@ Architecture:
 Task 2: price_per_1k is NEVER stored; always derived from raw_price at read-time.
 Task 3: server_resolver maps raw titles → canonical server_id.
 Task 4: index computed per individual server (not per group).
-Task 5: normalize_pipeline handles validation, canonicalization, price validation,
-        price-assisted rerouting, and deduplication (source, offer_id).
+Task 5: normalize_pipeline handles validation, canonicalization, and
+        deduplication (source, offer_id).
 
 Normalization flow (per parse cycle):
   raw offers
     → [phase 0] _normalize_*_offer()   — display_server string cleanup
     → [phase 1] normalize_offer_batch() — validate / resolve / canonicalize /
-                                           price-validate / dedup
+                                           dedup
     → cached in _cache[source]
     → quarantine items added to _quarantine ring buffer
 

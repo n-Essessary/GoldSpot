@@ -47,7 +47,7 @@ _CACHE_TTL        = 60.0   # seconds
 # (name, region, version) for a resolved server_id without extra DB calls.
 _server_data_cache: dict[int, dict] = {}
 # {(name_lower, region_upper): [{"id", "name", "region", "version"}, ...]}
-# Used by find_server_versions() for price-rerouting lookups.
+# Used by find_server_versions() for alternate-version lookups.
 _server_versions_index: dict[tuple[str, str], list[dict]] = {}
 
 # ── Alias-cache failure / circuit-breaker state ───────────────────────────────
@@ -387,9 +387,8 @@ async def find_server_versions(
 
     Each entry: {"id", "name", "region", "version"}.
 
-    Used by normalize_pipeline for price-assisted rerouting: when an offer's
-    price doesn't fit the resolved server's profile, we check whether it fits
-    another version (e.g. "Classic" vs "Anniversary") of the same realm.
+    Callers that need every active version of a realm (same name + region),
+    e.g. for analytics or future routing logic.
 
     Tries in-process cache first; falls back to DB on cache miss.
     """
