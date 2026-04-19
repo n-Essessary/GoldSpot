@@ -316,12 +316,16 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
             value: fmt(askData.value),
           })
         }
-      } else if (chipOk(askData)) {
-        rows.push({
-          label: 'Cheapest',
-          color: '#9A6010',
-          value: fmt(askData.value),
-        })
+      } else {
+        if (chipOk(askData)) {
+          const isAlliance = factionRef.current === 'Alliance'
+          const isHorde    = factionRef.current === 'Horde'
+          rows.push({
+            label: isAlliance ? 'Cheapest Alliance' : isHorde ? 'Cheapest Horde' : 'Cheapest',
+            color: isAlliance ? '#4A90D9' : isHorde ? '#C0392B' : '#9A6010',
+            value: fmt(askData.value),
+          })
+        }
       }
 
       tooltip.innerHTML = rows.map(r => `
