@@ -80,7 +80,9 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   const seriesRef    = useRef({})
   const fittedRef    = useRef(false)
   const isFirstLoadRef = useRef(true)
+  const lastContextRef = useRef(null)
   const loadGenRef   = useRef(0)
+  const loadGenContextKeyRef = useRef(null)
   const [period,  setPeriod]  = useState(PERIODS[2])   // 24H default
   const [loading, setLoading] = useState(false)
   const [empty,   setEmpty]   = useState(false)
@@ -116,7 +118,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       },
       rightPriceScale: {
         borderColor:   'rgba(156,154,146,0.15)',
-        scaleMargins:  { top: 0.12, bottom: 0.12 },
+        scaleMargins:  { top: 0.05, bottom: 0.05 },
         minimumWidth:  60,
       },
       timeScale: {
@@ -321,17 +323,17 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   }, [showPer1])
 
   useEffect(() => {
-    fittedRef.current = false
-    loadGenRef.current += 1
-  }, [serverSlug, realmName, faction, period, showPer1])
-
-  useEffect(() => {
     isFirstLoadRef.current = false
   }, [])
 
   // ── Загрузка данных ────────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
     if (!serverSlug || serverSlug === 'all') return
+    const contextKey = `${serverSlug}|${realmName}|${faction}|${period.label}|${showPer1}`
+    if (loadGenContextKeyRef.current !== contextKey) {
+      loadGenRef.current += 1
+      loadGenContextKeyRef.current = contextKey
+    }
     const gen = loadGenRef.current
     setLoading(true)
     try {
@@ -427,8 +429,8 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
 
       const conv = v => applyPriceUnit(v, showPer1)
 
-      // Save visible range before setData (only if user has already zoomed)
-      const savedRange = fittedRef.current
+      const contextChanged = lastContextRef.current !== contextKey
+      const savedRange = (!contextChanged && fittedRef.current)
         ? chartRef.current?.timeScale()?.getVisibleLogicalRange()
         : null
 
@@ -477,14 +479,26 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
 
       const timeScale = chartRef.current?.timeScale()
 
-      if (!fittedRef.current) {
+      // Apply default Y-axis padding — centers price with ~5% breathing room.
+      // This is a display default, not a zoom constraint; user can still zoom freely.
+      if (!fittedRef.current || contextChanged) {
+        chartRef.current?.priceScale('right').applyOptions({
+          autoScale: true,
+          scaleMargins: { top: 0.05, bottom: 0.05 },
+        })
         timeScale?.fitContent()
         fittedRef.current = true
       } else if (savedRange) {
         timeScale?.setVisibleLogicalRange(savedRange)
       } else {
+        chartRef.current?.priceScale('right').applyOptions({
+          autoScale: true,
+          scaleMargins: { top: 0.05, bottom: 0.05 },
+        })
         timeScale?.fitContent()
       }
+
+      lastContextRef.current = contextKey
     } catch {
       // сетевой сбой — граф остаётся со старыми данными, loading скрывается
     } finally {
