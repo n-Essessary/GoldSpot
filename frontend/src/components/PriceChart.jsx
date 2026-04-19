@@ -80,6 +80,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   const seriesRef    = useRef({})
   const fittedRef    = useRef(false)
   const isFirstLoadRef = useRef(true)
+  const loadGenRef   = useRef(0)
   const [period,  setPeriod]  = useState(PERIODS[2])   // 24H default
   const [loading, setLoading] = useState(false)
   const [empty,   setEmpty]   = useState(false)
@@ -321,6 +322,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
 
   useEffect(() => {
     fittedRef.current = false
+    loadGenRef.current += 1
   }, [serverSlug, realmName, faction, period, showPer1])
 
   useEffect(() => {
@@ -330,6 +332,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   // ── Загрузка данных ────────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
     if (!serverSlug || serverSlug === 'all') return
+    const gen = loadGenRef.current
     setLoading(true)
     try {
       const factionApi = normalizeFactionForApi(faction)
@@ -371,6 +374,8 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         // Group-level view may fall through to legacy OHLC below; realm mode does not.
       }
 
+      if (loadGenRef.current !== gen) return
+
       if (points.length === 0 && !(realmName && parsed)) {
         // ── Legacy mode (group OHLC) — only for group-level view, never for realm ──
         const params = new URLSearchParams({
@@ -388,9 +393,12 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         points = data.points ?? []
       }
 
+      if (loadGenRef.current !== gen) return
+
       // Append live point — always shows current price on right edge
       if (realmName && parsed) {
         const live = await fetchLivePrice(realmName, parsed.region, parsed.version, factionApi)
+        if (loadGenRef.current !== gen) return
         if (live) {
           const nowTs = Math.floor(Date.now() / 1000)
           const lastTs = points.length > 0
