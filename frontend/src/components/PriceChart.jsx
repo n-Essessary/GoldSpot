@@ -270,7 +270,12 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         return
       }
 
-      const indexData    = param.seriesData.get(seriesRef.current.index)
+      const indexData = param.seriesData.get(seriesRef.current.index)
+      const faction = factionRef.current
+      const isAll      = faction === '' || faction === 'All'
+      const isAlliance = faction === 'Alliance'
+      const isHorde    = faction === 'Horde'
+
       const askData      = param.seriesData.get(seriesRef.current.ask)
       const allianceData = param.seriesData.get(seriesRef.current.askAlliance)
       const hordeData    = param.seriesData.get(seriesRef.current.askHorde)
@@ -297,35 +302,15 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         value: fmt(indexData.value),
       })
 
-      const fac = factionRef.current
-      const isAll = fac === '' || fac === 'All'
       if (isAll) {
-        let hasFactionRow = false
-        if (chipOk(allianceData)) {
-          rows.push({ label: 'Cheapest Alliance', color: '#4A90D9', value: fmt(allianceData.value) })
-          hasFactionRow = true
-        }
-        if (chipOk(hordeData)) {
-          rows.push({ label: 'Cheapest Horde', color: '#C0392B', value: fmt(hordeData.value) })
-          hasFactionRow = true
-        }
-        if (!hasFactionRow && chipOk(askData)) {
-          rows.push({
-            label: 'Cheapest',
-            color: '#9A6010',
-            value: fmt(askData.value),
-          })
-        }
+        if (allianceData) rows.push({ label: 'Cheapest Alliance', color: '#4A90D9', value: fmt(allianceData.value) })
+        if (hordeData)    rows.push({ label: 'Cheapest Horde',    color: '#C0392B', value: fmt(hordeData.value) })
+      } else if (isAlliance) {
+        if (allianceData) rows.push({ label: 'Cheapest Alliance', color: '#4A90D9', value: fmt(allianceData.value) })
+      } else if (isHorde) {
+        if (hordeData) rows.push({ label: 'Cheapest Horde', color: '#C0392B', value: fmt(hordeData.value) })
       } else {
-        if (chipOk(askData)) {
-          const isAlliance = factionRef.current === 'Alliance'
-          const isHorde    = factionRef.current === 'Horde'
-          rows.push({
-            label: isAlliance ? 'Cheapest Alliance' : isHorde ? 'Cheapest Horde' : 'Cheapest',
-            color: isAlliance ? '#4A90D9' : isHorde ? '#C0392B' : '#9A6010',
-            value: fmt(askData.value),
-          })
-        }
+        if (askData) rows.push({ label: 'Cheapest', color: '#9A6010', value: fmt(askData.value) })
       }
 
       tooltip.innerHTML = rows.map(r => `
