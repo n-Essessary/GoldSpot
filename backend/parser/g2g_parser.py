@@ -390,6 +390,16 @@ async def _fetch_sort(sort: str, client: httpx.AsyncClient, config: GameConfig) 
             offer_id = item.get("offer_id", "")
             seller = (item.get("username") or "").strip()
             raw_title = item.get("title", "")
+            # For MoP Classic (and any future non-Classic-Era config), inject
+            # game_version into the bracket so alias keys are unambiguous.
+            # Classic Era: "Atiesh [US] - Horde"           (unchanged)
+            # MoP Classic: "Atiesh [US - MoP Classic] - Horde"
+            if config.game_version != "Classic Era":
+                raw_title = re.sub(
+                    r"\[([A-Z]{2,}(?:/[A-Z]{2,})?)\]",
+                    lambda m: f"[{m.group(1)} - {config.game_version}]",
+                    raw_title,
+                )
             relation_id = item.get("relation_id", "")
             real_region_id = (item.get("region_id") or region_id or "").strip()
             real_offer_group = (item.get("offer_group") or offer_group or "").strip()

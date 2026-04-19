@@ -96,6 +96,15 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     conn = op.get_bind()
+    # Safety: remove versioned MoP aliases (inserted by 019) if they still
+    # exist — guards against downgrading 018 without first downgrading 019.
+    conn.execute(
+        sa.text(
+            "DELETE FROM server_aliases"
+            " WHERE alias LIKE '% - MoP Classic] - %'"
+            " AND source = 'g2g'"
+        )
+    )
     params = [
         {"classic_id": classic_id, "mop_id": mop_id}
         for classic_id, mop_id in _G2G_CLASSIC_TO_MOP
