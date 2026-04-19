@@ -77,7 +77,7 @@ G2G_INTERVAL    = 30
 _OUTLIER_MULTIPLIER  = 3.0
 _MIN_LIQUID_GOLD     = 50_000
 _VWAP_GOLD_CAP       = 1_000_000
-_MIN_OFFERS          = 2
+_MIN_OFFERS          = 1
 
 # Throttle for raw price snapshots: skip write if price changed less than this
 _SNAP_WRITE_THRESHOLD = 0.005   # 0.5%
