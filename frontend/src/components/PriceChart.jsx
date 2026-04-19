@@ -83,10 +83,15 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   const lastContextRef = useRef(null)
   const loadGenRef   = useRef(0)
   const loadGenContextKeyRef = useRef(null)
+  const showPer1Ref = useRef(showPer1)
+  const factionRef  = useRef(faction)
   const [period,  setPeriod]  = useState(PERIODS[2])   // 24H default
   const [loading, setLoading] = useState(false)
   const [empty,   setEmpty]   = useState(false)
   const [sources, setSources] = useState([])
+
+  useEffect(() => { showPer1Ref.current = showPer1 }, [showPer1])
+  useEffect(() => { factionRef.current = faction }, [faction])
 
   // ── Инициализация графика (один раз) ───────────────────────────────────────
   useEffect(() => {
@@ -209,17 +214,32 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         return
       }
 
+      const fmt = v => showPer1Ref.current
+        ? `$${Number(v).toFixed(5)}`
+        : `$${Number(v).toFixed(2)}`
+
       const rows = []
       if (indexData) rows.push({
         label: 'Market Price',
         color: '#1D9E75',
-        value: `$${Number(indexData.value).toFixed(2)}`,
+        value: fmt(indexData.value),
       })
-      if (askData) rows.push({
-        label: 'Cheapest',
-        color: '#9A6010',
-        value: `$${Number(askData.value).toFixed(2)}`,
-      })
+      if (askData) {
+        const fac = factionRef.current
+        const isAll = fac === '' || fac === 'All'
+        if (isAll) {
+          rows.push(
+            { label: 'Alliance', color: '#4A90D9', value: fmt(askData.value) },
+            { label: 'Horde', color: '#C0392B', value: fmt(askData.value) },
+          )
+        } else {
+          rows.push({
+            label: 'Cheapest',
+            color: '#9A6010',
+            value: fmt(askData.value),
+          })
+        }
+      }
 
       tooltip.innerHTML = rows.map(r => `
         <div style="display:flex; align-items:center; gap:6px; line-height:1;">
