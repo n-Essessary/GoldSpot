@@ -143,7 +143,10 @@ describe('fetchLivePrice', () => {
     const r = await fetchLivePrice('firemaw', 'eu', 'anniversary', 'Horde')
     expect(r).toEqual({
       index_price_per_1k: 12.5,
-      best_ask_per_1k: 11,
+      best_ask_alliance_per_1k: null,
+      best_ask_horde_per_1k: 11,
+      alliance_sources: [],
+      horde_sources: [],
     })
     expect(globalThis.fetch).toHaveBeenCalledWith(
       `${API_BASE}/price-index?faction=Horde`
@@ -243,8 +246,11 @@ describe('PriceChart — faction & controls', () => {
     const historyUrl = urls.find((u) => u.includes('/price-history?') && !u.includes('ohlc'))
     expect(historyUrl).toBeDefined()
     expect(historyUrl).toContain('faction=All')
-    const indexUrl = urls.find((u) => u.includes('price-index'))
-    expect(indexUrl).toContain('faction=All')
+    await waitFor(() => {
+      expect(urls.filter((u) => u.includes('price-index')).length).toBeGreaterThanOrEqual(2)
+    })
+    expect(urls.some((u) => u.includes('price-index') && u.includes('faction=Alliance'))).toBe(true)
+    expect(urls.some((u) => u.includes('price-index') && u.includes('faction=Horde'))).toBe(true)
   })
 
   it('uses Horde in API query strings when faction prop is Horde', async () => {

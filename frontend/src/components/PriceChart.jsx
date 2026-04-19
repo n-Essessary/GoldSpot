@@ -1,6 +1,6 @@
 /**
  * PriceChart.jsx — TradingView lightweight-charts.
- * Две серии: Index (area) и Best ask (линия).
+ * Серии: Index (area), Alliance ask и Horde ask (две линии).
  * Requires: npm install lightweight-charts
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
@@ -16,7 +16,8 @@ const PERIODS = [
   { label: '30D', hours: 720, points: 500 },
 ]
 
-/** API values are per 1k gold; Per 1 divides by 1000. */
+/** API values are per 1k gold; Per 1 divides by 1000.
+ * @deprecated Prefer explicit `conv = v => applyPriceUnit(v, showPer1)` at call sites — clearer at scale. */
 export const applyPriceUnit = (valuePer1k, showPer1) =>
   showPer1 ? valuePer1k / 1000 : valuePer1k
 
@@ -39,24 +40,55 @@ export function _parseGroupLabel(serverSlug) {
 }
 
 /**
- * Fetch current live index+best_ask for a specific server from /price-index.
- * Returns { index_price_per_1k, best_ask_per_1k } or null on failure.
+ * Fetch live index + per-faction best ask from /price-index.
+ * For faction=All: two requests (Alliance + Horde). Otherwise one request.
+ * Returns per-faction fields; min_price is per-unit → ×1000 for per-1k display.
  */
 export async function fetchLivePrice(serverName, region, version, faction) {
-  try {
-    const res = await fetch(`${API_BASE}/price-index?faction=${faction}`)
-    if (!res.ok) return null
-    const data = await res.json()
-    const entry = (data.entries ?? []).find(e =>
+  const matchEntry = (data, fac) =>
+    (data.entries ?? []).find(e =>
       e.server_name.toLowerCase() === serverName.toLowerCase() &&
       e.region.toUpperCase()      === region.toUpperCase() &&
       e.version.toLowerCase()     === version.toLowerCase() &&
-      e.faction                   === faction
+      e.faction                   === fac
     )
+
+  const fetchEntry = async fac => {
+    try {
+      const res = await fetch(`${API_BASE}/price-index?faction=${fac}`)
+      if (!res.ok) return null
+      const data = await res.json()
+      return matchEntry(data, fac) ?? null
+    } catch {
+      return null
+    }
+  }
+
+  try {
+    if (faction === 'All' || faction === '' || !faction) {
+      const [aEntry, hEntry] = await Promise.all([
+        fetchEntry('Alliance'),
+        fetchEntry('Horde'),
+      ])
+      if (!aEntry && !hEntry) return null
+      const idx = aEntry?.index_price_per_1k ?? hEntry?.index_price_per_1k ?? null
+      return {
+        index_price_per_1k:       idx,
+        best_ask_alliance_per_1k: aEntry != null ? aEntry.min_price * 1000 : null,
+        best_ask_horde_per_1k:    hEntry != null ? hEntry.min_price * 1000 : null,
+        alliance_sources:         aEntry?.sources ?? [],
+        horde_sources:            hEntry?.sources ?? [],
+      }
+    }
+
+    const entry = await fetchEntry(faction)
     if (!entry) return null
     return {
       index_price_per_1k: entry.index_price_per_1k,
-      best_ask_per_1k:    entry.min_price * 1000,  // min_price is per-unit
+      best_ask_alliance_per_1k: faction === 'Alliance' ? entry.min_price * 1000 : null,
+      best_ask_horde_per_1k:    faction === 'Horde' ? entry.min_price * 1000 : null,
+      alliance_sources:         faction === 'Alliance' ? (entry.sources ?? []) : [],
+      horde_sources:            faction === 'Horde' ? (entry.sources ?? []) : [],
     }
   } catch {
     return null
@@ -176,6 +208,38 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       title:                  '',
     })
 
+    seriesRef.current.askAlliance = chart.addLineSeries({
+      color:                  'rgba(74,144,217,0.9)',
+      lineWidth:              1,
+      lineStyle:              LineStyle.SparseDotted,
+      crosshairMarkerVisible: true,
+      lastPriceAnimation:     0,
+      priceLineVisible:       false,
+      lastValueVisible:       true,
+      priceFormat:            {
+        type:      'custom',
+        formatter: p => `$${Number(p).toFixed(2)}`,
+        minMove:   0.01,
+      },
+      title: '',
+    })
+
+    seriesRef.current.askHorde = chart.addLineSeries({
+      color:                  'rgba(192,57,43,0.9)',
+      lineWidth:              1,
+      lineStyle:              LineStyle.SparseDotted,
+      crosshairMarkerVisible: true,
+      lastPriceAnimation:     0,
+      priceLineVisible:       false,
+      lastValueVisible:       true,
+      priceFormat:            {
+        type:      'custom',
+        formatter: p => `$${Number(p).toFixed(2)}`,
+        minMove:   0.01,
+      },
+      title: '',
+    })
+
     // Floating crosshair tooltip — follows cursor
     const tooltip = document.createElement('div')
     tooltip.style.cssText = `
@@ -206,10 +270,18 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         return
       }
 
-      const indexData = param.seriesData.get(seriesRef.current.index)
-      const askData   = param.seriesData.get(seriesRef.current.ask)
+      const indexData    = param.seriesData.get(seriesRef.current.index)
+      const askData      = param.seriesData.get(seriesRef.current.ask)
+      const allianceData = param.seriesData.get(seriesRef.current.askAlliance)
+      const hordeData    = param.seriesData.get(seriesRef.current.askHorde)
 
-      if (!indexData && !askData) {
+      const chipOk = d =>
+        d != null &&
+        d.value != null &&
+        !Number.isNaN(Number(d.value)) &&
+        Number(d.value) !== 0
+
+      if (!indexData && !chipOk(askData) && !chipOk(allianceData) && !chipOk(hordeData)) {
         tooltip.style.display = 'none'
         return
       }
@@ -224,21 +296,32 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         color: '#1D9E75',
         value: fmt(indexData.value),
       })
-      if (askData) {
-        const fac = factionRef.current
-        const isAll = fac === '' || fac === 'All'
-        if (isAll) {
-          rows.push(
-            { label: 'Alliance', color: '#4A90D9', value: fmt(askData.value) },
-            { label: 'Horde', color: '#C0392B', value: fmt(askData.value) },
-          )
-        } else {
+
+      const fac = factionRef.current
+      const isAll = fac === '' || fac === 'All'
+      if (isAll) {
+        let hasFactionRow = false
+        if (chipOk(allianceData)) {
+          rows.push({ label: 'Cheapest Alliance', color: '#4A90D9', value: fmt(allianceData.value) })
+          hasFactionRow = true
+        }
+        if (chipOk(hordeData)) {
+          rows.push({ label: 'Cheapest Horde', color: '#C0392B', value: fmt(hordeData.value) })
+          hasFactionRow = true
+        }
+        if (!hasFactionRow && chipOk(askData)) {
           rows.push({
             label: 'Cheapest',
             color: '#9A6010',
             value: fmt(askData.value),
           })
         }
+      } else if (chipOk(askData)) {
+        rows.push({
+          label: 'Cheapest',
+          color: '#9A6010',
+          value: fmt(askData.value),
+        })
       }
 
       tooltip.innerHTML = rows.map(r => `
@@ -340,6 +423,30 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         minMove:   showPer1 ? 0.00001 : 0.01,
       },
     })
+    seriesRef.current.askAlliance?.applyOptions?.({
+      title:                  '',
+      crosshairMarkerVisible: true,
+      lastPriceAnimation:     0,
+      priceLineVisible:       false,
+      lastValueVisible:       true,
+      priceFormat: {
+        type:      'custom',
+        formatter: p => fmt2(p),
+        minMove:   showPer1 ? 0.00001 : 0.01,
+      },
+    })
+    seriesRef.current.askHorde?.applyOptions?.({
+      title:                  '',
+      crosshairMarkerVisible: true,
+      lastPriceAnimation:     0,
+      priceLineVisible:       false,
+      lastValueVisible:       true,
+      priceFormat: {
+        type:      'custom',
+        formatter: p => fmt2(p),
+        minMove:   showPer1 ? 0.00001 : 0.01,
+      },
+    })
   }, [showPer1])
 
   useEffect(() => {
@@ -359,6 +466,8 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
     try {
       const factionApi = normalizeFactionForApi(faction)
       let points = []
+      let allianceAskPoints = []
+      let hordeAskPoints = []
 
       const toTS = p => {
         const raw = p.time ?? p.recorded_at
@@ -367,30 +476,68 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       }
 
       const parsed = _parseGroupLabel(serverSlug)
+      const allRealmMode = Boolean(realmName && parsed && factionApi === 'All')
 
       if (realmName && parsed) {
         // ── Task 4 mode: per-server history from DB ───────────────────────────
-        // GET /price-history?server={realm}&region={EU}&version={Anniversary}&faction={f}
-        const params = new URLSearchParams({
-          server:  realmName,
-          region:  parsed.region,
-          version: parsed.version,
-          faction: factionApi,
-          hours:   String(period.hours),
-          last:    String(period.points),
-        })
-        const res = await fetch(`${API_BASE}/price-history?${params}`)
-        if (res.ok) {
-          const data = await res.json()
-          // per-server endpoint returns ServerHistoryResponse with points[]
-          const raw = data.points ?? []
-          if (raw.length > 0) {
-            points = raw.map(p => ({
+        if (factionApi === 'All') {
+          const mkParams = fac => new URLSearchParams({
+            server:  realmName,
+            region:  parsed.region,
+            version: parsed.version,
+            faction: fac,
+            hours:   String(period.hours),
+            last:    String(period.points),
+          })
+          const [resA, resH] = await Promise.all([
+            fetch(`${API_BASE}/price-history?${mkParams('Alliance')}`),
+            fetch(`${API_BASE}/price-history?${mkParams('Horde')}`),
+          ])
+          const [dataA, dataH] = await Promise.all([
+            resA.ok ? resA.json() : Promise.resolve({ points: [] }),
+            resH.ok ? resH.json() : Promise.resolve({ points: [] }),
+          ])
+          const rawA = dataA.points ?? []
+          const rawH = dataH.points ?? []
+
+          const rawIndex = rawA.length >= rawH.length ? rawA : rawH
+          if (rawIndex.length > 0) {
+            points = rawIndex.map(p => ({
               time:      toTS(p),
               avg_price: p.index_price_per_1k,
-              best_ask:  p.best_ask ?? p.index_price_per_1k,
+              best_ask:  null,
               sources:   [],
             }))
+          }
+          allianceAskPoints = rawA
+            .map(p => ({ time: toTS(p), value: p.best_ask, sources: p.sources ?? [] }))
+            .filter(p => (p.value || 0) > 0)
+          hordeAskPoints = rawH
+            .map(p => ({ time: toTS(p), value: p.best_ask, sources: p.sources ?? [] }))
+            .filter(p => (p.value || 0) > 0)
+        } else {
+          // GET /price-history?server={realm}&region={EU}&version={Anniversary}&faction={f}
+          const params = new URLSearchParams({
+            server:  realmName,
+            region:  parsed.region,
+            version: parsed.version,
+            faction: factionApi,
+            hours:   String(period.hours),
+            last:    String(period.points),
+          })
+          const res = await fetch(`${API_BASE}/price-history?${params}`)
+          if (res.ok) {
+            const data = await res.json()
+            // per-server endpoint returns ServerHistoryResponse with points[]
+            const raw = data.points ?? []
+            if (raw.length > 0) {
+              points = raw.map(p => ({
+                time:      toTS(p),
+                avg_price: p.index_price_per_1k,
+                best_ask:  p.best_ask ?? p.index_price_per_1k,
+                sources:   [],
+              }))
+            }
           }
         }
         // Group-level view may fall through to legacy OHLC below; realm mode does not.
@@ -412,7 +559,21 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
           return
         }
         const data = await res.json()
-        points = data.points ?? []
+        const rawPts = data.points ?? []
+        points = rawPts.map(p => {
+          const raw = p.best_ask ?? p.close ?? 0
+          return {
+            ...p,
+            time:              toTS(p),
+            avg_price:         p.avg_price ?? p.index_price_per_1k ?? p.close ?? 0,
+            best_ask:          raw,
+            best_ask_alliance: raw,
+            best_ask_horde:    raw,
+            alliance_sources:  [],
+            horde_sources:     [],
+            sources:           p.sources ?? [],
+          }
+        })
       }
 
       if (loadGenRef.current !== gen) return
@@ -426,17 +587,44 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
           const lastTs = points.length > 0
             ? toTS(points[points.length - 1])
             : 0
-          if (nowTs > lastTs) {
+          const hasAsk = live.best_ask_alliance_per_1k != null
+            || live.best_ask_horde_per_1k != null
+          if (nowTs > lastTs && (live.index_price_per_1k != null || hasAsk)) {
+            const asrc = live.alliance_sources ?? []
+            const hsrc = live.horde_sources ?? []
+            const liveBest = factionApi === 'Alliance'
+              ? live.best_ask_alliance_per_1k
+              : factionApi === 'Horde'
+                ? live.best_ask_horde_per_1k
+                : null
             points = [
               ...points,
               {
-                recorded_at:        new Date().toISOString(),
-                index_price_per_1k: live.index_price_per_1k,
-                best_ask:           live.best_ask_per_1k,
-                avg_price:          live.index_price_per_1k,
-                sources:            [],
+                recorded_at:         new Date().toISOString(),
+                index_price_per_1k:  live.index_price_per_1k,
+                avg_price:           live.index_price_per_1k,
+                best_ask:            liveBest,
+                best_ask_alliance:   live.best_ask_alliance_per_1k,
+                best_ask_horde:      live.best_ask_horde_per_1k,
+                alliance_sources:    asrc,
+                horde_sources:       hsrc,
+                sources:             [...new Set([...asrc, ...hsrc])],
               },
             ]
+            if (allRealmMode) {
+              if (live.best_ask_alliance_per_1k != null) {
+                allianceAskPoints = [
+                  ...allianceAskPoints,
+                  { time: nowTs, value: live.best_ask_alliance_per_1k, sources: asrc },
+                ]
+              }
+              if (live.best_ask_horde_per_1k != null) {
+                hordeAskPoints = [
+                  ...hordeAskPoints,
+                  { time: nowTs, value: live.best_ask_horde_per_1k, sources: hsrc },
+                ]
+              }
+            }
           }
         }
       }
@@ -458,43 +646,61 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         time:  toTS(p),
         value: conv(p.avg_price || p.close || 0),
       }))
-
-      // Build ask data — keep all points that have best_ask,
-      // then always append the last point of index series so both series
-      // end at exactly the same timestamp (badges align horizontally)
-      const askPoints = points.filter(p => (p.best_ask || 0) > 0)
       const lastIndex = indexData[indexData.length - 1]
-      const lastAsk   = askPoints[askPoints.length - 1]
-      const askData   = askPoints.map(p => ({
-        time:  toTS(p),
-        value: conv(p.best_ask),
-      }))
-
-      // Extend ask line to match index last timestamp if they differ
-      if (lastIndex && (!lastAsk || toTS(lastAsk) < lastIndex.time)) {
-        // Use last known best_ask value for the extension point
-        const lastBestAsk = askPoints.length > 0
-          ? conv(askPoints[askPoints.length - 1].best_ask)
-          : lastIndex.value
-        askData.push({ time: lastIndex.time, value: lastBestAsk })
-      }
-
-      seriesRef.current.index?.setData(indexData)
-      seriesRef.current.ask?.setData(askData)
 
       // Pin last point to now — prevents right-side gap caused by
       // time scale stretching to current time beyond last data point.
       const nowTs = Math.floor(Date.now() / 1000)
+      const extendToNow = data => {
+        if (data.length === 0) return data
+        const last = data[data.length - 1]
+        return nowTs > last.time
+          ? [...data, { time: nowTs, value: last.value }]
+          : data
+      }
+      const askDataRaw = points
+        .filter(p => (p.best_ask || 0) > 0)
+        .map(p => ({ time: toTS(p), value: conv(p.best_ask) }))
+      const askData = extendToNow(askDataRaw)
+      const allianceData = extendToNow(
+        allianceAskPoints
+          .filter(p => (p.value || 0) > 0)
+          .map(p => ({ time: p.time, value: conv(p.value) }))
+      )
+      const hordeData = extendToNow(
+        hordeAskPoints
+          .filter(p => (p.value || 0) > 0)
+          .map(p => ({ time: p.time, value: conv(p.value) }))
+      )
+
+      seriesRef.current.index?.setData(indexData)
+      if (allRealmMode) {
+        seriesRef.current.ask?.applyOptions({ visible: false })
+        seriesRef.current.askAlliance?.applyOptions({ visible: true })
+        seriesRef.current.askHorde?.applyOptions({ visible: true })
+        seriesRef.current.askAlliance?.setData(allianceData)
+        seriesRef.current.askHorde?.setData(hordeData)
+      } else {
+        seriesRef.current.ask?.applyOptions({ visible: true })
+        seriesRef.current.ask?.setData(askData)
+        seriesRef.current.askAlliance?.applyOptions({ visible: false })
+        seriesRef.current.askHorde?.applyOptions({ visible: false })
+        seriesRef.current.askAlliance?.setData([])
+        seriesRef.current.askHorde?.setData([])
+      }
+
       const latestIndex = indexData[indexData.length - 1]
-      const latestAsk   = askData[askData.length - 1]
       if (latestIndex && nowTs > latestIndex.time) {
         seriesRef.current.index?.update({ time: nowTs, value: latestIndex.value })
       }
-      if (latestAsk && nowTs > latestAsk.time) {
-        seriesRef.current.ask?.update({ time: nowTs, value: latestAsk.value })
-      }
 
-      const allSrc = new Set(points.flatMap(p => p.sources || []))
+      const allSrc = new Set(
+        [
+          ...points.flatMap(p => p.sources || []),
+          ...allianceAskPoints.flatMap(p => p.sources || []),
+          ...hordeAskPoints.flatMap(p => p.sources || []),
+        ]
+      )
       setSources([...allSrc])
 
       const timeScale = chartRef.current?.timeScale()
