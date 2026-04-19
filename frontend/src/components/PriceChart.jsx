@@ -208,15 +208,16 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       title:                  '',
     })
 
-    seriesRef.current.askAlliance = chart.addLineSeries({
-      color:                  'rgba(74,144,217,0.9)',
+    seriesRef.current.askAlliance = chart.addAreaSeries({
+      lineColor:              'rgba(74,144,217,0.75)',
+      topColor:               'rgba(74,144,217,0.10)',
+      bottomColor:            'rgba(74,144,217,0.0)',
       lineWidth:              1,
-      lineStyle:              LineStyle.SparseDotted,
       crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
       lastValueVisible:       true,
-      priceFormat:            {
+      priceFormat: {
         type:      'custom',
         formatter: p => `$${Number(p).toFixed(2)}`,
         minMove:   0.01,
@@ -224,15 +225,16 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       title: '',
     })
 
-    seriesRef.current.askHorde = chart.addLineSeries({
-      color:                  'rgba(192,57,43,0.9)',
+    seriesRef.current.askHorde = chart.addAreaSeries({
+      lineColor:              'rgba(192,57,43,0.75)',
+      topColor:               'rgba(192,57,43,0.10)',
+      bottomColor:            'rgba(192,57,43,0.0)',
       lineWidth:              1,
-      lineStyle:              LineStyle.SparseDotted,
       crosshairMarkerVisible: true,
       lastPriceAnimation:     0,
       priceLineVisible:       false,
       lastValueVisible:       true,
-      priceFormat:            {
+      priceFormat: {
         type:      'custom',
         formatter: p => `$${Number(p).toFixed(2)}`,
         minMove:   0.01,
@@ -413,11 +415,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       },
     })
     seriesRef.current.askAlliance?.applyOptions?.({
-      title:                  '',
-      crosshairMarkerVisible: true,
-      lastPriceAnimation:     0,
-      priceLineVisible:       false,
-      lastValueVisible:       true,
       priceFormat: {
         type:      'custom',
         formatter: p => fmt2(p),
@@ -425,11 +422,6 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       },
     })
     seriesRef.current.askHorde?.applyOptions?.({
-      title:                  '',
-      crosshairMarkerVisible: true,
-      lastPriceAnimation:     0,
-      priceLineVisible:       false,
-      lastValueVisible:       true,
       priceFormat: {
         type:      'custom',
         formatter: p => fmt2(p),
