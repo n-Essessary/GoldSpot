@@ -402,10 +402,22 @@ def compute_server_index(
         return None
 
     top.sort(key=lambda o: o.price_per_1k)
-    cheapest = top[0].price_per_1k
-    top = [o for o in top if o.price_per_1k <= cheapest * 2.0]
+
+    # Compute average price per platform using the top-2 offers per platform
+    platform_avgs: dict[str, float] = {}
+    for src in by_source:
+        src_top = [o for o in top if o.source == src]
+        if src_top:
+            platform_avgs[src] = sum(o.price_per_1k for o in src_top) / len(src_top)
+
+    # Exclude platforms more than 2x more expensive than the cheapest platform avg
+    min_avg = min(platform_avgs.values())
+    allowed = {src for src, avg in platform_avgs.items() if avg <= min_avg * 2.0}
+    top = [o for o in top if o.source in allowed]
+
     if len(top) < _MIN_OFFERS:
         return None
+
     prices = [o.price_per_1k for o in top]
     mean_per_1k = sum(prices) / len(prices)
 
