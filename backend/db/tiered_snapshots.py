@@ -288,7 +288,7 @@ async def query_tiered_history(
 
     Tier selection:
       hours ≤ 6     → snapshots_1m  (1-min resolution, 24h retention)
-      hours ≤ 720   → snapshots_5m  (5-min resolution, 30d retention)
+      hours ≤ 72    → snapshots_5m  (5-min resolution, 30d retention)
       hours ≤ 17520 → snapshots_1h  (1-hour resolution, 2y retention)
       else          → snapshots_1d  (1-day resolution, forever)
 
@@ -308,7 +308,7 @@ async def query_tiered_history(
 
     if hours <= 6:
         table = "snapshots_1m"
-    elif hours <= 720:        # 30 days
+    elif hours <= 72:         # 3 days — wider windows use 1h until 5m backfill is deep enough
         table = "snapshots_5m"
     elif hours <= 17_520:     # 2 years
         table = "snapshots_1h"
