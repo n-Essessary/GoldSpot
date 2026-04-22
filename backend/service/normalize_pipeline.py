@@ -396,11 +396,13 @@ async def normalize_offer_batch(
                     server_id = alias_map.get(lk)
 
                     if server_id is None:
+                        _offer_game_version = getattr(offer, "game_version", "")
+                        _versioned_games = {"MoP Classic", "Retail"}
                         server_id = await resolve_server(
                             alias_key,
                             offer.source,
                             pool,
-                            game_version=getattr(offer, "game_version", "") if getattr(offer, "game_version", "") == "MoP Classic" else "",
+                            game_version=_offer_game_version if _offer_game_version in _versioned_games else "",
                         )
                     if server_id is not None:
                         offer.server_id = server_id

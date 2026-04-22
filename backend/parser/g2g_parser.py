@@ -130,6 +130,16 @@ GAME_CONFIGS: list[GameConfig] = [
     ),
 ]
 
+RETAIL_CONFIG = GameConfig(
+    key="wow_retail",
+    seo_term="wow-gold",
+    brand_id="lgc_game_2299",
+    game_version="Retail",
+    label="World of Warcraft (Retail / Midnight / The War Within)",
+)
+
+_RETAIL_MAX_PAGES = 25
+
 
 # ── Title parsing regex ───────────────────────────────────────────────────────
 # Strict format: "Server [Region - Version] - Faction"
@@ -231,11 +241,13 @@ def _parse_title(title: str) -> tuple[str, str, str, str]:
         if len(parts) >= 2 and parts[-1].strip().lower() in ("alliance", "horde"):
             server_name = parts[0].strip()
 
-    # Source region: look in "[EU]" brackets first, then anywhere in title
+    # Source region: look in "[EU]" brackets first, then anywhere in title.
+    # Accept any 2+ letter bracket code (including EU sub-locales like FR, DE,
+    # ES, IT, BR that G2G uses for Retail). Canonical region normalisation
+    # (FR/DE/ES/IT → EU, BR → US) happens downstream in normalize_pipeline.
     region = ""
-    _KNOWN_REGIONS = {"EU", "US", "NA", "OCE", "KR", "TW", "SEA", "RU"}
     bm = _BRACKET_REGION_RE.search(t)
-    if bm and bm.group(1).upper() in _KNOWN_REGIONS:
+    if bm:
         region = bm.group(1).upper()
     else:
         rm = _REGION_RE.search(t)
@@ -539,6 +551,233 @@ def _dedupe(offers: list[Offer]) -> list[Offer]:
         seen.add(offer.id)
         out.append(offer)
     return out
+
+
+# ── Retail-specific fetcher ───────────────────────────────────────────────────
+
+async def _fetch_sort_retail(
+    sort: str,
+    client: httpx.AsyncClient,
+    semaphore_limit: int = 30,
+) -> list[G2GOffer]:
+    """Fetch Retail offers — same two-phase logic as _fetch_sort() but with
+    RETAIL_CONFIG and extended pagination (_RETAIL_MAX_PAGES=25).
+
+    Copy of _fetch_sort() with:
+      - config → RETAIL_CONFIG  (everywhere)
+      - _MAX_PAGES → _RETAIL_MAX_PAGES
+      - asyncio.Semaphore(20) → asyncio.Semaphore(semaphore_limit)
+
+    DO NOT modify _fetch_sort() — this is a separate function.
+    """
+    config = RETAIL_CONFIG
+    discovered_pairs: dict[tuple[str, str], None] = {}
+    page = 1
+
+    # Phase 1: discovery (grouped results, price is not trusted)
+    while page <= _RETAIL_MAX_PAGES:
+        params = {
+            "seo_term":   config.seo_term,
+            "sort":       sort,
+            "service_id": config.service_id,
+            "brand_id":   config.brand_id,
+            "currency":   "USD",
+            "country":    "SG",
+            "v":          "v2",
+            "page_size":  _PAGE_SIZE,
+            "page":       page,
+        }
+        try:
+            resp = await _http_get_retry(client, f"{BASE}/offer/search", params=params)
+            results = resp.json().get("payload", {}).get("results", [])
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 429:
+                retry_after = _parse_retry_after_seconds(
+                    exc.response.headers.get("Retry-After"), 60
+                )
+                logger.warning("G2G Retail 429 sort=%s page=%d — sleeping %ds", sort, page, retry_after)
+                await asyncio.sleep(retry_after)
+                try:
+                    resp = await _http_get_retry(client, f"{BASE}/offer/search", params=params)
+                    results = resp.json().get("payload", {}).get("results", [])
+                except Exception as retry_exc:
+                    logger.warning("G2G Retail retry failed sort=%s page=%d: %s", sort, page, retry_exc)
+                    break
+            elif status >= 500:
+                logger.warning("G2G Retail 5xx sort=%s page=%d — sleeping 2s", sort, page)
+                await asyncio.sleep(2)
+                try:
+                    resp = await _http_get_retry(client, f"{BASE}/offer/search", params=params)
+                    results = resp.json().get("payload", {}).get("results", [])
+                except Exception as retry_exc:
+                    logger.warning("G2G Retail retry failed sort=%s page=%d: %s", sort, page, retry_exc)
+                    break
+            else:
+                logger.warning("G2G Retail HTTP error sort=%s page=%d: %s", sort, page, exc)
+                break
+        except Exception as exc:
+            logger.warning("G2G Retail fetch error sort=%s page=%d: %s", sort, page, exc)
+            break
+
+        if not results:
+            break
+
+        for o in results:
+            offer_group = (o.get("offer_group") or "").strip()
+            region_id = (o.get("region_id") or "").strip()
+            if not offer_group or not region_id:
+                continue
+            discovered_pairs[(offer_group, region_id)] = None
+
+        logger.debug("G2G Retail sort=%s page=%d → %d results", sort, page, len(results))
+
+        if len(results) < _PAGE_SIZE:
+            break
+
+        page += 1
+        await asyncio.sleep(0.2)
+
+    # Phase 2: fetch real offers concurrently (correct prices)
+    sem = asyncio.Semaphore(semaphore_limit)
+    pair_list = list(discovered_pairs.keys())
+
+    async def _fetch_real_offer_retail(offer_group: str, region_id: str) -> Optional[G2GOffer]:
+        og = offer_group.lstrip("/")
+        prefix = re.sub(r"_\d+$", "", og)
+        fa = f"{prefix}:{og}"
+
+        params = {
+            "seo_term":        config.seo_term,
+            "filter_attr":     fa,
+            "region_id":       region_id,
+            "sort":            sort,
+            "group":           "0",
+            "include_offline": "0",
+            "page_size":       1,
+            "page":            1,
+            "service_id":      config.service_id,
+            "brand_id":        config.brand_id,
+            "currency":        "USD",
+            "country":         "SG",
+            "v":               "v2",
+        }
+
+        async with sem:
+            try:
+                resp = await _http_get_retry(client, f"{BASE}/offer/search", params=params)
+                items = resp.json().get("payload", {}).get("results", [])
+            except Exception as exc:
+                logger.warning(
+                    "G2G Retail phase2 fetch failed sort=%s offer_group=%s region_id=%s: %s",
+                    sort, offer_group, region_id, exc,
+                )
+                return None
+
+        if not items:
+            return None
+
+        item = items[0]
+        try:
+            price_usd = float(item.get("unit_price_in_usd") or 0)
+            offer_id = item.get("offer_id", "")
+            seller = (item.get("username") or "").strip()
+            raw_title = item.get("title", "")
+            # Inject game_version into bracket for Retail — same logic as _fetch_sort()
+            # config.game_version="Retail" != "Classic Era" → injection applies.
+            # Titles like "Stormrage [US] - Horde" → "Stormrage [US - Retail] - Horde"
+            # RU Cyrillic titles (no brackets) pass through unchanged.
+            if config.game_version != "Classic Era":
+                raw_title = re.sub(
+                    r"\[([A-Z]{2,}(?:/[A-Z]{2,})?)\]",
+                    lambda m: f"[{m.group(1)} - {config.game_version}]",
+                    raw_title,
+                )
+            relation_id = item.get("relation_id", "")
+            real_region_id = (item.get("region_id") or region_id or "").strip()
+            real_offer_group = (item.get("offer_group") or offer_group or "").strip()
+
+            offer_url = _build_offer_url(
+                offer_group=real_offer_group,
+                region_id=real_region_id,
+                sort=sort,
+                seo_term=config.seo_term,
+            )
+
+            return G2GOffer(
+                offer_id=offer_id,
+                title=raw_title,
+                server_name=_parse_title(raw_title)[0] or raw_title,
+                region_id=real_region_id,
+                relation_id=relation_id,
+                price_usd=price_usd if price_usd > 0 else 0,
+                min_qty=int(item.get("min_qty") or 1),
+                available_qty=int(item.get("available_qty") or 0),
+                seller=seller,
+                brand_id=item.get("brand_id", config.brand_id),
+                service_id=item.get("service_id", config.service_id),
+                sort=sort,
+                game_version=config.game_version,
+                offer_url=offer_url,
+                offer_group=real_offer_group,
+                raw=dict(item),
+            )
+        except (ValueError, TypeError):
+            return None
+
+    phase2_results = await asyncio.gather(
+        *[_fetch_real_offer_retail(offer_group, region_id) for offer_group, region_id in pair_list],
+        return_exceptions=True,
+    )
+
+    offers: list[G2GOffer] = []
+    for result in phase2_results:
+        if isinstance(result, Exception):
+            logger.warning("G2G Retail phase2 task exception sort=%s: %s", sort, result)
+            continue
+        if result is None:
+            continue
+        offers.append(result)
+
+    logger.info(
+        "G2G Retail phase2 sort=%s discovered=%d resolved=%d",
+        sort,
+        len(pair_list),
+        len(offers),
+    )
+    return offers
+
+
+async def fetch_retail_offers(
+    sort: str = "lowest_price",
+    semaphore_limit: int = 30,
+) -> list[Offer]:
+    """Fetch G2G Retail offers for a single sort mode.
+
+    Separate from fetch_offers() to allow independent cycle timing.
+    Uses RETAIL_CONFIG (wow-gold / lgc_game_2299).
+    semaphore_limit=30 for lowest_price, 20 for recommended_v2.
+    """
+    fetched_at = datetime.now(timezone.utc)
+    t0 = asyncio.get_event_loop().time()
+    try:
+        async with httpx.AsyncClient(
+            headers=HEADERS,
+            timeout=httpx.Timeout(30.0),
+            follow_redirects=True,
+        ) as client:
+            raw_offers = await _fetch_sort_retail(sort, client, semaphore_limit)
+        offers = [o for o in (_to_offer(r, fetched_at) for r in raw_offers) if o is not None]
+        result = _dedupe(offers)
+        elapsed = asyncio.get_event_loop().time() - t0
+        logger.info(
+            "G2G Retail fetch_retail_offers sort=%s: %d offers in %.1fs",
+            sort, len(result), elapsed,
+        )
+        return result
+    except Exception:
+        logger.exception("G2G Retail fetch_retail_offers failed sort=%s", sort)
+        return []
 
 
 # ── Public entry point ────────────────────────────────────────────────────────

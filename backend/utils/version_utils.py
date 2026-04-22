@@ -32,8 +32,8 @@ _VERSION_ALIASES: dict[str, str] = {
     "anniversary gold":    "Anniversary",
     # Hardcore
     "hardcore":            "Hardcore",
-    # Classic Era variants → canonical "Classic"
-    "classic era":         "Classic",
+    # Classic Era variants → canonical "Classic Era"
+    "classic era":         "Classic Era",
     "vanilla":             "Classic",
     "era":                 "Classic",
     # Plain "Classic" (G2G uses this in title brackets for Era servers)
@@ -42,6 +42,14 @@ _VERSION_ALIASES: dict[str, str] = {
     "tbc classic":         "TBC Classic",
     "tbc":                 "TBC Classic",
     "burning crusade":     "TBC Classic",
+    # MoP Classic variants
+    "mop classic":         "MoP Classic",
+    "mists of pandaria":   "MoP Classic",
+    # Retail variants
+    "retail":              "Retail",
+    "midnight":            "Retail",
+    "the war within":      "Retail",
+    "tww":                 "Retail",
 }
 
 

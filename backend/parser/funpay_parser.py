@@ -43,6 +43,8 @@ CHIP_CONFIGS: list[ChipConfig] = [
     # ChipConfig(145, "RU", "MoP Classic", "WoW MoP Classic RU"),  # blocked: Railway EU IP → 404
     ChipConfig(146, "EU",       "MoP Classic",  "WoW MoP Classic EU"),
     ChipConfig(147, "US",       "MoP Classic",  "WoW MoP Classic US"),
+    ChipConfig(2,   "EU",       "Retail",       "WoW Retail EU (incl. RU servers)"),
+    ChipConfig(25,  "US",       "Retail",       "WoW Retail US (incl. OCE servers)"),
 ]
 
 # ── Online-фильтр ────────────────────────────────────────────────────────────
@@ -493,6 +495,22 @@ async def _fetch_chip(config: ChipConfig) -> list[Offer]:
     # Stamp game_version on every offer
     for offer in raw_offers:
         offer.game_version = config.game_version
+
+    # Skip "Any" server offers for Retail — not a real realm, no alias exists.
+    # data-server="*" on FunPay indicates a catch-all offer not tied to a realm.
+    if config.game_version == "Retail":
+        before = len(raw_offers)
+        raw_offers = [
+            o for o in raw_offers
+            if (o.server_name or o.display_server or "").strip().lower() not in
+               ("any", "*", "")
+        ]
+        skipped = before - len(raw_offers)
+        if skipped > 0:
+            logger.debug(
+                "FunPay Retail chip=%d: skipped %d 'Any' server offers",
+                config.chip_id, skipped,
+            )
 
     # For single-region chips (146 EU, 147 US), .tc-server is often a bare realm
     # name with no "(REGION) Version" prefix. Build "(REGION) Version - Realm"

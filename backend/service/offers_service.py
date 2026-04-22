@@ -57,12 +57,12 @@ _GROUP_RE = re.compile(r"^\([A-Z]{2,}\)\s+\S", re.ASCII)
 logger = logging.getLogger(__name__)
 
 # ── Per-source state ──────────────────────────────────────────────────────────
-_cache:         dict[str, list[Offer]]        = {"funpay": [], "g2g": []}
-_last_update:   dict[str, Optional[datetime]] = {"funpay": None, "g2g": None}
-_running:       dict[str, bool]               = {"funpay": False, "g2g": False}
-_cache_version: dict[str, int]               = {"funpay": 0, "g2g": 0}
-_last_error:    dict[str, Optional[str]]      = {"funpay": None, "g2g": None}
-_cache_initialized: dict[str, bool]          = {"funpay": False, "g2g": False}
+_cache:         dict[str, list[Offer]]        = {"funpay": [], "g2g": [], "g2g_retail": []}
+_last_update:   dict[str, Optional[datetime]] = {"funpay": None, "g2g": None, "g2g_retail": None}
+_running:       dict[str, bool]               = {"funpay": False, "g2g": False, "g2g_retail": False}
+_cache_version: dict[str, int]               = {"funpay": 0, "g2g": 0, "g2g_retail": 0}
+_last_error:    dict[str, Optional[str]]      = {"funpay": None, "g2g": None, "g2g_retail": None}
+_cache_initialized: dict[str, bool]          = {"funpay": False, "g2g": False, "g2g_retail": False}
 
 # ── Quarantine ring buffer ────────────────────────────────────────────────────
 # Offers that failed the normalize pipeline are logged here for admin inspection.
@@ -85,13 +85,14 @@ _SNAP_WRITE_THRESHOLD = 0.005   # 0.5%
 _last_snap_price: dict[str, float] = {}
 
 _VERSION_ORDER: dict[str, int] = {
-    "MoP Classic":             0,
-    "Anniversary":             1,
-    "Season of Discovery":     2,
-    "Classic":                 4,
-    "Anniversary · Hardcore":  10,
-    "Season of Discovery · Hardcore": 11,
-    "Classic · Hardcore":      13,
+    "MoP Classic":                    0,
+    "Retail":                         5,
+    "Anniversary":                   10,
+    "Season of Discovery":           20,
+    "Classic":                       40,
+    "Anniversary · Hardcore":       100,
+    "Season of Discovery · Hardcore": 110,
+    "Classic · Hardcore":           130,
 }
 
 
@@ -299,13 +300,15 @@ def _game_version_from_display(display_server: str) -> str:
     body = body.replace(" · Hardcore", "").strip()
     if body == "MoP Classic":
         return "MoP Classic"
+    if body == "Retail":
+        return "Retail"
     return "Classic Era"
 
 
 # ── Public cache read ─────────────────────────────────────────────────────────
 
 def get_all_offers() -> list[Offer]:
-    return _cache["funpay"] + _cache["g2g"]
+    return _cache["funpay"] + _cache["g2g"] + _cache["g2g_retail"]
 
 
 def get_parser_status() -> dict:
@@ -317,7 +320,7 @@ def get_parser_status() -> dict:
             "version":     _cache_version[src],
             "last_error":  _last_error[src],
         }
-        for src in ("funpay", "g2g")
+        for src in ("funpay", "g2g", "g2g_retail")
     }
 
 
@@ -749,11 +752,130 @@ async def _run_g2g_loop() -> None:
         await asyncio.sleep(G2G_INTERVAL)
 
 
+async def _run_g2g_retail_loop() -> None:
+    """G2G Retail lowest_price loop. Runs every ~60s (interval after parse).
+    Fetches ~1028 groups / Semaphore(30). Expected cycle time: ~35-50s.
+    Results merged into _cache["g2g_retail"] alongside recommended_v2 results.
+    """
+    from parser.g2g_parser import fetch_retail_offers
+    from service.normalize_pipeline import normalize_offer_batch
+
+    while True:
+        _running["g2g_retail"] = True
+        t0 = asyncio.get_running_loop().time()
+        try:
+            raw_offers = await fetch_retail_offers(
+                sort="lowest_price",
+                semaphore_limit=30,
+            )
+            if raw_offers:
+                raw_offers = [_normalize_g2g_offer(o) for o in raw_offers]
+                from db.writer import get_pool
+                pool = await get_pool()
+                offers, quarantined = await normalize_offer_batch(raw_offers, pool)
+                _add_to_quarantine(quarantined)
+                if quarantined:
+                    logger.info(
+                        "G2G Retail (lowest) quarantined %d offers (reasons: %s)",
+                        len(quarantined),
+                        ", ".join({q.reason for q in quarantined}),
+                    )
+                # Merge with existing g2g_retail cache (keep recommended_v2 offers)
+                # Deduplicate by offer.id across both sorts
+                existing = _cache["g2g_retail"]
+                existing_ids = {o.id for o in offers}
+                kept_rec = [o for o in existing if o.id not in existing_ids]
+                merged = offers + kept_rec
+                if not merged and _cache_initialized["g2g_retail"]:
+                    _last_error["g2g_retail"] = "empty_after_normalize"
+                    elapsed = asyncio.get_running_loop().time() - t0
+                    logger.warning(
+                        "G2G Retail (lowest) normalize returned 0 offers in %.1fs "
+                        "— keeping %d cached",
+                        elapsed, len(_cache["g2g_retail"]),
+                    )
+                else:
+                    _cache["g2g_retail"] = merged
+                    _cache_initialized["g2g_retail"] = True
+                    _cache_version["g2g_retail"] += 1
+                    _last_update["g2g_retail"] = datetime.now(timezone.utc)
+                    _last_error["g2g_retail"] = None
+                    elapsed = asyncio.get_running_loop().time() - t0
+                    logger.info(
+                        "G2G Retail (lowest) updated: %d offers (%d quarantined) "
+                        "in %.1fs",
+                        len(merged), len(quarantined), elapsed,
+                    )
+                    asyncio.create_task(_snapshot_all_servers())
+            elif _cache_initialized["g2g_retail"]:
+                _last_error["g2g_retail"] = "empty_result"
+                logger.warning(
+                    "G2G Retail (lowest) returned 0 — keeping %d cached",
+                    len(_cache["g2g_retail"]),
+                )
+            else:
+                _last_error["g2g_retail"] = "empty_cold_start"
+                logger.warning("G2G Retail (lowest) returned 0 on cold start")
+        except Exception as e:
+            _last_error["g2g_retail"] = type(e).__name__
+            logger.exception("G2G Retail (lowest) parser failed")
+        finally:
+            _running["g2g_retail"] = False
+        await asyncio.sleep(60)
+
+
+async def _run_g2g_retail_rec_loop() -> None:
+    """G2G Retail recommended_v2 loop. Low-priority, runs every 180-300s.
+    Startup delay of 90s to avoid overlapping with the first lowest_price cycle.
+    Semaphore(20) — lower concurrency since this is background/low-priority.
+    Results merged into _cache["g2g_retail"] alongside lowest_price results.
+    """
+    from parser.g2g_parser import fetch_retail_offers
+    from service.normalize_pipeline import normalize_offer_batch
+
+    await asyncio.sleep(90)  # startup delay
+    while True:
+        try:
+            raw_offers = await fetch_retail_offers(
+                sort="recommended_v2",
+                semaphore_limit=20,
+            )
+            if raw_offers:
+                raw_offers = [_normalize_g2g_offer(o) for o in raw_offers]
+                from db.writer import get_pool
+                pool = await get_pool()
+                offers, quarantined = await normalize_offer_batch(raw_offers, pool)
+                _add_to_quarantine(quarantined)
+                # Merge: keep lowest_price offers, replace/add recommended_v2
+                existing = _cache["g2g_retail"]
+                existing_ids = {o.id for o in offers}
+                kept_low = [o for o in existing if o.id not in existing_ids]
+                merged = kept_low + offers
+                if merged:
+                    _cache["g2g_retail"] = merged
+                    _cache_version["g2g_retail"] += 1
+                    _last_update["g2g_retail"] = datetime.now(timezone.utc)
+                    logger.info(
+                        "G2G Retail (rec) updated: %d merged offers "
+                        "(%d quarantined)",
+                        len(merged), len(quarantined),
+                    )
+                else:
+                    logger.warning("G2G Retail (rec) returned 0 after normalize")
+        except Exception:
+            logger.exception("G2G Retail (recommended) parser failed")
+        interval = random.uniform(180, 300)
+        logger.debug("G2G Retail (rec) next update in %.0fs", interval)
+        await asyncio.sleep(interval)
+
+
 async def start_background_parsers() -> None:
-    """Start background FunPay and G2G loops. Call once in lifespan."""
+    """Start background FunPay, G2G Classic/MoP, and G2G Retail loops."""
     asyncio.create_task(_run_funpay_loop())
     asyncio.create_task(_run_g2g_loop())
-    logger.info("Background parsers started (funpay + g2g)")
+    asyncio.create_task(_run_g2g_retail_loop())
+    asyncio.create_task(_run_g2g_retail_rec_loop())
+    logger.info("Background parsers started (funpay + g2g + g2g_retail x2)")
 
 
 # ── Public read API ───────────────────────────────────────────────────────────
@@ -866,7 +988,7 @@ def get_offers(
     sort_by: str = "price",
     server_name: str | None = None,
 ) -> list[Offer]:
-    result = _cache["funpay"] + _cache["g2g"]
+    result = _cache["funpay"] + _cache["g2g"] + _cache["g2g_retail"]
 
     if server:
         result = [o for o in result if _clean(o.display_server) == _clean(server)]
