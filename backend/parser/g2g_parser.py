@@ -693,6 +693,20 @@ async def _fetch_sort_retail(
                     lambda m: f"[{m.group(1)} - {config.game_version}]",
                     raw_title,
                 )
+            # RU Retail: convert Cyrillic title to English alias format.
+            # G2G format: "Гордунни (Gordunni) - Horde"
+            # Target alias: "Gordunni [RU - Retail] - Horde"
+            # Only applies when game_version="Retail" and title has no brackets yet.
+            if config.game_version == "Retail" and "[" not in raw_title:
+                _ru_m = re.match(
+                    r"^[^\(]+\(([^)]+)\)\s*-\s*(Alliance|Horde)\s*$",
+                    raw_title,
+                    re.IGNORECASE,
+                )
+                if _ru_m:
+                    _en_name = _ru_m.group(1).strip()
+                    _faction  = _ru_m.group(2).strip().capitalize()
+                    raw_title = f"{_en_name} [RU - Retail] - {_faction}"
             relation_id = item.get("relation_id", "")
             real_region_id = (item.get("region_id") or region_id or "").strip()
             real_offer_group = (item.get("offer_group") or offer_group or "").strip()
