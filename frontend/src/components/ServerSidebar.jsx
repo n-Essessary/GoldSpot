@@ -34,7 +34,7 @@ export function ServerSidebar({
 
   const [openVersions, setOpenVersions] = useState(() => {
     const init = {}
-    for (const v of ['MoP Classic', 'Classic Era']) init[v] = true
+    for (const v of ['Retail', 'MoP Classic', 'Classic Era']) init[v] = true
     return init
   })
 
@@ -66,7 +66,7 @@ export function ServerSidebar({
     setOpenVersions((prev) => ({ ...prev, [v]: !prev[v] }))
 
   const versionGroups = useMemo(() => {
-    const order = ['MoP Classic', 'Classic Era']
+    const order = ['Retail', 'MoP Classic', 'Classic Era']
     const map = {}
     for (const s of servers) {
       const v = s.game_version || 'Classic Era'
