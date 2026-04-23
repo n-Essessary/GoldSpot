@@ -96,7 +96,7 @@ VALID_VERSIONS: frozenset[str] = frozenset({
     "Season of Discovery",
     "Season of Mastery", # DEPRECATED
     "MoP Classic",      # Mists of Pandaria Classic (2025)
-    "Retail",
+    "Retail",           # WoW Retail (The War Within / Midnight)
 })
 
 VALID_REALM_TYPES: frozenset[str] = frozenset({"Normal", "Hardcore"})
@@ -846,7 +846,7 @@ CANONICAL_SERVERS: tuple[CanonicalServer, ...] = (
     CanonicalServer("Perenolde", "US", "Retail"),
     CanonicalServer("Proudmoore", "US", "Retail"),
     CanonicalServer("Quel'dorei", "US", "Retail"),
-    CanonicalServer("Quel’Thalas", "US", "Retail", notes="LATAM-localised"),
+    CanonicalServer("Quel'Thalas", "US", "Retail", notes="LATAM-localised"),
     CanonicalServer("Ragnaros", "US", "Retail", notes="LATAM-localised"),
     CanonicalServer("Ravencrest", "US", "Retail"),
     CanonicalServer("Ravenholdt", "US", "Retail"),
@@ -934,10 +934,9 @@ CANONICAL_SERVERS: tuple[CanonicalServer, ...] = (
     CanonicalServer("Thaurissan", "OCE", "Retail"),
 
     # ── RU Retail (20 servers) ──
-    # G2G: Cyrillic title with English name in parens, e.g. "Гордунни (Gordunni)"
+    # G2G: Cyrillic title with English name, e.g. "Гордунни (Gordunni)"
     # FunPay: Latin script on chip/2 (EU chip), e.g. "Gordunni"
     # canonical region = "RU"; FunPay chip/2 stamps "(EU) Retail" → cross-region
-    # aliases handled in migration 019
     CanonicalServer("Ashenvale", "RU", "Retail"),
     CanonicalServer("Azuregos", "RU", "Retail"),
     CanonicalServer("Blackscar", "RU", "Retail"),
