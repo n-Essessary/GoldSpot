@@ -9,15 +9,16 @@ import styles from './StatsBar.module.css'
  * @param {{
  *   offers: import('../api/offers').Offer[],
  *   loading: boolean,
- *   showPer1?: boolean,
+ *   priceUnit?: 'per_1k'|'per_1m',
  * }} props
  */
-export function StatsBar({ offers, loading, showPer1 = false }) {
+export function StatsBar({ offers, loading, priceUnit = 'per_1k' }) {
   const stats = useMemo(() => computeStats(offers), [offers])
+  const multiplier = priceUnit === 'per_1m' ? 1000 : 1
 
   const fmt = (v) => {
     if (v === null || v === undefined) return '—'
-    const n = showPer1 ? v / 1000 : v
+    const n = v * multiplier
     if (n >= 1)    return `$${n.toFixed(2)}`
     if (n >= 0.01) return `$${n.toFixed(4)}`
     return `$${n.toFixed(6)}`
@@ -25,7 +26,7 @@ export function StatsBar({ offers, loading, showPer1 = false }) {
 
   const fmtSpread = (v) => {
     if (!v || v.value === null || v.value === undefined) return '—'
-    const n = showPer1 ? v.value / 1000 : v.value
+    const n = v.value * multiplier
     let money = ''
     if (Math.abs(n) >= 1) money = `$${Math.abs(n).toFixed(2)}`
     else if (Math.abs(n) >= 0.01) money = `$${Math.abs(n).toFixed(4)}`

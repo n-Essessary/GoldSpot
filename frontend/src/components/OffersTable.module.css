@@ -131,6 +131,51 @@
 /* Цена */
 .price { font-size: 14px; color: var(--text-primary); }
 
+.priceHeader {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.priceUnitToggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.priceUnitBtn {
+  border: none;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 6px;
+  cursor: pointer;
+}
+
+.priceUnitBtn:last-child {
+  border-right: none;
+}
+
+.priceUnitBtn:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.priceUnitBtn:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.priceUnitBtnActive {
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
 /* Иконка аномальной G2G-цены */
 .priceWarn {
   display: inline-block;

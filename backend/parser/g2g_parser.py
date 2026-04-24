@@ -476,7 +476,7 @@ def _to_offer(
     fetched_at: datetime,
     skip_qty_check: bool = False,
 ) -> Optional[Offer]:
-    """Convert G2GOffer → Offer using raw price (unit_price_in_usd = per 1 gold).
+    """Convert G2GOffer → Offer, setting raw_price_unit based on game_version.
 
     Separation of concerns (strict):
       • Parser role: extract raw data only — server_name, faction, price, qty.
@@ -496,11 +496,16 @@ def _to_offer(
     Offers with price <= 0 are dropped here (not quarantined) because these are
     clearly invalid data points, not unresolved servers.
 
-    Raw price contract (Task 2):
-      raw_price      = unit_price_in_usd  (price per 1 gold unit, USD)
-      raw_price_unit = 'per_unit'
-      lot_size       = 1
-    price_per_1k is derived in Offer.model_validator: raw_price * 1000.
+    Raw price contract:
+      Classic Era / Anniversary / Seasonal:
+        unit_price_in_usd = price per 1 gold
+        raw_price_unit = 'per_unit', lot_size = 1
+        → price_per_1k = raw_price * 1000
+
+      Retail / MoP Classic:
+        unit_price_in_usd = price per 1 000 gold (G2G UI denomination is K-gold)
+        raw_price_unit = 'per_1k', lot_size = 1
+        → price_per_1k = raw_price  (no multiplication)
     """
     if raw.price_usd <= 0:
         return None
@@ -527,9 +532,11 @@ def _to_offer(
             # raw_title stored for alias lookup in normalize_pipeline._build_alias_key()
             raw_title=raw.title,
             game_version=raw.game_version,
-            # ── Raw price (Task 2) ────────────────────────────────────────────
-            raw_price=raw.price_usd,      # unit_price_in_usd: price per 1 gold
-            raw_price_unit="per_unit",
+            # ── Raw price ─────────────────────────────────────────────────────
+            # Retail/MoP: G2G unit_price_in_usd is per 1K gold → use 'per_1k'
+            # Classic (Era/Anniversary/Seasonal): per 1 gold → use 'per_unit'
+            raw_price=raw.price_usd,
+            raw_price_unit="per_1k" if raw.game_version in ("Retail", "MoP Classic") else "per_unit",
             lot_size=1,
             # ── amount & metadata ─────────────────────────────────────────────
             amount_gold=raw.available_qty if raw.available_qty > 0 else 1,

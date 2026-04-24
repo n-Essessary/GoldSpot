@@ -26,14 +26,23 @@ class Offer(BaseModel):
     """Internal offer representation — passed between parsers, service, DB writer.
 
     Raw price contract (Task 1 & 2):
-      G2G:    raw_price = unit_price_in_usd (price per 1 gold)
+      G2G Classic (Era/Anniversary/Seasonal):
+              raw_price = unit_price_in_usd (price per 1 gold)
               raw_price_unit = 'per_unit'   lot_size = 1
-      FunPay: raw_price = lot price (price for the whole lot in USD)
-              raw_price_unit = 'per_lot'    lot_size = amount_gold
+      G2G Retail / MoP Classic:
+              raw_price = unit_price_in_usd (price per 1 000 gold — G2G denomination)
+              raw_price_unit = 'per_1k'     lot_size = 1
+      FunPay Classic (Era/Anniversary/Seasonal):
+              raw_price = parsed price (price per 1 gold from .tc-price)
+              raw_price_unit = 'per_unit'   lot_size = 1
+      FunPay Retail / MoP Classic:
+              raw_price = parsed price (price per 1 000 gold from .tc-price)
+              raw_price_unit = 'per_1k'     lot_size = 1
 
     price_per_1k is derived in model_validator:
       per_unit → raw_price * 1000
       per_lot  → (raw_price / lot_size) * 1000
+      per_1k   → raw_price  (already per-1k; no multiplication)
 
     Backward-compat (migration period):
       Legacy parsers may set price_per_1k directly (raw_price stays 0).
@@ -71,7 +80,7 @@ class Offer(BaseModel):
 
     # ── Raw price (source of truth) ───────────────────────────────────────────
     raw_price: float = 0.0           # exact price as received from source
-    raw_price_unit: str = "per_unit" # 'per_unit' | 'per_lot'
+    raw_price_unit: str = "per_unit" # 'per_unit' | 'per_lot' | 'per_1k'
     lot_size: int = 1                # gold in lot (FunPay); always 1 for G2G
 
     # ── price_per_1k — derived by model_validator, kept as field for compat ──
@@ -99,7 +108,11 @@ class Offer(BaseModel):
             lot_sz = max(self.lot_size, 1)
             if self.raw_price_unit == "per_lot":
                 self.price_per_1k = round(self.raw_price / lot_sz * 1000.0, 6)
-            else:  # 'per_unit' (G2G) or default
+            elif self.raw_price_unit == "per_1k":
+                # raw_price IS already the price per 1 000 gold (G2G Retail/MoP,
+                # FunPay Retail/MoP). No multiplication needed.
+                self.price_per_1k = round(self.raw_price, 6)
+            else:  # 'per_unit' (G2G Classic Era / Anniversary / Seasonal) or default
                 self.price_per_1k = round(self.raw_price * 1000.0, 6)
 
         elif self.price_per_1k > 0:

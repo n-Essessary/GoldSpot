@@ -11,6 +11,16 @@ import { PriceChart } from './components/PriceChart'
 import { SourceSummary } from './components/SourceSummary'
 import styles from './App.module.css'
 
+const PER_1M_VERSIONS = new Set(['Retail', 'MoP Classic'])
+const ALWAYS_PER_1K_VERSIONS = new Set(['Classic Era', 'Anniversary', 'Seasonal'])
+
+function extractVersion(displayServer) {
+  const value = String(displayServer || '').trim()
+  if (!value) return ''
+  const match = value.match(/^\([^)]+\)\s*(.*)$/)
+  return (match ? match[1] : value).trim()
+}
+
 // ── Хук: загрузить все серверы с /servers ─────────────────────
 function useServers() {
   const [servers, setServers] = useState([])
@@ -100,9 +110,25 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
     lastFetched,
   } = useOffers(initialServer, initialRealm)
 
-  // Per-1 / Per-1K price unit toggle (client-side display only)
-  const [showPer1, setShowPer1] = useState(false)
+  // Price unit display toggle: canonical API field remains price_per_1k.
+  const [priceUnit, setPriceUnit] = useState('per_1k')
   const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  const selectedVersion = extractVersion(filters.server)
+  const selectedAllowsPer1m = PER_1M_VERSIONS.has(selectedVersion)
+  const selectedLockedPer1k = ALWAYS_PER_1K_VERSIONS.has(selectedVersion)
+  const hasPer1mOffersInView = filteredOffers.some((offer) => {
+    const offerVersion = extractVersion(offer.display_server || offer.server)
+    return PER_1M_VERSIONS.has(offerVersion)
+  })
+  const showPriceUnitToggle = selectedAllowsPer1m
+    || (!filters.server || filters.server === 'All servers') && hasPer1mOffersInView
+
+  useEffect(() => {
+    if (selectedLockedPer1k || !showPriceUnitToggle) {
+      setPriceUnit('per_1k')
+    }
+  }, [selectedLockedPer1k, showPriceUnitToggle])
 
   useEffect(() => {
     if (!sidebarOpen) return
@@ -168,8 +194,6 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
               filters={filters}
               setFilters={setFilters}
               disabled={loading}
-              showPer1={showPer1}
-              onTogglePer1={() => setShowPer1(v => !v)}
             />
           </div>
 
@@ -181,12 +205,12 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
             />
           </div>
 
-          <StatsBar offers={filteredOffers} loading={loading} showPer1={showPer1} />
+          <StatsBar offers={filteredOffers} loading={loading} priceUnit={priceUnit} />
           <PriceChart
             refreshSignal={lastFetched}
             serverSlug={filters.server || 'all'}
             realmName={filters.server_name ?? ''}
-            showPer1={showPer1}
+            showPer1={false}
             faction={filters.faction || 'All'}
           />
 
@@ -196,7 +220,9 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
               loading={loading}
               error={error}
               currentServer={filters.server}
-              showPer1={showPer1}
+              priceUnit={priceUnit}
+              showPriceUnitToggle={showPriceUnitToggle}
+              onPriceUnitChange={setPriceUnit}
             />
           </main>
         </div>

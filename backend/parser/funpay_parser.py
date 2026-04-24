@@ -496,6 +496,18 @@ async def _fetch_chip(config: ChipConfig) -> list[Offer]:
     for offer in raw_offers:
         offer.game_version = config.game_version
 
+    # Fix denomination for Retail and MoP Classic.
+    # FunPay .tc-price for these versions shows price per 1 000 gold (K-gold),
+    # not per 1 gold.  The initial parse set raw_price_unit='per_unit' which
+    # would inflate price_per_1k by 1000×.  Override here now that we know
+    # the game_version.
+    if config.game_version in ("Retail", "MoP Classic"):
+        for offer in raw_offers:
+            offer.raw_price_unit = "per_1k"
+            # raw_price is already in USD (currency conversion above ran first).
+            # price_per_1k = raw_price — no multiplication needed.
+            offer.price_per_1k = round(offer.raw_price, 6)
+
     # Skip "Any" server offers for Retail — not a real realm, no alias exists.
     # data-server="*" on FunPay indicates a catch-all offer not tied to a realm.
     if config.game_version == "Retail":

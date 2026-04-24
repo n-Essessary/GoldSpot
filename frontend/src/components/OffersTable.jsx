@@ -103,10 +103,20 @@ export function getTop5Set(sorted) {
  *   loading: boolean,
  *   error: string|null,
  *   currentServer?: string   — display_server текущей страницы (для G2G fallback)
- *   showPer1?: boolean        — display price per 1 gold instead of per 1k
+ *   priceUnit?: 'per_1k'|'per_1m'
+ *   showPriceUnitToggle?: boolean
+ *   onPriceUnitChange?: (unit: 'per_1k'|'per_1m') => void
  * }} props
  */
-export function OffersTable({ offers, loading, error, currentServer = '', showPer1 = false }) {
+export function OffersTable({
+  offers,
+  loading,
+  error,
+  currentServer = '',
+  priceUnit = 'per_1k',
+  showPriceUnitToggle = false,
+  onPriceUnitChange,
+}) {
   // TODO(I5): virtualize rows (react-window) when offers.length > 100.
   if (error) {
     return (
@@ -149,7 +159,31 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
             <th className={`${styles.rankCol} ${styles.hideOnMobile}`}>#</th>
             <th>Платформа</th>
             <th>Сервер · Фракция</th>
-            <th className={styles.right}>{showPer1 ? 'Цена / 1' : 'Цена / 1K'}</th>
+            <th className={styles.right}>
+              <div className={styles.priceHeader}>
+                <span>{priceUnit === 'per_1m' ? 'Price $/1M' : 'Price $/1K'}</span>
+                {showPriceUnitToggle && (
+                  <div className={styles.priceUnitToggle} role="group" aria-label="Price unit">
+                    <button
+                      type="button"
+                      className={`${styles.priceUnitBtn} ${priceUnit === 'per_1k' ? styles.priceUnitBtnActive : ''}`}
+                      onClick={() => onPriceUnitChange?.('per_1k')}
+                      disabled={loading || priceUnit === 'per_1k'}
+                    >
+                      /1K
+                    </button>
+                    <button
+                      type="button"
+                      className={`${styles.priceUnitBtn} ${priceUnit === 'per_1m' ? styles.priceUnitBtnActive : ''}`}
+                      onClick={() => onPriceUnitChange?.('per_1m')}
+                      disabled={loading || priceUnit === 'per_1m'}
+                    >
+                      /1M
+                    </button>
+                  </div>
+                )}
+              </div>
+            </th>
             <th className={`${styles.right} ${styles.hideOnMobile}`}>Position Value</th>
             <th className={styles.right}>Объём</th>
             <th>Продавец</th>
@@ -169,7 +203,9 @@ export function OffersTable({ offers, loading, error, currentServer = '', showPe
             const realmLabel  = offer.server_name || null
             const serverLabel = realmLabel ?? currentServer
             // Displayed price value depending on unit mode
-            const displayPrice = showPer1 ? offer.price_per_1k / 1000 : offer.price_per_1k
+            const displayPrice = priceUnit === 'per_1m'
+              ? offer.price_per_1k * 1000
+              : offer.price_per_1k
 
             const rowCls = [
               styles.row,

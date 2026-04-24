@@ -3,17 +3,15 @@ import styles from './FiltersBar.module.css'
 const FACTIONS = ['Horde', 'Alliance']
 
 /**
- * Панель фильтров. Сервер выбирается через ServerSidebar — здесь фракция и Per 1/1K переключатель.
+ * Панель фильтров. Сервер выбирается через ServerSidebar — здесь только фракция.
  *
  * @param {{
  *   filters: object,
  *   setFilters: function,
  *   disabled: boolean,
- *   showPer1: boolean,
- *   onTogglePer1: function,
  * }} props
  */
-export function FiltersBar({ filters, setFilters, disabled, showPer1 = false, onTogglePer1 }) {
+export function FiltersBar({ filters, setFilters, disabled }) {
   const onFaction = (e) => setFilters({ faction: e.target.value })
 
   return (
@@ -35,27 +33,6 @@ export function FiltersBar({ filters, setFilters, disabled, showPer1 = false, on
         </select>
       </label>
 
-      <div className={styles.field}>
-        <span className={styles.label}>Цена</span>
-        <div className={styles.toggleGroup} role="group" aria-label="Единица цены">
-          <button
-            type="button"
-            className={`${styles.toggleBtn} ${!showPer1 ? styles.toggleActive : ''}`}
-            onClick={() => showPer1 && onTogglePer1?.()}
-            disabled={disabled}
-          >
-            Per 1K
-          </button>
-          <button
-            type="button"
-            className={`${styles.toggleBtn} ${showPer1 ? styles.toggleActive : ''}`}
-            onClick={() => !showPer1 && onTogglePer1?.()}
-            disabled={disabled}
-          >
-            Per 1
-          </button>
-        </div>
-      </div>
     </div>
   )
 }
