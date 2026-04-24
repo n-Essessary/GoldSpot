@@ -57,7 +57,7 @@ _GROUP_RE = re.compile(r"^\([A-Z]{2,}\)\s+\S", re.ASCII)
 logger = logging.getLogger(__name__)
 
 # ── Per-source state ──────────────────────────────────────────────────────────
-_cache:         dict[str, list[Offer]]        = {"funpay": [], "g2g": [], "g2g_retail": []}
+_cache:         dict[str, list[Offer]]        = {"funpay": [], "g2g": [], "g2g_retail": [], "g2g_retail_low": [], "g2g_retail_rec": []}
 _last_update:   dict[str, Optional[datetime]] = {"funpay": None, "g2g": None, "g2g_retail": None}
 _running:       dict[str, bool]               = {"funpay": False, "g2g": False, "g2g_retail": False}
 _cache_version: dict[str, int]               = {"funpay": 0, "g2g": 0, "g2g_retail": 0}
@@ -94,6 +94,22 @@ _VERSION_ORDER: dict[str, int] = {
     "Season of Discovery · Hardcore": 110,
     "Classic · Hardcore":           130,
 }
+
+
+# ── Retail cache helpers ──────────────────────────────────────────────────────
+
+def _merge_retail_caches() -> list[Offer]:
+    """Combine g2g_retail_low + g2g_retail_rec with dedup by offer_id.
+    Each sub-cache is fully replaced per cycle — this merge never accumulates
+    stale offers across cycles.
+    """
+    seen: set[str] = set()
+    result: list[Offer] = []
+    for o in _cache["g2g_retail_low"] + _cache["g2g_retail_rec"]:
+        if o.id not in seen:
+            seen.add(o.id)
+            result.append(o)
+    return result
 
 
 # ── IndexPrice (group-level, legacy) ─────────────────────────────────────────
@@ -780,13 +796,9 @@ async def _run_g2g_retail_loop() -> None:
                         len(quarantined),
                         ", ".join({q.reason for q in quarantined}),
                     )
-                # Merge with existing g2g_retail cache (keep recommended_v2 offers)
-                # Deduplicate by offer.id across both sorts
-                existing = _cache["g2g_retail"]
-                existing_ids = {o.id for o in offers}
-                kept_rec = [o for o in existing if o.id not in existing_ids]
-                merged = offers + kept_rec
-                if not merged and _cache_initialized["g2g_retail"]:
+                # Full replace of lowest_price sub-cache; combined cache rebuilt via merge helper.
+                # Never accumulates stale offers across cycles.
+                if not offers and _cache_initialized["g2g_retail"]:
                     _last_error["g2g_retail"] = "empty_after_normalize"
                     elapsed = asyncio.get_running_loop().time() - t0
                     logger.warning(
@@ -795,6 +807,8 @@ async def _run_g2g_retail_loop() -> None:
                         elapsed, len(_cache["g2g_retail"]),
                     )
                 else:
+                    _cache["g2g_retail_low"] = offers
+                    merged = _merge_retail_caches()
                     _cache["g2g_retail"] = merged
                     _cache_initialized["g2g_retail"] = True
                     _cache_version["g2g_retail"] += 1
@@ -846,18 +860,16 @@ async def _run_g2g_retail_rec_loop() -> None:
                 pool = await get_pool()
                 offers, quarantined = await normalize_offer_batch(raw_offers, pool)
                 _add_to_quarantine(quarantined)
-                # Merge: keep lowest_price offers, replace/add recommended_v2
-                existing = _cache["g2g_retail"]
-                existing_ids = {o.id for o in offers}
-                kept_low = [o for o in existing if o.id not in existing_ids]
-                merged = kept_low + offers
-                if merged:
+                # Full replace of recommended_v2 sub-cache; combined cache rebuilt via merge helper.
+                # Never accumulates stale offers across cycles.
+                if offers:
+                    _cache["g2g_retail_rec"] = offers
+                    merged = _merge_retail_caches()
                     _cache["g2g_retail"] = merged
                     _cache_version["g2g_retail"] += 1
                     _last_update["g2g_retail"] = datetime.now(timezone.utc)
                     logger.info(
-                        "G2G Retail (rec) updated: %d merged offers "
-                        "(%d quarantined)",
+                        "G2G Retail (rec) updated: %d offers (%d quarantined)",
                         len(merged), len(quarantined),
                     )
                 else:
