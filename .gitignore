@@ -9,3 +9,6 @@ dist
 
 # macOS
 .DS_Store
+
+# cursor local worktrees
+.claude/worktrees/
