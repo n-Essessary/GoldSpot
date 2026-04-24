@@ -9,10 +9,22 @@ const FACTIONS = ['Horde', 'Alliance']
  *   filters: object,
  *   setFilters: function,
  *   disabled: boolean,
+ *   priceUnit: 'per_unit'|'per_1k'|'per_1m',
+ *   onPriceUnitChange: (unit: 'per_unit'|'per_1k'|'per_1m') => void,
  * }} props
  */
-export function FiltersBar({ filters, setFilters, disabled }) {
+export function FiltersBar({ filters, setFilters, disabled, priceUnit, onPriceUnitChange }) {
   const onFaction = (e) => setFilters({ faction: e.target.value })
+  const isRetailLike = /^\([A-Z]{2,}\)\s+(Retail|MoP Classic)\b/.test(String(filters.server || ''))
+  const toggleOptions = isRetailLike
+    ? [
+        { value: 'per_1k', label: '/1K' },
+        { value: 'per_1m', label: '/1M' },
+      ]
+    : [
+        { value: 'per_unit', label: '/1' },
+        { value: 'per_1k', label: '/1K' },
+      ]
 
   return (
     <div className={styles.bar}>
@@ -32,7 +44,22 @@ export function FiltersBar({ filters, setFilters, disabled }) {
           ))}
         </select>
       </label>
-
+      <label className={styles.field}>
+        <span className={styles.label}>Цена</span>
+        <div className={styles.toggleGroup} role="group" aria-label="Price unit">
+          {toggleOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`${styles.toggleBtn} ${priceUnit === option.value ? styles.toggleActive : ''}`}
+              onClick={() => onPriceUnitChange(option.value)}
+              disabled={disabled || priceUnit === option.value}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </label>
     </div>
   )
 }

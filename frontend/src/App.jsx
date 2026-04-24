@@ -12,7 +12,6 @@ import { SourceSummary } from './components/SourceSummary'
 import styles from './App.module.css'
 
 const PER_1M_VERSIONS = new Set(['Retail', 'MoP Classic'])
-const ALWAYS_PER_1K_VERSIONS = new Set(['Classic Era', 'Anniversary', 'Seasonal'])
 
 function extractVersion(displayServer) {
   const value = String(displayServer || '').trim()
@@ -115,20 +114,14 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const selectedVersion = extractVersion(filters.server)
-  const selectedAllowsPer1m = PER_1M_VERSIONS.has(selectedVersion)
-  const selectedLockedPer1k = ALWAYS_PER_1K_VERSIONS.has(selectedVersion)
-  const hasPer1mOffersInView = filteredOffers.some((offer) => {
-    const offerVersion = extractVersion(offer.display_server || offer.server)
-    return PER_1M_VERSIONS.has(offerVersion)
-  })
-  const showPriceUnitToggle = selectedAllowsPer1m
-    || (!filters.server || filters.server === 'All servers') && hasPer1mOffersInView
+  const isRetailLike = PER_1M_VERSIONS.has(selectedVersion)
+  const availablePriceUnits = isRetailLike ? ['per_1k', 'per_1m'] : ['per_unit', 'per_1k']
 
   useEffect(() => {
-    if (selectedLockedPer1k || !showPriceUnitToggle) {
+    if (!availablePriceUnits.includes(priceUnit)) {
       setPriceUnit('per_1k')
     }
-  }, [selectedLockedPer1k, showPriceUnitToggle])
+  }, [availablePriceUnits, priceUnit])
 
   useEffect(() => {
     if (!sidebarOpen) return
@@ -194,6 +187,8 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
               filters={filters}
               setFilters={setFilters}
               disabled={loading}
+              priceUnit={priceUnit}
+              onPriceUnitChange={setPriceUnit}
             />
           </div>
 
@@ -221,8 +216,6 @@ function Dashboard({ initialServer, initialRealm, servers, onSelectServer }) {
               error={error}
               currentServer={filters.server}
               priceUnit={priceUnit}
-              showPriceUnitToggle={showPriceUnitToggle}
-              onPriceUnitChange={setPriceUnit}
             />
           </main>
         </div>
