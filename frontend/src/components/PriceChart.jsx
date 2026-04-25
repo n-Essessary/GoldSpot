@@ -20,14 +20,20 @@ function smoothData(data, window = 3) {
 
 const PERIODS = [
   { label: '24H', hours: 24,  points: 400 },
-  { label: '7D',  hours: 168, points: 500 },
+  { label: '7D',  hours: 168, points: 2016 },
   { label: '30D', hours: 720, points: 500 },
 ]
 
-/** API values are per 1k gold; Per 1 divides by 1000.
- * @deprecated Prefer explicit `conv = v => applyPriceUnit(v, showPer1)` at call sites — clearer at scale. */
-export const applyPriceUnit = (valuePer1k, showPer1) =>
-  showPer1 ? valuePer1k / 1000 : valuePer1k
+/** API values are per 1k gold. Supports three display units:
+ *   'per_unit' → divide by 1000 (price per 1 gold)
+ *   'per_1k'   → passthrough (default)
+ *   'per_1m'   → multiply by 1000 (price per 1M gold)
+ * @deprecated Prefer explicit `conv = v => applyPriceUnit(v, priceUnit)` at call sites — clearer at scale. */
+export const applyPriceUnit = (valuePer1k, priceUnit) => {
+  if (priceUnit === 'per_unit') return valuePer1k / 1000
+  if (priceUnit === 'per_1m')   return valuePer1k * 1000
+  return valuePer1k
+}
 
 /** FiltersBar uses '' for «все»; backend expects `All`. */
 export function normalizeFactionForApi(faction) {
@@ -119,7 +125,7 @@ export async function fetchLivePrice(serverName, region, version, faction, { sig
  *                   When unset → fetches legacy group OHLC from price_index_snapshots
  *   faction       — from FiltersBar ('' → treated as All)
  */
-export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = false, faction = 'All' }) {
+export function PriceChart({ serverSlug, refreshSignal, realmName, priceUnit = 'per_1k', faction = 'All' }) {
   const containerRef = useRef(null)
   const chartRef     = useRef(null)
   const seriesRef    = useRef({})
@@ -129,14 +135,14 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   const loadGenRef   = useRef(0)
   const loadGenContextKeyRef = useRef(null)
   const abortRef    = useRef(null)
-  const showPer1Ref = useRef(showPer1)
+  const priceUnitRef = useRef(priceUnit)
   const factionRef  = useRef(faction)
   const [period,  setPeriod]  = useState(PERIODS[0])   // 24H default
   const [loading, setLoading] = useState(false)
   const [empty,   setEmpty]   = useState(false)
   const [sources, setSources] = useState([])
 
-  useEffect(() => { showPer1Ref.current = showPer1 }, [showPer1])
+  useEffect(() => { priceUnitRef.current = priceUnit }, [priceUnit])
   useEffect(() => { factionRef.current = faction }, [faction])
 
   // ── Инициализация графика (один раз) ───────────────────────────────────────
@@ -307,7 +313,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         return
       }
 
-      const fmt = v => showPer1Ref.current
+      const fmt = v => priceUnitRef.current === 'per_unit'
         ? `$${Number(v).toFixed(5)}`
         : `$${Number(v).toFixed(2)}`
 
@@ -398,13 +404,13 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   useEffect(() => {
     chartRef.current?.applyOptions({
       localization: {
-        priceFormatter: p => (showPer1 ? `$${p.toFixed(5)}` : `$${p.toFixed(2)}`),
+        priceFormatter: p => priceUnit === 'per_unit' ? `$${p.toFixed(5)}` : `$${p.toFixed(2)}`,
       },
     })
-  }, [showPer1])
+  }, [priceUnit])
 
   useEffect(() => {
-    const fmt2 = p => showPer1
+    const fmt2 = p => priceUnit === 'per_unit'
       ? `$${Number(p).toFixed(5)}`
       : `$${Number(p).toFixed(2)}`
 
@@ -417,7 +423,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       priceFormat: {
         type:      'custom',
         formatter: p => fmt2(p),
-        minMove:   showPer1 ? 0.00001 : 0.01,
+        minMove:   priceUnit === 'per_unit' ? 0.00001 : 0.01,
       },
     })
     seriesRef.current.ask?.applyOptions?.({
@@ -429,24 +435,24 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       priceFormat: {
         type:      'custom',
         formatter: p => fmt2(p),
-        minMove:   showPer1 ? 0.00001 : 0.01,
+        minMove:   priceUnit === 'per_unit' ? 0.00001 : 0.01,
       },
     })
     seriesRef.current.askAlliance?.applyOptions?.({
       priceFormat: {
         type:      'custom',
         formatter: p => fmt2(p),
-        minMove:   showPer1 ? 0.00001 : 0.01,
+        minMove:   priceUnit === 'per_unit' ? 0.00001 : 0.01,
       },
     })
     seriesRef.current.askHorde?.applyOptions?.({
       priceFormat: {
         type:      'custom',
         formatter: p => fmt2(p),
-        minMove:   showPer1 ? 0.00001 : 0.01,
+        minMove:   priceUnit === 'per_unit' ? 0.00001 : 0.01,
       },
     })
-  }, [showPer1])
+  }, [priceUnit])
 
   useEffect(() => {
     isFirstLoadRef.current = false
@@ -458,7 +464,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   // `silent=false` — user action (realm/period/faction change): shows spinner.
   const loadData = useCallback(async (silent = false) => {
     if (!serverSlug || serverSlug === 'all') return
-    const contextKey = `${serverSlug}|${realmName}|${faction}|${period.label}|${showPer1}`
+    const contextKey = `${serverSlug}|${realmName}|${faction}|${period.label}|${priceUnit}`
     if (loadGenContextKeyRef.current !== contextKey) {
       loadGenRef.current += 1
       loadGenContextKeyRef.current = contextKey
@@ -646,7 +652,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
         return
       }
 
-      const conv = v => applyPriceUnit(v, showPer1)
+      const conv = v => applyPriceUnit(v, priceUnit)
 
       const contextChanged = lastContextRef.current !== contextKey
       const savedRange = (!contextChanged && fittedRef.current)
@@ -763,11 +769,11 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
     } finally {
       if (!signal.aborted) setLoading(false)
     }
-  }, [serverSlug, realmName, faction, period, showPer1])
+  }, [serverSlug, realmName, faction, period, priceUnit])
 
   // Period / faction / unit change → show spinner (user explicitly changed filter)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { loadData(false) }, [period, faction, showPer1])
+  useEffect(() => { loadData(false) }, [period, faction, priceUnit])
 
   // Server / realm change → silent load (chart stays visible during transition)
   // eslint-disable-next-line react-hooks/exhaustive-deps

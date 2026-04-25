@@ -61,13 +61,18 @@ describe('_parseGroupLabel', () => {
 })
 
 describe('applyPriceUnit', () => {
-  it('keeps per-1k values when showPer1 is false', () => {
-    expect(applyPriceUnit(12.34, false)).toBe(12.34)
+  it('keeps per-1k values for priceUnit="per_1k"', () => {
+    expect(applyPriceUnit(12.34, 'per_1k')).toBe(12.34)
   })
 
-  it('divides by 1000 for per-1 display', () => {
-    expect(applyPriceUnit(1000, true)).toBe(1)
-    expect(applyPriceUnit(500, true)).toBe(0.5)
+  it('divides by 1000 for priceUnit="per_unit"', () => {
+    expect(applyPriceUnit(1000, 'per_unit')).toBe(1)
+    expect(applyPriceUnit(500, 'per_unit')).toBe(0.5)
+  })
+
+  it('multiplies by 1000 for priceUnit="per_1m"', () => {
+    expect(applyPriceUnit(12.34, 'per_1m')).toBe(12340)
+    expect(applyPriceUnit(0.5, 'per_1m')).toBe(500)
   })
 })
 
