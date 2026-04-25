@@ -23,6 +23,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional
 
+from cachetools import TTLCache
+
 if TYPE_CHECKING:
     from service.offers_service import IndexPrice
 
@@ -30,7 +32,9 @@ logger = logging.getLogger(__name__)
 
 _WRITE_THRESHOLD = 0.005     # write snapshot only if price changed > 0.5%
 
-_last_written: dict[str, float] = {}
+# TTLCache: evicts entries after 1h — prevents unbounded growth from
+# rotating server_id / faction key combinations over long uptimes.
+_last_written: TTLCache = TTLCache(maxsize=10_000, ttl=3600)
 _pool = None
 _pool_lock: asyncio.Lock | None = None   # created lazily inside the event loop
 
@@ -70,8 +74,8 @@ async def get_pool():
             import asyncpg
             _pool = await asyncpg.create_pool(
                 dsn,
-                min_size=1,
-                max_size=5,
+                min_size=5,
+                max_size=20,
                 command_timeout=10,
             )
             logger.info("DB pool created")

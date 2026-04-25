@@ -74,7 +74,7 @@ _ALIAS_RETRY_DELAYS: list[float] = [5.0, 15.0, 60.0, 120.0]  # max 4 waits → 5
 _BATCH_MISS = object()
 _batch_ttl_cache: dict[str, tuple[int, float]] = {}  # lower(alias) -> (server_id, expires_at mono)
 _BATCH_ENTRY_TTL = 300.0
-_BATCH_ENTRY_MAX = 500
+_BATCH_ENTRY_MAX = 4096
 
 
 def _batch_cache_get(lo: str):

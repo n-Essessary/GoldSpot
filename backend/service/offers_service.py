@@ -37,6 +37,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from cachetools import TTLCache
+
 from api.schemas import Offer, PriceHistoryPoint, ServerGroup
 from utils.version_utils import _VERSION_ALIASES, _canonicalize_version
 
@@ -82,7 +84,9 @@ _MIN_OFFERS          = 1
 # Throttle for raw price snapshots: skip write if price changed less than this
 _SNAP_WRITE_THRESHOLD = 0.005   # 0.5%
 # Per-offer last-written price: offer_id → last raw_price written to DB
-_last_snap_price: dict[str, float] = {}
+# TTLCache: evicts entries after 1h — prevents unbounded growth if offer_ids
+# rotate (e.g. sellers re-list at new IDs).
+_last_snap_price: TTLCache = TTLCache(maxsize=10_000, ttl=3600)
 
 _VERSION_ORDER: dict[str, int] = {
     "MoP Classic":                    0,
@@ -127,7 +131,9 @@ class IndexPrice:
 
 
 # In-memory index cache: key = "display_server::faction"
-_index_cache: dict[str, IndexPrice] = {}
+# TTLCache: evicts entries after 1h — prevents unbounded growth across restarts
+# when display_server keys change (server retires, version rename, etc.).
+_index_cache: TTLCache = TTLCache(maxsize=10_000, ttl=3600)
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -530,28 +536,33 @@ async def _do_snapshot_all_servers() -> None:
     #   b) upsert server_price_index for the /price-index endpoint
 
     # Build: server_id → (server_name, region, version) from offers
+    # Also pre-group offers by server_id (Fix 1) to avoid O(N_servers × N_offers).
     _server_id_meta: dict[int, tuple[str, str, str]] = {}
-    for o in all_offers:
-        if o.server_id is not None and o.server_id not in _server_id_meta:
-            ds = o.display_server or ""
-            import re as _re
-            _ds_match = _re.match(r"^\(([A-Za-z]{2,})\)\s*(.+)$", ds)
-            if _ds_match:
-                _region  = _ds_match.group(1).upper()
-                _version = _ds_match.group(2).strip()
-            else:
-                _region, _version = "", ds
-            _server_id_meta[o.server_id] = (o.server_name or "", _region, _version)
-
+    by_sid: dict[int, list] = {}
     server_faction_pairs: set[tuple[int, str]] = set()
     for o in all_offers:
         if o.server_id is not None:
+            # Pre-group
+            if o.server_id not in by_sid:
+                by_sid[o.server_id] = []
+            by_sid[o.server_id].append(o)
             server_faction_pairs.add((o.server_id, o.faction))
             server_faction_pairs.add((o.server_id, "All"))
+            # Meta
+            if o.server_id not in _server_id_meta:
+                ds = o.display_server or ""
+                import re as _re
+                _ds_match = _re.match(r"^\(([A-Za-z]{2,})\)\s*(.+)$", ds)
+                if _ds_match:
+                    _region  = _ds_match.group(1).upper()
+                    _version = _ds_match.group(2).strip()
+                else:
+                    _region, _version = "", ds
+                _server_id_meta[o.server_id] = (o.server_name or "", _region, _version)
 
     server_index_tasks = []
     for (server_id, faction) in server_faction_pairs:
-        result = compute_server_index(server_id, faction, all_offers)
+        result = compute_server_index(server_id, faction, by_sid.get(server_id, []))
         if result is not None:
             # Populate per-server _index_cache key (used by /index/{server})
             meta = _server_id_meta.get(server_id)
