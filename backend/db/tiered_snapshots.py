@@ -3,7 +3,7 @@ db/tiered_snapshots.py — 4-tier rolling price history storage.
 
 Tier schema (identical columns, different resolution/retention):
   snapshots_1m — 1-min resolution, 5m rolling    (write-only downsampling buffer)
-  snapshots_5m — 5-min resolution, 30d rolling   (downsampled from 1m every 5 min)
+  snapshots_5m — 5-min resolution, 7d rolling    (downsampled from 1m every 5 min)
   snapshots_1h — 1-hour resolution, 2y rolling   (downsampled from 5m every 5 min)
   snapshots_1d — 1-day resolution, forever        (downsampled from 1h every 5 min)
 
@@ -252,7 +252,7 @@ async def cleanup_snapshots_1m() -> None:
 
 
 async def cleanup_snapshots_5m() -> None:
-    """Delete snapshots_5m rows older than 30 days (rolling window)."""
+    """Delete snapshots_5m rows older than 7 days (rolling window)."""
     from db.writer import get_pool
 
     pool = await get_pool()
@@ -263,7 +263,7 @@ async def cleanup_snapshots_5m() -> None:
         deleted = await pool.fetchval(
             "WITH d AS ("
             "  DELETE FROM snapshots_5m"
-            "  WHERE recorded_at < NOW() - INTERVAL '30 days'"
+            "  WHERE recorded_at < NOW() - INTERVAL '7 days'"
             "  RETURNING 1"
             ") SELECT COUNT(*) FROM d"
         )
