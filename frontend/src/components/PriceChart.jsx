@@ -765,9 +765,13 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
     }
   }, [serverSlug, realmName, faction, period, showPer1])
 
-  // User action: realm / period / faction / unit change → show spinner.
+  // Period / faction / unit change → show spinner (user explicitly changed filter)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { loadData(false) }, [serverSlug, realmName, faction, period, showPer1])
+  useEffect(() => { loadData(false) }, [period, faction, showPer1])
+
+  // Server / realm change → silent load (chart stays visible during transition)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { loadData(true) }, [serverSlug, realmName])
 
   // Background refresh: periodic refreshSignal bump → update silently, keep
   // zoom and existing data on screen until new data arrives.
