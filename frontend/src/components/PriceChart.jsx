@@ -8,6 +8,78 @@ import { createChart, ColorType, LineStyle, CrosshairMode } from 'lightweight-ch
 import { API_BASE } from '../api/offers'
 import styles from './PriceChart.module.css'
 
+// ── Module-level LRU cache for /price-history responses ───────────────────────
+// Key: "${server}|${region}|${version}|${faction}|${last}|${hours}"
+// Entries: { data: parsedJson, ts: Date.now() }
+// Max 50 entries covers ~25 servers × 2 factions across all open periods.
+const _phCache    = new Map()
+const _PH_MAX     = 50
+const _PH_TTL     = 60_000   // ms — serve from cache within this window
+const _PH_BG_DELAY = 30_000  // ms — background refresh delay after a cache hit
+const _phBgPending = new Set() // prevent double-scheduling per key
+
+function _phMakeKey(server, region, version, faction, last, hours) {
+  return `${server}|${region}|${version}|${faction}|${last}|${hours}`
+}
+
+/** Returns cached data if present and fresh, or null. */
+function _phCacheGet(key) {
+  const e = _phCache.get(key)
+  if (!e) return null
+  if (Date.now() - e.ts >= _PH_TTL) { _phCache.delete(key); return null }
+  return e.data
+}
+
+/** Store data; evict oldest entry when at capacity (simple LRU approximation). */
+function _phCacheSet(key, data) {
+  if (!_phCache.has(key) && _phCache.size >= _PH_MAX) {
+    _phCache.delete(_phCache.keys().next().value)
+  }
+  _phCache.set(key, { data, ts: Date.now() })
+}
+
+/** Schedule a silent background fetch after _PH_BG_DELAY to warm the cache. */
+function _phScheduleBgRefresh(key, url) {
+  if (_phBgPending.has(key)) return
+  _phBgPending.add(key)
+  setTimeout(() => {
+    _phBgPending.delete(key)
+    fetch(url)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) _phCacheSet(key, d) })
+      .catch(() => {})
+  }, _PH_BG_DELAY)
+}
+
+/**
+ * Fetch /price-history with client-side LRU cache.
+ * Cache hit  → returns cached data + schedules background warm at 30s.
+ * Cache miss → normal fetch, stores result, returns data (or null on error).
+ * AbortError from signal is re-thrown so loadData can catch it.
+ */
+async function _phFetchCached(server, region, version, faction, last, hours, signal) {
+  const key = _phMakeKey(server, region, version, faction, last, hours)
+  const params = new URLSearchParams({
+    server, region, version, faction,
+    hours: String(hours),
+    last:  String(last),
+  })
+  const url = `${API_BASE}/price-history?${params}`
+
+  const cached = _phCacheGet(key)
+  if (cached !== null) {
+    _phScheduleBgRefresh(key, url)
+    return cached
+  }
+
+  const res = await fetch(url, { signal })
+  if (!res.ok) return null
+  const data = await res.json()
+  _phCacheSet(key, data)
+  return data
+}
+// ──────────────────────────────────────────────────────────────────────────────
+
 function smoothData(data, window = 3) {
   return data.map((point, i) => {
     const half = Math.floor(window / 2)
@@ -492,7 +564,26 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, priceUnit = '
     abortRef.current = controller
     const signal = controller.signal
 
-    if (!silent) setLoading(true)
+    // Hoist parsed early so the cache pre-check can use it before setLoading.
+    const parsed = _parseGroupLabel(serverSlug)
+
+    // Suppress spinner when ALL needed price-history data is already in cache
+    // (same silent-update pattern as useOffers meta-poll). Compute factionApi
+    // here for the pre-check; it is recomputed identically inside the try block.
+    let effectiveSilent = silent
+    if (!silent && realmName && parsed) {
+      const _fac = normalizeFactionForApi(faction)
+      if (_fac === 'All') {
+        const hitA = _phCacheGet(_phMakeKey(realmName, parsed.region, parsed.version, 'Alliance', period.points, period.hours))
+        const hitH = _phCacheGet(_phMakeKey(realmName, parsed.region, parsed.version, 'Horde',    period.points, period.hours))
+        if (hitA !== null && hitH !== null) effectiveSilent = true
+      } else {
+        const hit = _phCacheGet(_phMakeKey(realmName, parsed.region, parsed.version, _fac, period.points, period.hours))
+        if (hit !== null) effectiveSilent = true
+      }
+    }
+
+    if (!effectiveSilent) setLoading(true)
     try {
       const factionApi = normalizeFactionForApi(faction)
       let points = []
@@ -505,30 +596,18 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, priceUnit = '
         return Math.floor(new Date(raw).getTime() / 1000)
       }
 
-      const parsed = _parseGroupLabel(serverSlug)
+      // parsed already computed above the try block.
       const allRealmMode = Boolean(realmName && parsed && factionApi === 'All')
 
       if (realmName && parsed) {
-        // ── Task 4 mode: per-server history from DB ───────────────────────────
+        // ── Task 4 mode: per-server history from DB (with client-side LRU cache) ─
         if (factionApi === 'All') {
-          const mkParams = fac => new URLSearchParams({
-            server:  realmName,
-            region:  parsed.region,
-            version: parsed.version,
-            faction: fac,
-            hours:   String(period.hours),
-            last:    String(period.points),
-          })
-          const [resA, resH] = await Promise.all([
-            fetch(`${API_BASE}/price-history?${mkParams('Alliance')}`, { signal }),
-            fetch(`${API_BASE}/price-history?${mkParams('Horde')}`,    { signal }),
-          ])
           const [dataA, dataH] = await Promise.all([
-            resA.ok ? resA.json() : Promise.resolve({ points: [] }),
-            resH.ok ? resH.json() : Promise.resolve({ points: [] }),
+            _phFetchCached(realmName, parsed.region, parsed.version, 'Alliance', period.points, period.hours, signal),
+            _phFetchCached(realmName, parsed.region, parsed.version, 'Horde',    period.points, period.hours, signal),
           ])
-          const rawA = dataA.points ?? []
-          const rawH = dataH.points ?? []
+          const rawA = (dataA ?? { points: [] }).points ?? []
+          const rawH = (dataH ?? { points: [] }).points ?? []
 
           const rawIndex = rawA.length >= rawH.length ? rawA : rawH
           if (rawIndex.length > 0) {
@@ -546,18 +625,10 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, priceUnit = '
             .map(p => ({ time: toTS(p), value: p.best_ask, sources: p.sources ?? [] }))
             .filter(p => (p.value || 0) > 0)
         } else {
-          // GET /price-history?server={realm}&region={EU}&version={Anniversary}&faction={f}
-          const params = new URLSearchParams({
-            server:  realmName,
-            region:  parsed.region,
-            version: parsed.version,
-            faction: factionApi,
-            hours:   String(period.hours),
-            last:    String(period.points),
-          })
-          const res = await fetch(`${API_BASE}/price-history?${params}`, { signal })
-          if (res.ok) {
-            const data = await res.json()
+          // GET /price-history?server={realm}&region=...&version=...&faction={f}
+          // Uses client-side LRU cache; AbortError propagates up to loadData catch.
+          const data = await _phFetchCached(realmName, parsed.region, parsed.version, factionApi, period.points, period.hours, signal)
+          if (data) {
             // per-server endpoint returns ServerHistoryResponse with points[]
             const raw = data.points ?? []
             if (raw.length > 0) {
