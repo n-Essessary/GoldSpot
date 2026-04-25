@@ -35,6 +35,19 @@ export const applyPriceUnit = (valuePer1k, priceUnit) => {
   return valuePer1k
 }
 
+/** Auto-select decimal places based on price magnitude.
+ *  < 0.10  → 4 decimals  ($0.0499)
+ *  < 1.00  → 3 decimals  ($0.349)
+ *  < 10.0  → 2 decimals  ($3.49)
+ *  ≥ 10.0  → 2 decimals  ($13.03)
+ */
+const fmtPrice = v => {
+  const n = Number(v)
+  if (n < 0.10) return `$${n.toFixed(4)}`
+  if (n < 1.00) return `$${n.toFixed(3)}`
+  return `$${n.toFixed(2)}`
+}
+
 /** FiltersBar uses '' for «все»; backend expects `All`. */
 export function normalizeFactionForApi(faction) {
   return faction || 'All'
@@ -315,7 +328,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, priceUnit = '
 
       const fmt = v => priceUnitRef.current === 'per_unit'
         ? `$${Number(v).toFixed(5)}`
-        : `$${Number(v).toFixed(2)}`
+        : fmtPrice(v)
 
       const rows = []
       if (indexData) rows.push({
@@ -404,7 +417,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, priceUnit = '
   useEffect(() => {
     chartRef.current?.applyOptions({
       localization: {
-        priceFormatter: p => priceUnit === 'per_unit' ? `$${p.toFixed(5)}` : `$${p.toFixed(2)}`,
+        priceFormatter: p => priceUnit === 'per_unit' ? `$${p.toFixed(5)}` : fmtPrice(p),
       },
     })
   }, [priceUnit])
@@ -412,7 +425,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, priceUnit = '
   useEffect(() => {
     const fmt2 = p => priceUnit === 'per_unit'
       ? `$${Number(p).toFixed(5)}`
-      : `$${Number(p).toFixed(2)}`
+      : fmtPrice(p)
 
     seriesRef.current.index?.applyOptions?.({
       title:                  '',
