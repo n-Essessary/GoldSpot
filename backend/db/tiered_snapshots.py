@@ -304,7 +304,7 @@ async def query_tiered_history(
     """Smart router: select the coarsest tier that covers `hours` at sufficient resolution.
 
     Tier selection:
-      hours ≤ 168   → snapshots_5m  (5-min resolution, 30d retention)   [24H, 7D]
+      hours ≤ 168   → snapshots_5m  (5-min resolution, 7d retention)    [24H, 7D]
       hours ≤ 720   → snapshots_1h  (1-hour resolution, 2y retention)   [30D]
       else          → snapshots_1d  (1-day resolution, forever)          [future 6M/1Y]
 

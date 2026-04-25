@@ -129,42 +129,43 @@ async def parser_status_handler():
 async def get_price_history_handler(
     server:     str = Query("all"),
     faction:    str = Query("all"),
-    last:       int = Query(50, ge=1, le=2000),
+    last:       int = Query(50, ge=1, le=3000),
     hours:      int = Query(24, ge=1, le=8760, description="Time window in hours (max 1y for tiered)"),
     # Per-server params (Task 4) — all three required to use DB path
     region:     str | None = Query(None, description="Region, e.g. 'EU'. Required for per-server DB query."),
     version:    str | None = Query(None, description="Version, e.g. 'Classic Era'. Required for per-server DB query."),
-    # Tiered storage opt-in (safe rollout — no effect on legacy modes)
+    # Deprecated — tiered storage is now always active for per-server requests.
+    # Parameter kept for backward compatibility; its value is ignored.
     use_tiered: bool = Query(
         False,
         description=(
-            "When true, serve history from the 4-tier rolling storage "
-            "(snapshots_1m/5m/1h/1d) instead of the legacy per-server tables. "
-            "Requires server + region + version. Falls back to legacy if tiered "
-            "returns no data."
+            "DEPRECATED — ignored. Tiered storage is always used when "
+            "server + region + version are provided. Falls back to the legacy "
+            "per-server tables only if tiered returns no data."
         ),
     ),
 ):
     """
     Three modes (evaluated in priority order):
 
-    **Mode 3 — Tiered storage** (?use_tiered=true, requires server + region + version):
-      Routes to the finest tier that covers the requested hours window:
-        ≤ 24h  → snapshots_1m (1-min resolution)
-        ≤ 30d  → snapshots_5m (5-min resolution)
-        ≤ 2y   → snapshots_1h (1-hour resolution)
+    **Mode 3 — Tiered storage** (requires server + region + version):
+      Always active for per-server requests. Routes to the coarsest tier that
+      still covers the requested hours window:
+        ≤ 7d   → snapshots_5m (5-min resolution)
+        ≤ 30d  → snapshots_1h (1-hour resolution)
         else   → snapshots_1d (1-day resolution)
-      Falls back to Mode 2 if tiered returns no data.
+      Falls back to Mode 2 only if tiered returns no data (e.g. tables not yet
+      populated).
 
-    **Mode 2 — Legacy per-server DB** (server + region + version, no use_tiered):
-      Queries server_price_history / server_price_history_short.
-      Same as before — backward compatible.
+    **Mode 2 — Legacy per-server DB** (server + region + version, fallback only):
+      Queries server_price_history / server_price_history_short. Reached only
+      when Mode 3 returns no data.
 
     **Mode 1 — Legacy in-memory** (default, ?server=all or group label):
       Returns current snapshot from in-memory cache. Backward compatible.
     """
-    # Mode 3: tiered storage (opt-in, safe rollout)
-    if use_tiered and server != "all" and region and version:
+    # Mode 3: tiered storage — always active for per-server requests
+    if server != "all" and region and version:
         from db.tiered_snapshots import query_tiered_history_by_name
         tiered_rows = await query_tiered_history_by_name(
             server_name=server,
@@ -184,7 +185,7 @@ async def get_price_history_handler(
                 "points":  tiered_rows,
                 "source":  "tiered",
             }
-        # Tiered returned nothing (tables not yet populated) — fall through to Mode 2
+        # Tiered returned nothing — fall through to Mode 2
 
     # Mode 2: legacy per-server DB query (backward compatible)
     if server != "all" and region and version:
