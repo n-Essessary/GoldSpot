@@ -12,3 +12,6 @@ dist
 
 # cursor local worktrees
 .claude/worktrees/
+
+# local cases folder
+cases/
