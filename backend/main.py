@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from config import settings
 from service.offers_service import start_background_parsers
@@ -45,6 +46,7 @@ _origins_raw = os.getenv("ALLOWED_ORIGINS", "https://gold-spot.vercel.app")
 _allowed_origins = [o.strip() for o in _origins_raw.split(",") if o.strip()]
 
 app = FastAPI(title="WoW Gold Market Analytics", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
