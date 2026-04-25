@@ -16,6 +16,7 @@ New endpoints (refactor):
 """
 import os
 
+from cachetools import TTLCache
 from fastapi import APIRouter, Depends, HTTPException, Query, Security
 from fastapi.security import APIKeyHeader
 
@@ -39,6 +40,10 @@ from service.offers_service import (
 )
 
 router = APIRouter()
+
+# TTL=30s matches parser cycle interval; maxsize=512 covers
+# two factions × (150 Classic + 514 Retail) servers × ~3 time periods.
+_price_history_cache: TTLCache = TTLCache(maxsize=512, ttl=30)
 
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 api_key_header = APIKeyHeader(name="X-Admin-Key", auto_error=False)
@@ -164,6 +169,13 @@ async def get_price_history_handler(
     **Mode 1 — Legacy in-memory** (default, ?server=all or group label):
       Returns current snapshot from in-memory cache. Backward compatible.
     """
+    _cache_key = (server, region, version, faction, last, hours)
+    _cached = _price_history_cache.get(_cache_key)
+    if _cached is not None:
+        return _cached
+
+    _result = None
+
     # Mode 3: tiered storage — always active for per-server requests
     if server != "all" and region and version:
         from db.tiered_snapshots import query_tiered_history_by_name
@@ -176,7 +188,7 @@ async def get_price_history_handler(
             max_points=last,
         )
         if tiered_rows:
-            return {
+            _result = {
                 "server":  server,
                 "region":  region.upper(),
                 "version": version,
@@ -185,10 +197,9 @@ async def get_price_history_handler(
                 "points":  tiered_rows,
                 "source":  "tiered",
             }
-        # Tiered returned nothing — fall through to Mode 2
 
     # Mode 2: legacy per-server DB query (backward compatible)
-    if server != "all" and region and version:
+    if _result is None and server != "all" and region and version:
         from db.writer import query_server_history, query_server_history_short
         if hours <= 6:
             rows = await query_server_history_short(
@@ -209,7 +220,7 @@ async def get_price_history_handler(
                 hours=hours,
             )
         if rows:
-            return {
+            _result = {
                 "server":  server,
                 "region":  region.upper(),
                 "version": version,
@@ -217,14 +228,17 @@ async def get_price_history_handler(
                 "count":   len(rows),
                 "points":  rows,
             }
-        # DB empty / unavailable — fall through to in-memory
 
     # Mode 1: legacy in-memory
-    points = get_price_history(server, faction, last)
-    return {
-        "count":  len(points),
-        "points": points,
-    }
+    if _result is None:
+        points = get_price_history(server, faction, last)
+        _result = {
+            "count":  len(points),
+            "points": points,
+        }
+
+    _price_history_cache[_cache_key] = _result
+    return _result
 
 
 # ── OHLC (legacy group-level) ─────────────────────────────────────────────────
