@@ -336,6 +336,12 @@ async def normalize_offer_batch(
         _normalize_g2g_offer) BEFORE calling this function.
       • Storing quarantined offers in the quarantine log.
     """
+    # Import the module (not the name) so that `_alias_cache` is resolved
+    # via attribute lookup on every access. `_load_alias_cache()` rebinds the
+    # module-level `_alias_cache` to a new dict on each refresh; a direct
+    # `from ... import _alias_cache` would freeze our reference to the dict
+    # that existed at first import and silently miss every subsequent reload.
+    import db.server_resolver as _sr_module
     from db.server_resolver import (
         get_server_data,
         is_cache_loaded,
@@ -363,11 +369,24 @@ async def normalize_offer_batch(
             "(offers pass through without server_id resolution)"
         )
 
-    # ── Batch alias resolution (one DB round-trip for all offers) ─────────────
+    # ── Batch alias resolution (one DB round-trip for misses only) ────────────
+    # Fast path: check in-memory _alias_cache (populated from full DB load,
+    # refreshed every 60s) before touching the DB.  Only aliases absent from
+    # that cache go to resolve_server_batch.
     resolve_keys = _collect_resolve_keys(offers)
     alias_map: dict[str, int] = {}
-    if resolve_keys and pool is not None and cache_available:
-        alias_map = await resolve_server_batch(pool, resolve_keys)
+    if resolve_keys:
+        missing: list[tuple[str, str]] = []
+        for alias, src in resolve_keys:
+            lo = alias.lower().strip()
+            val = _sr_module._alias_cache.get(lo)
+            if val is not None:
+                alias_map[lo] = val
+            else:
+                missing.append((alias, src))
+        # Slow path: DB only for aliases not yet in the in-memory cache
+        if missing and pool is not None and cache_available:
+            alias_map.update(await resolve_server_batch(pool, missing))
 
     # ── Per-offer pipeline ────────────────────────────────────────────────────
     for offer in offers:
