@@ -822,7 +822,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, priceUnit = '
       <div
         ref={containerRef}
         className={styles.chart}
-        style={{ height: 240 }}
+        style={{ height: 300 }}
       />
 
       {empty && !loading && (
