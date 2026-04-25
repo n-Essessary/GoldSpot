@@ -53,8 +53,11 @@ export function _parseGroupLabel(serverSlug) {
  * Fetch live index + per-faction best ask from /price-index.
  * For faction=All: two requests (Alliance + Horde). Otherwise one request.
  * Returns per-faction fields; min_price is per-unit → ×1000 for per-1k display.
+ *
+ * AbortError (from an aborted `signal`) is always re-thrown so callers can
+ * distinguish cancellation from network failure. Other errors return null.
  */
-export async function fetchLivePrice(serverName, region, version, faction) {
+export async function fetchLivePrice(serverName, region, version, faction, { signal } = {}) {
   const matchEntry = (data, fac) =>
     (data.entries ?? []).find(e =>
       e.server_name.toLowerCase() === serverName.toLowerCase() &&
@@ -65,11 +68,12 @@ export async function fetchLivePrice(serverName, region, version, faction) {
 
   const fetchEntry = async fac => {
     try {
-      const res = await fetch(`${API_BASE}/price-index?faction=${fac}`)
+      const res = await fetch(`${API_BASE}/price-index?faction=${fac}`, { signal })
       if (!res.ok) return null
       const data = await res.json()
       return matchEntry(data, fac) ?? null
-    } catch {
+    } catch (err) {
+      if (err?.name === 'AbortError') throw err
       return null
     }
   }
@@ -100,7 +104,8 @@ export async function fetchLivePrice(serverName, region, version, faction) {
       alliance_sources:         faction === 'Alliance' ? (entry.sources ?? []) : [],
       horde_sources:            faction === 'Horde' ? (entry.sources ?? []) : [],
     }
-  } catch {
+  } catch (err) {
+    if (err?.name === 'AbortError') throw err
     return null
   }
 }
@@ -125,6 +130,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   const lastContextRef = useRef(null)
   const loadGenRef   = useRef(0)
   const loadGenContextKeyRef = useRef(null)
+  const abortRef    = useRef(null)
   const showPer1Ref = useRef(showPer1)
   const factionRef  = useRef(faction)
   const [period,  setPeriod]  = useState(PERIODS[2])   // 24H default
@@ -449,7 +455,10 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   }, [])
 
   // ── Загрузка данных ────────────────────────────────────────────────────────
-  const loadData = useCallback(async () => {
+  // `silent=true` — background refresh (refreshSignal): no spinner, keeps
+  // existing chart data on screen until new data arrives.
+  // `silent=false` — user action (realm/period/faction change): shows spinner.
+  const loadData = useCallback(async (silent = false) => {
     if (!serverSlug || serverSlug === 'all') return
     const contextKey = `${serverSlug}|${realmName}|${faction}|${period.label}|${showPer1}`
     if (loadGenContextKeyRef.current !== contextKey) {
@@ -457,7 +466,16 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       loadGenContextKeyRef.current = contextKey
     }
     const gen = loadGenRef.current
-    setLoading(true)
+
+    // Cancel any in-flight fetches from a previous loadData. Browser HTTP
+    // queue (6 conns/origin) would otherwise stall new requests behind old
+    // ones → 2–10s freeze on rapid realm/period switching.
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+    const signal = controller.signal
+
+    if (!silent) setLoading(true)
     try {
       const factionApi = normalizeFactionForApi(faction)
       let points = []
@@ -485,8 +503,8 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
             last:    String(period.points),
           })
           const [resA, resH] = await Promise.all([
-            fetch(`${API_BASE}/price-history?${mkParams('Alliance')}`),
-            fetch(`${API_BASE}/price-history?${mkParams('Horde')}`),
+            fetch(`${API_BASE}/price-history?${mkParams('Alliance')}`, { signal }),
+            fetch(`${API_BASE}/price-history?${mkParams('Horde')}`,    { signal }),
           ])
           const [dataA, dataH] = await Promise.all([
             resA.ok ? resA.json() : Promise.resolve({ points: [] }),
@@ -520,7 +538,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
             hours:   String(period.hours),
             last:    String(period.points),
           })
-          const res = await fetch(`${API_BASE}/price-history?${params}`)
+          const res = await fetch(`${API_BASE}/price-history?${params}`, { signal })
           if (res.ok) {
             const data = await res.json()
             // per-server endpoint returns ServerHistoryResponse with points[]
@@ -548,7 +566,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
           last_hours: String(period.hours),
           max_points: String(period.points),
         })
-        const res = await fetch(`${API_BASE}/price-history/ohlc?${params}`)
+        const res = await fetch(`${API_BASE}/price-history/ohlc?${params}`, { signal })
         if (!res.ok) {
           setLoading(false)
           return
@@ -575,7 +593,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
 
       // Append live point — always shows current price on right edge
       if (realmName && parsed) {
-        const live = await fetchLivePrice(realmName, parsed.region, parsed.version, factionApi)
+        const live = await fetchLivePrice(realmName, parsed.region, parsed.version, factionApi, { signal })
         if (loadGenRef.current !== gen) return
         if (live) {
           const nowTs = Math.floor(Date.now() / 1000)
@@ -739,14 +757,26 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
       }
 
       lastContextRef.current = contextKey
-    } catch {
+    } catch (err) {
+      // Abort is triggered by a newer loadData() — drop silently so we don't
+      // flip loading state or overwrite the pending request's view.
+      if (err?.name === 'AbortError') return
       // сетевой сбой — граф остаётся со старыми данными, loading скрывается
     } finally {
-      setLoading(false)
+      if (!signal.aborted) setLoading(false)
     }
   }, [serverSlug, realmName, faction, period, showPer1])
 
-  useEffect(() => { loadData() }, [loadData, refreshSignal])
+  // User action: realm / period / faction / unit change → show spinner.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { loadData(false) }, [serverSlug, realmName, faction, period, showPer1])
+
+  // Background refresh: periodic refreshSignal bump → update silently, keep
+  // zoom and existing data on screen until new data arrives.
+  useEffect(() => {
+    if (refreshSignal > 0) loadData(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshSignal])
 
   return (
     <div className={styles.wrapper}>
