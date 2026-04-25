@@ -2,7 +2,7 @@
 db/tiered_snapshots.py — 4-tier rolling price history storage.
 
 Tier schema (identical columns, different resolution/retention):
-  snapshots_1m — 1-min resolution, 24h rolling   (live writes, one per parser cycle)
+  snapshots_1m — 1-min resolution, 5m rolling    (write-only downsampling buffer)
   snapshots_5m — 5-min resolution, 30d rolling   (downsampled from 1m every 5 min)
   snapshots_1h — 1-hour resolution, 2y rolling   (downsampled from 5m every 5 min)
   snapshots_1d — 1-day resolution, forever        (downsampled from 1h every 5 min)
@@ -10,11 +10,13 @@ Tier schema (identical columns, different resolution/retention):
 Design principles:
   - All functions non-fatal: errors logged at WARNING, never propagated.
   - All DB access via get_pool() from db.writer — shared pool, no second connection.
-  - All writes use INSERT ON CONFLICT DO NOTHING (idempotent / safe to re-run).
+  - Downsampled writes use INSERT ON CONFLICT DO UPDATE SET — stale partial buckets
+    are overwritten on every run, so chart data is always fresh.
+  - write_snapshot_1m uses DO NOTHING (idempotent raw write, safe to re-run).
   - Downsampling windows overlap intentionally (last 10 min / 2h / 2d) to fill
     any bucket that was missed due to a restart or DB hiccup.
-  - query_tiered_history selects the coarsest tier that covers the requested
-    window, keeping query cost proportional to what the frontend actually needs.
+  - query_tiered_history routes: ≤7d → snapshots_5m, ≤30d → snapshots_1h, else
+    snapshots_1d. snapshots_1m is never read by the query layer.
 """
 from __future__ import annotations
 
@@ -123,7 +125,10 @@ async def downsample_1m_to_5m() -> None:
                 (server_id, faction, recorded_at, index_price, best_ask, sample_size)
             SELECT server_id, faction, bucket, index_price, best_ask, sample_size
             FROM agg
-            ON CONFLICT (server_id, faction, recorded_at) DO NOTHING
+            ON CONFLICT (server_id, faction, recorded_at) DO UPDATE SET
+                index_price = EXCLUDED.index_price,
+                best_ask    = EXCLUDED.best_ask,
+                sample_size = EXCLUDED.sample_size
             """
         )
         logger.debug("downsample_1m_to_5m: completed")
@@ -163,7 +168,10 @@ async def downsample_5m_to_1h() -> None:
                 (server_id, faction, recorded_at, index_price, best_ask, sample_size)
             SELECT server_id, faction, bucket, index_price, best_ask, sample_size
             FROM agg
-            ON CONFLICT (server_id, faction, recorded_at) DO NOTHING
+            ON CONFLICT (server_id, faction, recorded_at) DO UPDATE SET
+                index_price = EXCLUDED.index_price,
+                best_ask    = EXCLUDED.best_ask,
+                sample_size = EXCLUDED.sample_size
             """
         )
         logger.debug("downsample_5m_to_1h: completed")
@@ -203,7 +211,10 @@ async def downsample_1h_to_1d() -> None:
                 (server_id, faction, recorded_at, index_price, best_ask, sample_size)
             SELECT server_id, faction, bucket, index_price, best_ask, sample_size
             FROM agg
-            ON CONFLICT (server_id, faction, recorded_at) DO NOTHING
+            ON CONFLICT (server_id, faction, recorded_at) DO UPDATE SET
+                index_price = EXCLUDED.index_price,
+                best_ask    = EXCLUDED.best_ask,
+                sample_size = EXCLUDED.sample_size
             """
         )
         logger.debug("downsample_1h_to_1d: completed")
@@ -214,7 +225,13 @@ async def downsample_1h_to_1d() -> None:
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 
 async def cleanup_snapshots_1m() -> None:
-    """Delete snapshots_1m rows older than 24 hours (rolling window)."""
+    """Delete snapshots_1m rows older than 5 minutes (write-only downsampling buffer).
+
+    snapshots_1m is now a transient buffer: written each parser cycle, consumed by
+    downsample_1m_to_5m every 5 min, then discarded.  The 10-minute lookback in
+    downsample_1m_to_5m is the only reader — no query layer touches this table.
+    Keeping only 5 minutes of rows keeps row count under 50K at all times.
+    """
     from db.writer import get_pool
 
     pool = await get_pool()
@@ -225,7 +242,7 @@ async def cleanup_snapshots_1m() -> None:
         deleted = await pool.fetchval(
             "WITH d AS ("
             "  DELETE FROM snapshots_1m"
-            "  WHERE recorded_at < NOW() - INTERVAL '24 hours'"
+            "  WHERE recorded_at < NOW() - INTERVAL '5 minutes'"
             "  RETURNING 1"
             ") SELECT COUNT(*) FROM d"
         )
@@ -284,13 +301,14 @@ async def query_tiered_history(
     hours:      int,
     max_points: int = 500,
 ) -> list[dict]:
-    """Smart router: select the finest tier that still covers `hours`.
+    """Smart router: select the coarsest tier that covers `hours` at sufficient resolution.
 
     Tier selection:
-      hours ≤ 6     → snapshots_1m  (1-min resolution, 24h retention)
-      hours ≤ 72    → snapshots_5m  (5-min resolution, 30d retention)
-      hours ≤ 17520 → snapshots_1h  (1-hour resolution, 2y retention)
-      else          → snapshots_1d  (1-day resolution, forever)
+      hours ≤ 168   → snapshots_5m  (5-min resolution, 30d retention)   [24H, 7D]
+      hours ≤ 720   → snapshots_1h  (1-hour resolution, 2y retention)   [30D]
+      else          → snapshots_1d  (1-day resolution, forever)          [future 6M/1Y]
+
+    snapshots_1m is a write-only buffer (5-min retention); never used for reads.
 
     Returns list of dicts matching the /price-history response shape:
       {recorded_at, index_price, index_price_per_1k, best_ask, sample_size}
@@ -306,11 +324,9 @@ async def query_tiered_history(
 
     faction_db = _faction_to_db(faction)
 
-    if hours <= 6:
-        table = "snapshots_1m"
-    elif hours <= 72:         # 3 days — wider windows use 1h until 5m backfill is deep enough
+    if hours <= 168:          # 7 days — covers 24H and 7D UI timeframes
         table = "snapshots_5m"
-    elif hours <= 17_520:     # 2 years
+    elif hours <= 720:        # 30 days — covers 30D UI timeframe
         table = "snapshots_1h"
     else:
         table = "snapshots_1d"

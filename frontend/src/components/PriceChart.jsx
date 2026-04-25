@@ -19,8 +19,6 @@ function smoothData(data, window = 3) {
 }
 
 const PERIODS = [
-  { label: '1H',  hours: 1,   points: 200 },
-  { label: '6H',  hours: 6,   points: 300 },
   { label: '24H', hours: 24,  points: 400 },
   { label: '7D',  hours: 168, points: 500 },
   { label: '30D', hours: 720, points: 500 },
@@ -133,7 +131,7 @@ export function PriceChart({ serverSlug, refreshSignal, realmName, showPer1 = fa
   const abortRef    = useRef(null)
   const showPer1Ref = useRef(showPer1)
   const factionRef  = useRef(faction)
-  const [period,  setPeriod]  = useState(PERIODS[2])   // 24H default
+  const [period,  setPeriod]  = useState(PERIODS[0])   // 24H default
   const [loading, setLoading] = useState(false)
   const [empty,   setEmpty]   = useState(false)
   const [sources, setSources] = useState([])
