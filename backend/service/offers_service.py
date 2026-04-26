@@ -96,8 +96,6 @@ _QUARANTINE_MAX: int        = 500
 
 FUNPAY_INTERVAL = 60
 G2G_INTERVAL    = 30
-PA_CLASSIC_INTERVAL = 120
-PA_RETAIL_INTERVAL  = 180
 
 # ── Analytics constants ───────────────────────────────────────────────────────
 _OUTLIER_MULTIPLIER  = 3.0
@@ -1052,7 +1050,7 @@ async def _run_pa_classic_loop() -> None:
             logger.exception("PA Classic parser failed")
         finally:
             _running["playerauctions_classic"] = False
-        await asyncio.sleep(PA_CLASSIC_INTERVAL)
+        await asyncio.sleep(1800)
 
 
 async def _run_pa_retail_loop() -> None:
@@ -1116,7 +1114,7 @@ async def _run_pa_retail_loop() -> None:
             logger.exception("PA Retail parser failed")
         finally:
             _running["playerauctions_retail"] = False
-        await asyncio.sleep(PA_RETAIL_INTERVAL)
+        await asyncio.sleep(10800)
 
 
 async def start_background_parsers() -> None:
