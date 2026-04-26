@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -59,6 +60,8 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.playerauctions.com/",
 }
+
+_PROXY_URL = os.environ.get("PA_PROXY_URL")
 
 # Pagination + concurrency config — see _registry § PA.
 PA_CLASSIC_INTERVAL = 120
@@ -301,10 +304,11 @@ async def _fetch_html(
     Uses curl_cffi with Chrome 120 TLS impersonation per call (Cloudflare
     fingerprints datacenter `httpx` connections as bots).
     """
+    proxies = {"http": _PROXY_URL, "https": _PROXY_URL} if _PROXY_URL else None
     async with semaphore:
         for attempt in range(3):
             try:
-                resp = await session.get(url, impersonate="chrome120")
+                resp = await session.get(url, impersonate="chrome120", proxies=proxies)
                 status = resp.status_code
                 if status == 429:
                     if attempt < 2:
