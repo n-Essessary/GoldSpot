@@ -994,21 +994,14 @@ async def _run_pa_classic_loop() -> None:
     """
     from parser.playerauctions_parser import fetch_classic_offers
     from parser.playerauctions_parser import PA_SEMAPHORE
-    from parser.playerauctions_parser import HEADERS as _PA_HEADERS
     from service.normalize_pipeline import normalize_offer_batch
-    import httpx as _httpx
 
     while True:
         _running["playerauctions_classic"] = True
         t0 = asyncio.get_running_loop().time()
         try:
             sem = asyncio.Semaphore(PA_SEMAPHORE)
-            async with _httpx.AsyncClient(
-                headers=_PA_HEADERS,
-                timeout=_httpx.Timeout(20.0),
-                follow_redirects=True,
-            ) as client:
-                raw_offers = await fetch_classic_offers(client, sem)
+            raw_offers = await fetch_classic_offers(None, sem)
 
             if raw_offers:
                 raw_offers = [_normalize_pa_offer(o) for o in raw_offers]
@@ -1069,9 +1062,7 @@ async def _run_pa_retail_loop() -> None:
     """
     from parser.playerauctions_parser import fetch_retail_offers
     from parser.playerauctions_parser import PA_SEMAPHORE
-    from parser.playerauctions_parser import HEADERS as _PA_HEADERS
     from service.normalize_pipeline import normalize_offer_batch
-    import httpx as _httpx
 
     await asyncio.sleep(60)
     while True:
@@ -1079,12 +1070,7 @@ async def _run_pa_retail_loop() -> None:
         t0 = asyncio.get_running_loop().time()
         try:
             sem = asyncio.Semaphore(PA_SEMAPHORE)
-            async with _httpx.AsyncClient(
-                headers=_PA_HEADERS,
-                timeout=_httpx.Timeout(20.0),
-                follow_redirects=True,
-            ) as client:
-                raw_offers = await fetch_retail_offers(client, sem)
+            raw_offers = await fetch_retail_offers(None, sem)
 
             if raw_offers:
                 raw_offers = [_normalize_pa_offer(o) for o in raw_offers]

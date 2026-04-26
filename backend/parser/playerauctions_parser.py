@@ -5,7 +5,10 @@ Strategy:
   All offer data for a PA listing page is embedded as a JS variable
   `var offersModel = [...]` inside a <script> tag. We:
 
-    1. Fetch the listing page (no JS, plain aiohttp/httpx).
+    1. Fetch the listing page via curl_cffi with Chrome 120 TLS impersonation.
+       PA is fronted by Cloudflare and blocks Railway / general datacenter IPs
+       on plain httpx (HTTP 403 + JS challenge). curl_cffi spoofs the JA3/JA4
+       fingerprint of a real Chrome browser and passes the IP-reputation gate.
     2. Extract the offersModel array (regex + JSON.loads after key-quoting).
     3. Extract `pricePerUnitTail` to detect per-unit vs per-1k pricing.
     4. Walk the DOM via BeautifulSoup to map each offer_id → (server, faction).
@@ -34,8 +37,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-import httpx
 from bs4 import BeautifulSoup
+from curl_cffi.requests import AsyncSession
 
 from api.schemas import Offer
 
@@ -289,16 +292,21 @@ def parse_page(
 
 
 async def _fetch_html(
-    client: httpx.AsyncClient,
+    session: AsyncSession,
     url: str,
     semaphore: asyncio.Semaphore,
 ) -> str:
-    """Fetch one URL with retry/backoff. Returns '' on unrecoverable failure."""
+    """Fetch one URL with retry/backoff. Returns '' on unrecoverable failure.
+
+    Uses curl_cffi with Chrome 120 TLS impersonation per call (Cloudflare
+    fingerprints datacenter `httpx` connections as bots).
+    """
     async with semaphore:
         for attempt in range(3):
             try:
-                resp = await client.get(url)
-                if resp.status_code == 429:
+                resp = await session.get(url, impersonate="chrome120")
+                status = resp.status_code
+                if status == 429:
                     if attempt < 2:
                         ra = resp.headers.get("Retry-After", "30")
                         try:
@@ -310,29 +318,34 @@ async def _fetch_html(
                         )
                         await asyncio.sleep(retry_after)
                         continue
-                if resp.status_code >= 500:
+                if status >= 500:
                     if attempt < 2:
                         await asyncio.sleep(2 ** attempt)
                         continue
-                resp.raise_for_status()
+                if status >= 400:
+                    logger.error("PA: HTTP %d fetching %s", status, url)
+                    return ""
                 return resp.text
-            except httpx.TimeoutException:
+            except asyncio.TimeoutError:
                 if attempt < 2:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 logger.error("PA: timeout fetching %s", url)
                 return ""
-            except httpx.HTTPStatusError as exc:
-                logger.error("PA: HTTP %d fetching %s", exc.response.status_code, url)
-                return ""
             except Exception as exc:
+                # curl_cffi raises curl_cffi.requests.errors.RequestsError
+                # for transport / TLS / timeout failures — treat as transient
+                # on the first two attempts, then give up.
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
                 logger.error("PA: error fetching %s — %s", url, exc, exc_info=False)
                 return ""
         return ""
 
 
 async def _scrape_pages(
-    client: httpx.AsyncClient,
+    session: AsyncSession,
     semaphore: asyncio.Semaphore,
     url_template: str,
     version: str,
@@ -348,7 +361,7 @@ async def _scrape_pages(
     for page in range(1, max_pages + 1):
         url = url_template.format(p=page)
         try:
-            html = await _fetch_html(client, url, semaphore)
+            html = await _fetch_html(session, url, semaphore)
         except Exception as exc:
             logger.error("PA: fetch loop error %s — %s", url, exc)
             break
@@ -414,40 +427,52 @@ def _to_offer(raw: _RawPAOffer, fetched_at: datetime) -> Optional[Offer]:
 
 
 async def fetch_classic_offers(
-    client: httpx.AsyncClient,
+    client: AsyncSession | None,
     semaphore: asyncio.Semaphore,
 ) -> list[Offer]:
     """Fetch all Classic + MoP listing pages and emit Offer objects.
 
     Each version config is scraped concurrently; MoP runs alongside the per-
     version pages. No deduplication across versions — PA offer_ids are unique.
+
+    Note: the `client` parameter is kept for back-compat with the existing
+    offers_service loops which still construct an httpx client externally.
+    PA needs curl_cffi (Cloudflare blocks Railway datacenter IPs on plain
+    httpx), so this function ALWAYS creates its own AsyncSession internally
+    and ignores the passed-in `client`.
     """
     fetched_at = datetime.now(timezone.utc)
 
-    async def _classic_one(cfg: ClassicVersionConfig) -> list[_RawPAOffer]:
-        url = (
-            f"{BASE_URL}/wow-classic-gold/?Serverid={cfg.serverid}&PageIndex={{p}}"
-        )
-        return await _scrape_pages(
-            client, semaphore, url,
-            version=cfg.version,
-            config_region=cfg.region,
-            max_pages=PA_MAX_PAGES_CLASSIC,
-        )
+    async with AsyncSession(
+        headers=HEADERS,
+        timeout=_TIMEOUT,
+        impersonate="chrome120",
+    ) as session:
 
-    async def _mop() -> list[_RawPAOffer]:
-        url = f"{BASE_URL}{_MOP_PATH}?PageIndex={{p}}"
-        return await _scrape_pages(
-            client, semaphore, url,
-            version=_MOP_VERSION,
-            config_region=None,   # region from lv1
-            max_pages=PA_MAX_PAGES_CLASSIC,
-        )
+        async def _classic_one(cfg: ClassicVersionConfig) -> list[_RawPAOffer]:
+            url = (
+                f"{BASE_URL}/wow-classic-gold/?Serverid={cfg.serverid}&PageIndex={{p}}"
+            )
+            return await _scrape_pages(
+                session, semaphore, url,
+                version=cfg.version,
+                config_region=cfg.region,
+                max_pages=PA_MAX_PAGES_CLASSIC,
+            )
 
-    tasks: list = [_classic_one(c) for c in CLASSIC_VERSION_CONFIGS]
-    tasks.append(_mop())
+        async def _mop() -> list[_RawPAOffer]:
+            url = f"{BASE_URL}{_MOP_PATH}?PageIndex={{p}}"
+            return await _scrape_pages(
+                session, semaphore, url,
+                version=_MOP_VERSION,
+                config_region=None,   # region from lv1
+                max_pages=PA_MAX_PAGES_CLASSIC,
+            )
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+        tasks: list = [_classic_one(c) for c in CLASSIC_VERSION_CONFIGS]
+        tasks.append(_mop())
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
     raw_offers: list[_RawPAOffer] = []
     for i, r in enumerate(results):
         if isinstance(r, Exception):
@@ -471,7 +496,7 @@ async def fetch_classic_offers(
 
 
 async def fetch_retail_offers(
-    client: httpx.AsyncClient,
+    client: AsyncSession | None,
     semaphore: asyncio.Semaphore,
 ) -> list[Offer]:
     """Fetch Retail US + EU region pages, group by (server, faction), keep min.
@@ -479,20 +504,30 @@ async def fetch_retail_offers(
     Per-server Retail pages are JS-only on PA, so we scrape the region pages
     (which mix all servers) and reduce to the cheapest unit price per
     (server_name, faction) bucket. This produces one Offer per realm-faction.
+
+    Note: the `client` parameter is kept for back-compat with the existing
+    offers_service loops (see fetch_classic_offers docstring); we always
+    create our own curl_cffi AsyncSession internally and ignore it.
     """
     fetched_at = datetime.now(timezone.utc)
 
-    async def _retail_one(region: str, region_id: int) -> list[_RawPAOffer]:
-        url = f"{BASE_URL}/wow-gold/?Serverid={region_id}&PageIndex={{p}}"
-        return await _scrape_pages(
-            client, semaphore, url,
-            version=_RETAIL_VERSION,
-            config_region=region,
-            max_pages=PA_MAX_PAGES_RETAIL,
-        )
+    async with AsyncSession(
+        headers=HEADERS,
+        timeout=_TIMEOUT,
+        impersonate="chrome120",
+    ) as session:
 
-    tasks = [_retail_one(region, rid) for region, rid in _RETAIL_REGION_IDS.items()]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+        async def _retail_one(region: str, region_id: int) -> list[_RawPAOffer]:
+            url = f"{BASE_URL}/wow-gold/?Serverid={region_id}&PageIndex={{p}}"
+            return await _scrape_pages(
+                session, semaphore, url,
+                version=_RETAIL_VERSION,
+                config_region=region,
+                max_pages=PA_MAX_PAGES_RETAIL,
+            )
+
+        tasks = [_retail_one(region, rid) for region, rid in _RETAIL_REGION_IDS.items()]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
     raw_offers: list[_RawPAOffer] = []
     for i, r in enumerate(results):
@@ -526,19 +561,17 @@ async def fetch_offers() -> list[Offer]:
 
     Returns flat list of Offer. Never raises: returns [] on unrecoverable
     failure so the offers_service cache resilience guard preserves prior data.
+
+    Each child fetcher manages its own curl_cffi AsyncSession (Cloudflare
+    impersonation), so this entry point just orchestrates them concurrently.
     """
     semaphore = asyncio.Semaphore(PA_SEMAPHORE)
     try:
-        async with httpx.AsyncClient(
-            headers=HEADERS,
-            timeout=httpx.Timeout(_TIMEOUT),
-            follow_redirects=True,
-        ) as client:
-            classic_task = fetch_classic_offers(client, semaphore)
-            retail_task = fetch_retail_offers(client, semaphore)
-            classic_offers, retail_offers = await asyncio.gather(
-                classic_task, retail_task, return_exceptions=False,
-            )
+        classic_task = fetch_classic_offers(None, semaphore)
+        retail_task = fetch_retail_offers(None, semaphore)
+        classic_offers, retail_offers = await asyncio.gather(
+            classic_task, retail_task, return_exceptions=False,
+        )
         all_offers = list(classic_offers) + list(retail_offers)
         logger.info(
             "PA fetch_offers: %d total (classic=%d retail=%d)",
