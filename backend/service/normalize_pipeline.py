@@ -272,8 +272,10 @@ def _build_alias_key(offer: "Offer") -> Optional[str]:
             return f"{offer.server_name} [{region} - {version}] - {offer.faction}"
         return None
 
-    # ── FunPay: reconstruct from display_server + server_name ─────────────────
-    if offer.source == "funpay":
+    # ── FunPay / PlayerAuctions: reconstruct from display_server + server_name
+    # Both sources arrive with a canonical "(REGION) Version" group label after
+    # Phase 0 normalisation, so the alias key has the same shape.
+    if offer.source in ("funpay", "playerauctions"):
         ds = (offer.display_server or "").strip()
         m = _DISPLAY_RE.match(ds.upper()) or _DISPLAY_RE.match(ds)
         if not m:

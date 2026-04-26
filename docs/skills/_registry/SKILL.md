@@ -129,12 +129,14 @@ Any deviation in separator, regex, or `group=0` omission → 0 results or wrong 
 
 ## 6. Parser Cycle Configuration
 
-| Source           | Interval     | Semaphore | Startup Delay | Notes                              |
-|------------------|--------------|-----------|---------------|------------------------------------|
-| funpay           | 50–70s jitter| —         | 0             | Single GET, no concurrency         |
-| g2g_classic      | 30s          | 20        | 0             | Dual-sort via `gather()`           |
-| g2g_retail_lp    | 60s          | 30        | 0             | `lowest_price` only                |
-| g2g_retail_rec   | 180–300s     | 20        | 90s           | `recommended_v2` only              |
+| Source              | Interval     | Semaphore | Startup Delay | Notes                                            |
+|---------------------|--------------|-----------|---------------|--------------------------------------------------|
+| funpay              | 50–70s jitter| —         | 0             | Single GET, no concurrency                       |
+| g2g_classic         | 30s          | 20        | 0             | Dual-sort via `gather()`                         |
+| g2g_retail_lp       | 60s          | 30        | 0             | `lowest_price` only                              |
+| g2g_retail_rec      | 180–300s     | 20        | 90s           | `recommended_v2` only                            |
+| pa_classic          | 120s         | 10        | 0             | Classic-version configs + MoP                    |
+| pa_retail           | 180s         | 10        | 60s           | Region pages (US+EU); group by (server,faction)  |
 
 **Pagination:** Phase 1 paginates until `len(results) < page_size` or `page > max_pages`.
 - `g2g_classic` → `max_pages = 10`, `page_size = 48`
@@ -163,6 +165,71 @@ Pricing:   raw_price_unit = "per_lot", lot_size = amount_gold
 3. ❌ `frankfurter.app` — **blocked on Railway, never use**
 
 **Source of truth in code:** `backend/parser/funpay_parser.py`
+
+---
+
+## 7.1 PlayerAuctions (PA) Configuration
+
+```
+BASE_URL:  https://www.playerauctions.com
+Anti-bot:  Cloudflare Analytics beacon only (no WAF) — plain httpx works.
+Headers:   User-Agent + Accept (text/html) + Accept-Language + Referer (PA root)
+Data:      offersModel JS variable embedded in listing HTML (SSR).
+```
+
+**Classic-category page (`/wow-classic-gold/?Serverid={sid}&PageIndex={n}`):**
+
+| serverid | version             | region |
+|----------|---------------------|--------|
+| 14149    | Anniversary         | US     |
+| 14156    | Anniversary         | EU     |
+| 13551    | Season of Discovery | US     |
+| 13553    | Season of Discovery | EU     |
+| 8582     | Classic Era         | US     |
+| 8583     | Classic Era         | EU     |
+| 13457    | Hardcore            | US     |
+| 13462    | Hardcore            | EU     |
+
+Skipped (0 offers): AU Anniversary, OC Classic Era, OC Hardcore, CN Titan.
+
+**MoP page:** `/wow-expansion-classic-gold/?PageIndex={n}` — no Serverid; mixes
+US + EU + Oceania. Region comes from lv1 (`Oceania → OC`).
+
+**Retail pages:** `/wow-gold/?Serverid={region_id}&PageIndex={n}`
+- US: `11353`
+- EU: `11354`
+
+Per-server Retail Serverids are JS-only. Group all region-page rows by
+`(server_name, faction)` and keep the cheapest per group.
+
+**Pricing model:**
+```
+pricePerUnitTail contains "K" → raw_price_unit = "per_1k"  (Retail)
+otherwise                       → raw_price_unit = "per_unit"  (Classic/SoD/HC/Anniversary/MoP)
+```
+Detection: `"K" in pricePerUnitTail`, not equality with `/K Gold`.
+
+**Cycle config:**
+```
+PA_CLASSIC_INTERVAL = 120s
+PA_RETAIL_INTERVAL  = 180s
+PA_SEMAPHORE        = 10
+PA_MAX_PAGES_CLASSIC = 20  (pagination stop: len(offersModel) < 30)
+PA_MAX_PAGES_RETAIL  = 110
+```
+
+**Offer mapping:**
+```
+id = "pa_{offer_id}"
+seller = "playerauctions"          (no per-seller identity in offersModel)
+amount_gold = 1000                 (PA does not specify per-offer gold qty)
+lot_size = 1
+display_server = ""                (set by _apply_canonical via Phase 0+1)
+raw_title = "(REGION) Version - ServerName - Faction"   (used for alias key)
+```
+
+**Source of truth in code:** `backend/parser/playerauctions_parser.py`,
+`backend/service/offers_service.py::_normalize_pa_offer / _run_pa_*_loop`.
 
 ---
 

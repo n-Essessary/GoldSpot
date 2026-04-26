@@ -59,12 +59,34 @@ _GROUP_RE = re.compile(r"^\([A-Z]{2,}\)\s+\S", re.ASCII)
 logger = logging.getLogger(__name__)
 
 # ── Per-source state ──────────────────────────────────────────────────────────
-_cache:         dict[str, list[Offer]]        = {"funpay": [], "g2g": [], "g2g_retail": [], "g2g_retail_low": [], "g2g_retail_rec": []}
-_last_update:   dict[str, Optional[datetime]] = {"funpay": None, "g2g": None, "g2g_retail": None}
-_running:       dict[str, bool]               = {"funpay": False, "g2g": False, "g2g_retail": False}
-_cache_version: dict[str, int]               = {"funpay": 0, "g2g": 0, "g2g_retail": 0}
-_last_error:    dict[str, Optional[str]]      = {"funpay": None, "g2g": None, "g2g_retail": None}
-_cache_initialized: dict[str, bool]          = {"funpay": False, "g2g": False, "g2g_retail": False}
+# PA has two cycles (classic + retail) with separate intervals, plus combined
+# sub-caches that get merged into _cache["playerauctions"] for the public read
+# path — same pattern as g2g_retail_low / g2g_retail_rec.
+_cache:         dict[str, list[Offer]]        = {
+    "funpay": [], "g2g": [],
+    "g2g_retail": [], "g2g_retail_low": [], "g2g_retail_rec": [],
+    "playerauctions": [], "playerauctions_classic": [], "playerauctions_retail": [],
+}
+_last_update:   dict[str, Optional[datetime]] = {
+    "funpay": None, "g2g": None, "g2g_retail": None,
+    "playerauctions": None,
+}
+_running:       dict[str, bool]               = {
+    "funpay": False, "g2g": False, "g2g_retail": False,
+    "playerauctions_classic": False, "playerauctions_retail": False,
+}
+_cache_version: dict[str, int]               = {
+    "funpay": 0, "g2g": 0, "g2g_retail": 0,
+    "playerauctions": 0,
+}
+_last_error:    dict[str, Optional[str]]      = {
+    "funpay": None, "g2g": None, "g2g_retail": None,
+    "playerauctions": None,
+}
+_cache_initialized: dict[str, bool]          = {
+    "funpay": False, "g2g": False, "g2g_retail": False,
+    "playerauctions": False,
+}
 
 # ── Quarantine ring buffer ────────────────────────────────────────────────────
 # Offers that failed the normalize pipeline are logged here for admin inspection.
@@ -74,6 +96,8 @@ _QUARANTINE_MAX: int        = 500
 
 FUNPAY_INTERVAL = 60
 G2G_INTERVAL    = 30
+PA_CLASSIC_INTERVAL = 120
+PA_RETAIL_INTERVAL  = 180
 
 # ── Analytics constants ───────────────────────────────────────────────────────
 _OUTLIER_MULTIPLIER  = 3.0
@@ -110,6 +134,20 @@ def _merge_retail_caches() -> list[Offer]:
     seen: set[str] = set()
     result: list[Offer] = []
     for o in _cache["g2g_retail_low"] + _cache["g2g_retail_rec"]:
+        if o.id not in seen:
+            seen.add(o.id)
+            result.append(o)
+    return result
+
+
+def _merge_pa_caches() -> list[Offer]:
+    """Combine PA classic + retail sub-caches with dedup by offer_id.
+    Same shape as _merge_retail_caches: each sub-cache is fully replaced per
+    cycle, never accumulating stale offers.
+    """
+    seen: set[str] = set()
+    result: list[Offer] = []
+    for o in _cache["playerauctions_classic"] + _cache["playerauctions_retail"]:
         if o.id not in seen:
             seen.add(o.id)
             result.append(o)
@@ -292,6 +330,52 @@ def _normalize_g2g_offer(offer: Offer) -> Offer:
     return offer
 
 
+def _normalize_pa_offer(offer: Offer) -> Offer:
+    """Pre-normalize a PlayerAuctions offer's display_server before Phase 1.
+
+    PA's parser leaves display_server="" and stashes the source region+version
+    in raw_title as "(REGION) Version - ServerName - Faction". Here we extract
+    the region and version, canonicalize the version string via _VERSION_ALIASES,
+    and set display_server="(REGION) Version" so _build_alias_key (FunPay-style
+    branch) can construct a stable lookup key.
+
+    The canonical pipeline (_apply_canonical) overwrites display_server again
+    once the alias resolves to a server_id, picking the canonical region,
+    version, and any "· Hardcore" suffix from the registry.
+    """
+    raw = (offer.raw_title or "").strip()
+    if not raw:
+        return offer
+
+    # raw_title shape from PA parser: "(REGION) Version - ServerName - Faction"
+    m = re.match(
+        r"^\((?P<region>[A-Za-z]{2,})\)\s*(?P<rest>.+)$",
+        raw,
+    )
+    if not m:
+        return offer
+
+    region = m.group("region").upper()
+    body   = m.group("rest").strip()
+
+    # Body is "Version - ServerName - Faction". Strip the trailing
+    # " - Faction" first (faction is the very last segment), then the
+    # remaining " - ServerName" leaves just the version.
+    if " - " in body:
+        version_and_server, _trailing_faction = body.rsplit(" - ", 1)
+    else:
+        version_and_server = body
+
+    if " - " in version_and_server:
+        version_raw, _server = version_and_server.split(" - ", 1)
+    else:
+        version_raw = version_and_server
+
+    version = _canonicalize_version(version_raw.strip())
+    offer.display_server = f"({region}) {version}"
+    return offer
+
+
 def _version_rank(display_server: str) -> int:
     """Return sort rank for display_server string.
 
@@ -330,19 +414,31 @@ def _game_version_from_display(display_server: str) -> str:
 # ── Public cache read ─────────────────────────────────────────────────────────
 
 def get_all_offers() -> list[Offer]:
-    return _cache["funpay"] + _cache["g2g"] + _cache["g2g_retail"]
+    return (
+        _cache["funpay"]
+        + _cache["g2g"]
+        + _cache["g2g_retail"]
+        + _cache["playerauctions"]
+    )
 
 
 def get_parser_status() -> dict:
+    # `running` for PA aggregates the two sub-loops: True if either is active.
     return {
         src: {
             "offers":      len(_cache[src]),
             "last_update": _last_update[src].isoformat() if _last_update[src] else None,
-            "running":     _running[src],
+            "running": (
+                _running.get(src, False) if src != "playerauctions"
+                else (
+                    _running.get("playerauctions_classic", False)
+                    or _running.get("playerauctions_retail", False)
+                )
+            ),
             "version":     _cache_version[src],
             "last_error":  _last_error[src],
         }
-        for src in ("funpay", "g2g", "g2g_retail")
+        for src in ("funpay", "g2g", "g2g_retail", "playerauctions")
     }
 
 
@@ -892,13 +988,162 @@ async def _run_g2g_retail_rec_loop() -> None:
         await asyncio.sleep(interval)
 
 
+async def _run_pa_classic_loop() -> None:
+    """PlayerAuctions Classic + MoP loop. Runs every PA_CLASSIC_INTERVAL.
+    Merges into _cache["playerauctions"] alongside the retail sub-cache.
+    """
+    from parser.playerauctions_parser import fetch_classic_offers
+    from parser.playerauctions_parser import PA_SEMAPHORE
+    from parser.playerauctions_parser import HEADERS as _PA_HEADERS
+    from service.normalize_pipeline import normalize_offer_batch
+    import httpx as _httpx
+
+    while True:
+        _running["playerauctions_classic"] = True
+        t0 = asyncio.get_running_loop().time()
+        try:
+            sem = asyncio.Semaphore(PA_SEMAPHORE)
+            async with _httpx.AsyncClient(
+                headers=_PA_HEADERS,
+                timeout=_httpx.Timeout(20.0),
+                follow_redirects=True,
+            ) as client:
+                raw_offers = await fetch_classic_offers(client, sem)
+
+            if raw_offers:
+                raw_offers = [_normalize_pa_offer(o) for o in raw_offers]
+                from db.writer import get_pool
+                pool = await get_pool()
+                offers, quarantined = await normalize_offer_batch(raw_offers, pool)
+                _add_to_quarantine(quarantined)
+                if quarantined:
+                    logger.info(
+                        "PA Classic quarantined %d offers (reasons: %s)",
+                        len(quarantined),
+                        ", ".join({q.reason for q in quarantined}),
+                    )
+
+                if not offers and _cache_initialized["playerauctions"]:
+                    _last_error["playerauctions"] = "empty_after_normalize"
+                    elapsed = asyncio.get_running_loop().time() - t0
+                    logger.warning(
+                        "PA Classic normalize returned 0 offers in %.1fs — "
+                        "keeping %d cached",
+                        elapsed, len(_cache["playerauctions"]),
+                    )
+                else:
+                    _cache["playerauctions_classic"] = offers
+                    merged = _merge_pa_caches()
+                    _cache["playerauctions"] = merged
+                    _cache_initialized["playerauctions"] = True
+                    _cache_version["playerauctions"] += 1
+                    _last_update["playerauctions"] = datetime.now(timezone.utc)
+                    _last_error["playerauctions"] = None
+                    elapsed = asyncio.get_running_loop().time() - t0
+                    logger.info(
+                        "PA Classic updated: %d offers (%d quarantined) in %.1fs",
+                        len(merged), len(quarantined), elapsed,
+                    )
+                    asyncio.create_task(_snapshot_all_servers())
+            elif _cache_initialized["playerauctions"]:
+                _last_error["playerauctions"] = "empty_result"
+                logger.warning(
+                    "PA Classic returned 0 — keeping %d cached",
+                    len(_cache["playerauctions"]),
+                )
+            else:
+                _last_error["playerauctions"] = "empty_cold_start"
+                logger.warning("PA Classic returned 0 on cold start")
+        except Exception as e:
+            _last_error["playerauctions"] = type(e).__name__
+            logger.exception("PA Classic parser failed")
+        finally:
+            _running["playerauctions_classic"] = False
+        await asyncio.sleep(PA_CLASSIC_INTERVAL)
+
+
+async def _run_pa_retail_loop() -> None:
+    """PlayerAuctions Retail loop. Runs every PA_RETAIL_INTERVAL.
+    Startup delay of 60s avoids overlapping with the first classic cycle.
+    Merges into _cache["playerauctions"] alongside the classic sub-cache.
+    """
+    from parser.playerauctions_parser import fetch_retail_offers
+    from parser.playerauctions_parser import PA_SEMAPHORE
+    from parser.playerauctions_parser import HEADERS as _PA_HEADERS
+    from service.normalize_pipeline import normalize_offer_batch
+    import httpx as _httpx
+
+    await asyncio.sleep(60)
+    while True:
+        _running["playerauctions_retail"] = True
+        t0 = asyncio.get_running_loop().time()
+        try:
+            sem = asyncio.Semaphore(PA_SEMAPHORE)
+            async with _httpx.AsyncClient(
+                headers=_PA_HEADERS,
+                timeout=_httpx.Timeout(20.0),
+                follow_redirects=True,
+            ) as client:
+                raw_offers = await fetch_retail_offers(client, sem)
+
+            if raw_offers:
+                raw_offers = [_normalize_pa_offer(o) for o in raw_offers]
+                from db.writer import get_pool
+                pool = await get_pool()
+                offers, quarantined = await normalize_offer_batch(raw_offers, pool)
+                _add_to_quarantine(quarantined)
+                if quarantined:
+                    logger.info(
+                        "PA Retail quarantined %d offers (reasons: %s)",
+                        len(quarantined),
+                        ", ".join({q.reason for q in quarantined}),
+                    )
+
+                if not offers and _cache_initialized["playerauctions"]:
+                    elapsed = asyncio.get_running_loop().time() - t0
+                    logger.warning(
+                        "PA Retail normalize returned 0 offers in %.1fs — "
+                        "keeping %d cached",
+                        elapsed, len(_cache["playerauctions"]),
+                    )
+                else:
+                    _cache["playerauctions_retail"] = offers
+                    merged = _merge_pa_caches()
+                    _cache["playerauctions"] = merged
+                    _cache_initialized["playerauctions"] = True
+                    _cache_version["playerauctions"] += 1
+                    _last_update["playerauctions"] = datetime.now(timezone.utc)
+                    elapsed = asyncio.get_running_loop().time() - t0
+                    logger.info(
+                        "PA Retail updated: %d offers (%d quarantined) in %.1fs",
+                        len(merged), len(quarantined), elapsed,
+                    )
+                    asyncio.create_task(_snapshot_all_servers())
+            elif _cache_initialized["playerauctions"]:
+                logger.warning(
+                    "PA Retail returned 0 — keeping %d cached",
+                    len(_cache["playerauctions"]),
+                )
+            else:
+                logger.warning("PA Retail returned 0 on cold start")
+        except Exception:
+            logger.exception("PA Retail parser failed")
+        finally:
+            _running["playerauctions_retail"] = False
+        await asyncio.sleep(PA_RETAIL_INTERVAL)
+
+
 async def start_background_parsers() -> None:
-    """Start background FunPay, G2G Classic/MoP, and G2G Retail loops."""
+    """Start background FunPay, G2G Classic/MoP, G2G Retail, and PA loops."""
     asyncio.create_task(_run_funpay_loop())
     asyncio.create_task(_run_g2g_loop())
     asyncio.create_task(_run_g2g_retail_loop())
     asyncio.create_task(_run_g2g_retail_rec_loop())
-    logger.info("Background parsers started (funpay + g2g + g2g_retail x2)")
+    asyncio.create_task(_run_pa_classic_loop())
+    asyncio.create_task(_run_pa_retail_loop())
+    logger.info(
+        "Background parsers started (funpay + g2g + g2g_retail x2 + pa x2)"
+    )
 
 
 # ── Public read API ───────────────────────────────────────────────────────────
@@ -1011,7 +1256,12 @@ def get_offers(
     sort_by: str = "price",
     server_name: str | None = None,
 ) -> list[Offer]:
-    result = _cache["funpay"] + _cache["g2g"] + _cache["g2g_retail"]
+    result = (
+        _cache["funpay"]
+        + _cache["g2g"]
+        + _cache["g2g_retail"]
+        + _cache["playerauctions"]
+    )
 
     if server:
         result = [o for o in result if _clean(o.display_server) == _clean(server)]
