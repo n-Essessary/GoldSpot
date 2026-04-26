@@ -47,6 +47,13 @@ CHIP_CONFIGS: list[ChipConfig] = [
     ChipConfig(25,  "US",       "Retail",       "WoW Retail US (incl. OCE servers)"),
 ]
 
+_RU_RETAIL_SERVERS: frozenset[str] = frozenset({
+    "Ashenvale", "Azuregos", "Blackscar", "Booty Bay", "Borean Tundra",
+    "Deathguard", "Deathweaver", "Deephome", "Eversong", "Fordragon",
+    "Galakrond", "Goldrinn", "Gordunni", "Greymane", "Grom",
+    "Howling Fjord", "Lich King", "Razuvious", "Soulflayer", "Thermaplugg",
+})
+
 # ── Online-фильтр ────────────────────────────────────────────────────────────
 # Значения data-online, которые считаются «онлайн»
 _ONLINE_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes"})
@@ -532,9 +539,15 @@ async def _fetch_chip(config: ChipConfig) -> list[Offer]:
         for offer in raw_offers:
             bare = (offer.display_server or "").strip()
             if bare:
-                offer.display_server = (
-                    f"({config.region}) {config.game_version} - {bare}"
-                )
+                if (
+                    config.chip_id == 2
+                    and config.game_version == "Retail"
+                    and bare in _RU_RETAIL_SERVERS
+                ):
+                    region = "RU"
+                else:
+                    region = config.region
+                offer.display_server = f"({region}) {config.game_version} - {bare}"
             else:
                 offer.display_server = f"({config.region}) {config.game_version}"
 
